@@ -175,6 +175,16 @@ watch plist, or a plain image as is) and exposes it as the chat's
 Non-photo posters (colour, gradient, emoji) have not been seen yet; they
 would come out with `path: null`.
 
+Seen 2026-10-17 with `imsg import-mac --backgrounds` (10 chats with a
+background on one Mac): the zip posters are not always stored. One Photos
+poster (2.3 MB) is a **deflate-compressed** zip (method 8 for every entry,
+`portrait-layer_background.HEIC` included, plus `input.segmentation/`
+with `proxy.heic` and `Adjusted.JPG`), which the daemon's stored-zip
+reader does not open; another (6 KB) has only plists and no
+`contents/<uuid>/` directory at all (a non-photo poster). Both have a
+`-watchBackground` sibling whose PNG the daemon reads, so the importer
+falls back to it when the poster yields no picture.
+
 Sending: rustpush can build the message
 (`SetTranscriptBackgroundMessage::from_mmcs(MMCSFile::new(..))`), but the
 payload has to be a PosterKit archive that iPhones accept; we have not

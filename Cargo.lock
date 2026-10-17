@@ -2192,6 +2192,7 @@ dependencies = [
  "libc",
  "log",
  "open-absinthe",
+ "plist",
  "rpassword",
  "serde",
  "serde_json",

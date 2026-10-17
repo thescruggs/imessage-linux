@@ -34,3 +34,5 @@ toml = "0.8"
 # bus. Dev-only: `cargo tree -p imsg -e normal` stays free of rustpush.
 imessaged = { path = "../imessaged" }
 tempfile = "3"
+# Synthetic chat.db `properties` fixtures for the background exporter tests.
+plist.workspace = true
