@@ -132,6 +132,7 @@ fn incoming(id: &str, at: u64, text: &str) -> EngineEvent {
             reactions: vec![],
             effect: None,
             verified: true,
+            service: Default::default(),
         },
         chat: Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None },
         attachments: vec![],
@@ -370,5 +371,30 @@ async fn doctor_reports_daemon() {
     assert_eq!(get("hwconfig")["level"], "FAIL");
     assert_eq!(get("anisette")["level"], "WARN");
     assert_eq!(o.code, 1);
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sms_enable_status_and_send() {
+    let Some(h) = Harness::logged_in().await else { return };
+    h.mock.set_other_handles(vec!["tel:+15555550100".into()]);
+    let o = h.run(&["sms", "status"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stdout.contains("state   off"), "{}", o.stdout);
+    let o = h.run(&["sms", "enable"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stdout.contains("requested (via +15555550100)"), "{}", o.stdout);
+    assert!(o.stderr.contains("Text Message Forwarding"), "{}", o.stderr);
+    let o = h.run(&["status", "--json"]).await;
+    assert_eq!(o.json()["sms"]["state"], "requested");
+    h.mock.activate_sms("tel:+15555550100");
+    let o = h.run(&["send", "--sms", "+1 555 555 0123", "via", "the", "phone"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stdout.contains("as a text message"), "{}", o.stdout);
+    assert!(h.mock.calls().iter().any(|c| matches!(c, MockCall::SendSms { text: Some(t), .. } if t == "via the phone")));
+    let o = h.run(&["messages", "+15555550123"]).await;
+    assert!(o.stdout.contains("[SMS]"), "{}", o.stdout);
+    let o = h.run(&["sms", "disable", "--json"]).await;
+    assert_eq!(o.json()["state"], "off");
     h.shutdown().await;
 }

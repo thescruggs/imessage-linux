@@ -91,6 +91,16 @@ fn parse_json_strings(what: &str, s: &str) -> Result<Vec<String>> {
     serde_json::from_str(s).map_err(|e| DaemonError::InvalidInput(format!("{what}: expected a JSON array of strings ({e})")))
 }
 
+/// `""` / `"auto"` = let the daemon choose.
+fn parse_service(s: &str) -> Result<Option<imessage_common::model::Service>> {
+    match s.trim() {
+        "" | "auto" => Ok(None),
+        other => imessage_common::model::Service::parse(other)
+            .map(Some)
+            .ok_or_else(|| DaemonError::InvalidInput(format!("service: expected \"auto\", \"imessage\" or \"sms\", not {other:?}"))),
+    }
+}
+
 fn outcome(o: LoginOutcome) -> String {
     match o {
         LoginOutcome::Ok => "ok",
@@ -151,6 +161,34 @@ impl Daemon1 {
         let participants = parse_json_strings("participants_json", participants_json)?;
         let target = Hub::target(chat_id_or_empty, &participants)?;
         Ok(to_json(&self.hub.send_file(target, path, mime).await?))
+    }
+
+    /// `SendText` over a chosen service: `service` = `""` / `"auto"` (as
+    /// SendText: SMS when Text Message Forwarding is active and the
+    /// recipient is not on iMessage), `"imessage"` or `"sms"`.
+    async fn send_text_as(&self, chat_id_or_empty: &str, participants_json: &str, text: &str, reply_to: &str, service: &str) -> Result<String> {
+        let participants = parse_json_strings("participants_json", participants_json)?;
+        let target = Hub::target(chat_id_or_empty, &participants)?;
+        let reply_to = (!reply_to.trim().is_empty()).then(|| imessage_common::model::MessageId::new(reply_to.trim()));
+        Ok(to_json(&self.hub.send_text_as(target, text, reply_to, parse_service(service)?).await?))
+    }
+
+    /// `SendFile` over a chosen service (see SendTextAs; `"sms"` = MMS).
+    async fn send_file_as(&self, chat_id_or_empty: &str, participants_json: &str, path: &str, mime: &str, service: &str) -> Result<String> {
+        let participants = parse_json_strings("participants_json", participants_json)?;
+        let target = Hub::target(chat_id_or_empty, &participants)?;
+        Ok(to_json(&self.hub.send_file_as(target, path, mime, parse_service(service)?).await?))
+    }
+
+    /// Ask the iPhone to relay text messages here (`true`) or stop.
+    /// -> SmsForwarding JSON.
+    async fn enable_sms_forwarding(&self, enable: bool) -> Result<String> {
+        Ok(to_json(&self.hub.enable_sms_forwarding(enable).await?))
+    }
+
+    /// -> SmsForwarding JSON (also in GetStatus).
+    async fn get_sms_forwarding(&self) -> String {
+        to_json(&self.hub.sms_forwarding().await)
     }
 
     async fn react(&self, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> Result<()> {
@@ -249,6 +287,10 @@ impl Daemon1 {
     /// HandleProfile JSON or `null` (they stopped sharing).
     #[zbus(signal)]
     async fn handle_profile_updated(emitter: &SignalEmitter<'_>, handle: &str, profile_json: &str) -> zbus::Result<()>;
+
+    /// Text Message Forwarding changed; `state_json` is SmsForwarding JSON.
+    #[zbus(signal)]
+    async fn sms_forwarding_changed(emitter: &SignalEmitter<'_>, state_json: &str) -> zbus::Result<()>;
 }
 
 /// Emits [`DaemonSignal`]s on the bus.
@@ -274,6 +316,7 @@ impl Emitter {
             DaemonSignal::TwoFactorRequired => Daemon1::two_factor_required(e).await,
             DaemonSignal::BackgroundError(m) => Daemon1::background_error(e, m).await,
             DaemonSignal::HandleProfileUpdated { handle, profile } => Daemon1::handle_profile_updated(e, handle, &to_json(profile)).await,
+            DaemonSignal::SmsForwardingChanged(s) => Daemon1::sms_forwarding_changed(e, &to_json(s)).await,
         };
         if let Err(err) = r {
             log::debug!("D-Bus signal not sent: {err}");

@@ -3,11 +3,11 @@
 
 use imessage_common::model::{
     Attachment, AttachmentId, Chat, ChatId, DeliveryReceipt, DeliveryState, Handle, Message, MessageId, MessagePart,
-    Reaction, ReactionKind, ReadReceipt, TypingEvent,
+    Reaction, ReactionKind, ReadReceipt, Service, TypingEvent,
 };
 use rustpush::{
     Attachment as RpAttachment, AttachmentType, ConversationData, IndexedMessagePart, MMCSFile, Message as RpMessage, MessageInst,
-    MessagePart as RpMessagePart, MessageParts, NormalMessage, ReactMessageType, Reaction as RpReaction,
+    MessagePart as RpMessagePart, MessageParts, MessageType, NormalMessage, ReactMessageType, Reaction as RpReaction,
     SetTranscriptBackgroundMessage, ShareProfileMessage, SharedPoster,
 };
 
@@ -89,6 +89,61 @@ pub fn membership_chat_id(conv: &ConversationData, new_participants: &[String], 
         }
     }
     Some(chat_id_for(&union, sender, my_handles)).filter(ChatId::is_group)
+}
+
+/// The chat a text message (SMS / MMS / RCS relayed by our iPhone) with
+/// these other parties belongs to: the 1:1 chat with the number (shared
+/// with an iMessage conversation with the same number), or for a group
+/// text, `group-p:` + the sorted numbers (group texts have no group id).
+pub fn sms_chat_id(others: &[String]) -> ChatId {
+    match others {
+        [one] => ChatId::direct(one),
+        _ => ChatId::group_by_participants(others),
+    }
+}
+
+/// `(using_number, from_handle)` if `inst` is a text message relayed by
+/// our iPhone (`from_handle` = the real sender of an incoming one, `None`
+/// for one we sent from any device).
+pub fn sms_parts(inst: &MessageInst) -> Option<(&str, Option<&str>)> {
+    match &inst.message {
+        RpMessage::Message(NormalMessage { service: MessageType::SMS { using_number, from_handle, .. }, .. }) => {
+            Some((using_number.as_str(), from_handle.as_deref()))
+        }
+        _ => None,
+    }
+}
+
+/// The chat of a text message: everyone but us (our relay number and
+/// handles), see [`sms_chat_id`]. A text to ourselves is the chat with
+/// our number.
+fn sms_chat(inst: &MessageInst, my_handles: &[String], last_message_at: Option<u64>) -> Option<Chat> {
+    let (using, from) = sms_parts(inst)?;
+    let mut all: Vec<String> = inst.conversation.as_ref().map(|c| c.participants.clone()).unwrap_or_default();
+    all.extend(from.map(str::to_string));
+    let mut mine = my_handles.to_vec();
+    mine.push(using.to_string());
+    let others = others(&all, &mine);
+    let others = if others.is_empty() { vec![Handle::normalize(from.unwrap_or(using))] } else { others };
+    let id = sms_chat_id(&others);
+    Some(Chat {
+        is_group: id.is_group(),
+        id,
+        participants: others.iter().map(|p| Handle::new(p)).collect(),
+        display_name: None,
+        last_message_at,
+        unread_count: 0,
+        background: None,
+        icon_path: None,
+    })
+}
+
+/// The chat an incoming message belongs to (text messages included).
+pub fn incoming_chat_id(inst: &MessageInst, my_handles: &[String]) -> Option<ChatId> {
+    if let Some(c) = sms_chat(inst, my_handles, None) {
+        return Some(c.id);
+    }
+    inst.conversation.as_ref().map(|c| chat_id_for(c, inst.sender.as_deref(), my_handles))
 }
 
 /// `participants` excludes us, except in a note to self, where it is our
@@ -218,7 +273,17 @@ fn normal_to_message(inst: &MessageInst, n: &NormalMessage, chat_id: ChatId, my_
     if n.app.is_some() && parts.is_empty() {
         parts.push(MessagePart::Unsupported { description: "app message".into() });
     }
-    let sender = inst.sender.as_deref().unwrap_or("");
+    // A relayed text names its real sender in `from_handle`; the IDS
+    // sender is our iPhone. One without `from_handle` was sent by us (from
+    // the iPhone itself, or synced from another of our devices).
+    let (sender, from_me, service) = match &n.service {
+        MessageType::SMS { from_handle: Some(from), .. } => (from.as_str(), is_mine(from, my_handles), Service::Sms),
+        MessageType::SMS { using_number, from_handle: None, .. } => (using_number.as_str(), true, Service::Sms),
+        _ => {
+            let s = inst.sender.as_deref().unwrap_or("");
+            (s, is_mine(s, my_handles), Service::Imessage)
+        }
+    };
     (
         Message {
             id,
@@ -229,13 +294,14 @@ fn normal_to_message(inst: &MessageInst, n: &NormalMessage, chat_id: ChatId, my_
             parts,
             subject: n.subject.clone(),
             reply_to: n.reply_guid.as_ref().map(MessageId::new),
-            is_from_me: is_mine(sender, my_handles),
-            delivery: if is_mine(sender, my_handles) { DeliveryState::Sent } else { DeliveryState::Delivered },
+            is_from_me: from_me,
+            delivery: if from_me { DeliveryState::Sent } else { DeliveryState::Delivered },
             edited: false,
             unsent: false,
             reactions: vec![],
             effect: n.effect.clone(),
             verified: !inst.verification_failed,
+            service,
         },
         atts,
     )
@@ -252,7 +318,7 @@ pub struct Converted {
 pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted {
     let sender_raw = inst.sender.as_deref().unwrap_or("");
     let sender = Handle::new(sender_raw);
-    let chat_id = inst.conversation.as_ref().map(|c| chat_id_for(c, inst.sender.as_deref(), my_handles));
+    let chat_id = incoming_chat_id(inst, my_handles);
     let id = MessageId::new(&inst.id);
     let at = inst.sent_timestamp;
     let mut events = Vec::new();
@@ -267,7 +333,10 @@ pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted 
 
     match &inst.message {
         RpMessage::Message(n) => {
-            if let Some(conv) = &inst.conversation {
+            if let Some(chat) = sms_chat(inst, my_handles, Some(inst.sent_timestamp)) {
+                let (message, attachments) = normal_to_message(inst, n, chat.id.clone(), my_handles);
+                events.push(EngineEvent::MessageReceived { message, chat, attachments });
+            } else if let Some(conv) = &inst.conversation {
                 let chat = chat_for(conv, inst.sender.as_deref(), my_handles, Some(inst.sent_timestamp));
                 let (message, attachments) = normal_to_message(inst, n, chat.id.clone(), my_handles);
                 events.push(EngineEvent::MessageReceived { message, chat, attachments });
@@ -360,6 +429,15 @@ pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted 
             error: Some(format!("{} ({})", e.status_str, e.status)),
             at,
         }),
+        // Our iPhone's answer to a text message we asked it to send (the
+        // id is the text message's).
+        RpMessage::SmsConfirmSent(ok) => events.push(EngineEvent::MessageSent {
+            id,
+            chat_id: None,
+            delivery: if *ok { DeliveryState::Sent } else { DeliveryState::Failed },
+            error: (!*ok).then(|| "your iPhone could not send the text message".to_string()),
+            at,
+        }),
         RpMessage::SetTranscriptBackground(b) => {
             log_background(inst, b);
             let background = match b {
@@ -374,7 +452,8 @@ pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted 
             }
         }
         // Everything else (our own devices' profile-sharing settings and
-        // recovery requests, SMS forwarding, recycle bin, cache
+        // recovery requests, SMS forwarding activation (the engine tracks
+        // that itself), recycle bin, cache
         // invalidation, ...) has no model equivalent yet.
         other => log::debug!("ignoring inbound message type c={} ({})", other.get_c(), inst.id),
     }
@@ -634,6 +713,81 @@ mod tests {
         assert_eq!(chat.id.0, BOB);
         assert_eq!(chat.participants, vec![Handle::new(BOB)]);
         assert!(!message.is_from_me);
+    }
+
+    fn sms(text: &str, using: &str, from: Option<&str>) -> RpMessage {
+        RpMessage::Message(NormalMessage::new(
+            text.into(),
+            MessageType::SMS { is_phone: false, using_number: using.into(), from_handle: from.map(String::from) },
+        ))
+    }
+
+    /// A text relayed by our iPhone: the real sender is `from_handle`, the
+    /// chat is the 1:1 with that number (shared with iMessage), the row is
+    /// `service = sms`; one without `from_handle` is ours.
+    #[test]
+    fn relayed_sms() {
+        const MYNUM: &str = "tel:+15555550100";
+        const PEER: &str = "tel:+15555550123";
+        let mine = vec![ME.to_string(), MYNUM.to_string()];
+        // incoming 1:1, IDS sender = our iPhone (an email handle of ours)
+        let i = inst(ME, Some(conv(&[PEER, MYNUM], None, None)), sms("hi", MYNUM, Some(PEER)));
+        let ev = convert_incoming(&i, &mine).events;
+        let EngineEvent::MessageReceived { message, chat, .. } = &ev[0] else { panic!("{ev:?}") };
+        assert_eq!(chat.id.0, PEER);
+        assert_eq!(message.chat_id.0, PEER);
+        assert_eq!(message.sender.uri, PEER);
+        assert!(!message.is_from_me);
+        assert_eq!(message.service, Service::Sms);
+        assert_eq!(message.delivery, DeliveryState::Delivered);
+        assert_eq!(chat.participants, vec![Handle::new(PEER)]);
+        assert_eq!(incoming_chat_id(&i, &mine).unwrap().0, PEER);
+        // the relay number need not be in my_handles: using_number counts as ours
+        let ev = convert_incoming(&i, &[ME.to_string()]).events;
+        let EngineEvent::MessageReceived { chat, .. } = &ev[0] else { panic!() };
+        assert_eq!(chat.id.0, PEER);
+
+        // sent by our iPhone itself (synced): ours, same chat
+        let i = inst(MYNUM, Some(conv(&[PEER, MYNUM], None, None)), sms("yo", MYNUM, None));
+        let ev = convert_incoming(&i, &mine).events;
+        let EngineEvent::MessageReceived { message, chat, .. } = &ev[0] else { panic!("{ev:?}") };
+        assert_eq!(chat.id.0, PEER);
+        assert!(message.is_from_me);
+        assert_eq!(message.sender.uri, MYNUM);
+        assert_eq!(message.service, Service::Sms);
+
+        // group MMS: group-p id over the other numbers only, whoever sent it
+        let c3 = "tel:+15555550124";
+        let i = inst(ME, Some(conv(&[c3, MYNUM, PEER], None, None)), sms("all", MYNUM, Some(PEER)));
+        let ev = convert_incoming(&i, &mine).events;
+        let EngineEvent::MessageReceived { message, chat, .. } = &ev[0] else { panic!("{ev:?}") };
+        assert!(chat.is_group);
+        assert_eq!(chat.id.0, "group-p:tel:+15555550123,tel:+15555550124");
+        assert_eq!(message.sender.uri, PEER);
+        let i = inst(ME, Some(conv(&[c3, PEER], None, None)), sms("me too", MYNUM, None));
+        assert_eq!(incoming_chat_id(&i, &mine).unwrap(), chat.id);
+        assert_eq!(sms_chat_id(&[PEER.into(), c3.into()]), chat.id);
+
+        // iMessage is unchanged
+        let i = inst(PEER, Some(conv(&[PEER, ME], None, None)), RpMessage::Message(NormalMessage::new("im".into(), MessageType::IMessage)));
+        let ev = convert_incoming(&i, &mine).events;
+        let EngineEvent::MessageReceived { message, .. } = &ev[0] else { panic!() };
+        assert_eq!(message.service, Service::Imessage);
+        assert_eq!(message.chat_id.0, PEER);
+    }
+
+    #[test]
+    fn sms_confirm_sent() {
+        let i = inst(ME, None, RpMessage::SmsConfirmSent(false));
+        let ev = convert_incoming(&i, &mine()).events;
+        assert!(
+            matches!(&ev[..], [EngineEvent::MessageSent { id, delivery: DeliveryState::Failed, error: Some(_), chat_id: None, .. }] if id.0 == "1B2C3D4E-0000-4000-8000-000000000001"),
+            "{ev:?}"
+        );
+        let ev = convert_incoming(&inst(ME, None, RpMessage::SmsConfirmSent(true)), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::MessageSent { delivery: DeliveryState::Sent, error: None, .. }]), "{ev:?}");
+        // activation requests produce no model event (the engine tracks them)
+        assert!(convert_incoming(&inst(ME, None, RpMessage::EnableSmsActivation(true)), &mine()).events.is_empty());
     }
 
     #[test]

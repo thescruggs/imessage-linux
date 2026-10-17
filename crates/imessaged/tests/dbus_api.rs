@@ -155,6 +155,7 @@ fn incoming(id: &str, at: u64, text: &str, attachment: Option<(&str, &str)>) -> 
             reactions: vec![],
             effect: None,
             verified: false,
+            service: Default::default(),
         },
         chat: bob_chat(at),
         attachments,
@@ -569,5 +570,38 @@ async fn purge_invalid_chats() {
     assert_eq!((v["dry_run"].as_bool(), v["chats"].as_array().map(Vec::len), v["messages"].as_u64()), (Some(true), Some(0), Some(0)));
     let s: String = p.call("PurgeInvalidChats", &(false,)).await.unwrap();
     assert_eq!(json(&s)["dry_run"], false);
+    h.shutdown().await;
+}
+
+/// Text Message Forwarding over D-Bus: EnableSmsForwarding + its signal,
+/// GetStatus.sms, SendTextAs with an explicit service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sms_forwarding_and_send_text_as() {
+    let Some(h) = Harness::logged_in().await else { return };
+    let p = &h.p;
+    h.mock.set_other_handles(vec!["tel:+15555550100".into()]);
+    assert_eq!(h.call_json("GetSmsForwarding", &()).await["state"], "off");
+    let mut changed = p.receive_signal("SmsForwardingChanged").await.unwrap();
+    let s = h.call_json("EnableSmsForwarding", &(true,)).await;
+    assert_eq!(s["state"], "requested");
+    assert_eq!(s["number"], "tel:+15555550100");
+    let (sj,): (String,) = next_signal(&mut changed, |(j,): &(String,)| json(j)["state"] == "requested").await;
+    assert_eq!(json(&sj)["number"], "tel:+15555550100");
+    assert_eq!(h.call_json("GetStatus", &()).await["sms"]["state"], "requested");
+
+    let e = p.call::<_, _, String>("SendTextAs", &("", "[\"+15555550123\"]", "x", "", "fax")).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.InvalidInput");
+    // requested is not active: the mock refuses SMS
+    let e = p.call::<_, _, String>("SendTextAs", &("", "[\"+15555550123\"]", "x", "", "sms")).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.Unsupported");
+    h.mock.activate_sms("tel:+15555550100");
+    let sent = h.call_json("SendTextAs", &("", "[\"+15555550123\"]", "hi", "", "sms")).await;
+    assert_eq!(sent["service"], "sms");
+    let page = h.call_json("ListMessages", &("tel:+15555550123", "", 10u32)).await;
+    assert_eq!(page["messages"][0]["service"], "sms");
+    let sent = h.call_json("SendTextAs", &("tel:+15555550123", "", "hi", "", "imessage")).await;
+    assert_eq!(sent["service"], "imessage");
+    let e = p.call::<_, _, ()>("React", &("tel:+15555550123", page["messages"][0]["id"].as_str().unwrap(), "love", false)).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.Unsupported");
     h.shutdown().await;
 }

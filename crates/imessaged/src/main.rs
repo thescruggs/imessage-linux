@@ -53,6 +53,12 @@ struct Args {
     #[arg(long = "other-handle", env = "IMESSAGED_OTHER_HANDLES", value_delimiter = ',')]
     other_handles: Vec<String>,
 
+    /// Your iPhone's phone number that relays text messages (SMS / MMS /
+    /// RCS) to this device. Default: the first phone number among the
+    /// other handles.
+    #[arg(long, env = "IMESSAGED_SMS_RELAY_NUMBER")]
+    sms_relay_number: Option<String>,
+
     /// Do not serve the D-Bus API (headless / tests). Messages are still
     /// received and stored.
     #[arg(long)]
@@ -73,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
             store_credentials: args.store_credentials,
             sender_handle: args.sender_handle,
             other_handles: (!args.other_handles.is_empty()).then_some(args.other_handles),
+            sms_relay_number: args.sms_relay_number,
         },
     )?;
 
@@ -88,6 +95,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if !cfg.other_handles.is_empty() {
         log::info!("other handles (also mine): {}", cfg.other_handles.join(", "));
+    }
+    if let Some(n) = cfg.sms_number() {
+        log::info!("SMS relay number (Text Message Forwarding): {n}");
     }
     // M-C: judge the filter env_logger actually uses (RUST_LOG wins).
     let effective = config::effective_log_filter(std::env::var("RUST_LOG").ok(), &cfg.log_level);

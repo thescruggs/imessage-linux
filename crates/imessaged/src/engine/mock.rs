@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use imessage_common::model::{
     Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, MessagePart, ProfilesState, ProfilesStatus, ReactionKind,
-    ReadReceipt, RegistrationState,
+    ReadReceipt, RegistrationState, Service, SmsForwarding, SmsState,
 };
 use tokio::sync::broadcast;
 
@@ -40,6 +40,9 @@ pub enum MockCall {
     /// The decryption key is secret; only the record is recorded.
     FetchProfile { record_key: String },
     UpsertChat(ChatId),
+    /// A text message (`Service::Sms`) send: text, or an attachment path.
+    SendSms { chat: ChatTarget, text: Option<String>, path: Option<PathBuf> },
+    SetSmsForwarding(bool),
     Shutdown,
 }
 
@@ -58,6 +61,7 @@ struct Inner {
     download_delay: std::time::Duration,
     profiles: HashMap<String, FetchedProfile>,
     profiles_status: ProfilesStatus,
+    sms: SmsForwarding,
 }
 
 pub struct MockEngine {
@@ -91,6 +95,7 @@ impl MockEngine {
                 download_delay: std::time::Duration::ZERO,
                 profiles: HashMap::new(),
                 profiles_status: ProfilesStatus { state: ProfilesState::Ready, detail: None },
+                sms: SmsForwarding::default(),
             }),
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
         }
@@ -103,6 +108,16 @@ impl MockEngine {
     /// Deliver an event to all subscribers as if the engine produced it.
     pub fn inject(&self, event: EngineEvent) {
         let _ = self.events.send(event);
+    }
+    /// Set the Text Message Forwarding state (and announce it, as the real
+    /// engine does when the iPhone confirms).
+    pub fn set_sms(&self, sms: SmsForwarding) {
+        self.lock().sms = sms.clone();
+        self.inject(EngineEvent::SmsForwardingChanged(sms));
+    }
+    /// SMS forwarding `active` for `number`.
+    pub fn activate_sms(&self, number: &str) {
+        self.set_sms(SmsForwarding { state: SmsState::Active, number: Some(Handle::normalize(number)), since: Some(MOCK_SENT_AT), detail: None });
     }
     pub fn calls(&self) -> Vec<MockCall> {
         self.lock().calls.clone()
@@ -241,7 +256,27 @@ impl MockEngine {
             self.inject(EngineEvent::MessageSent { id: id.clone(), chat_id: Some(chat_id.clone()), delivery: DeliveryState::Sent, error: None, at: MOCK_SENT_AT });
         }
         let sender = self.lock().registration.handles.first().cloned().unwrap_or_else(|| Handle::new(""));
-        Ok(SentMessage { id, chat_id, sent_at: MOCK_SENT_AT, sender })
+        Ok(SentMessage { id, chat_id, sent_at: MOCK_SENT_AT, sender, service: Default::default() })
+    }
+
+    fn sent_sms(&self, chat: &ChatTarget) -> EngineResult<SentMessage> {
+        self.logged_in()?;
+        let sms = self.lock().sms.clone();
+        if !sms.is_active() {
+            return Err(EngineError::Unsupported("Text Message Forwarding is not active".into()));
+        }
+        // A group text is keyed by its numbers; the mock need not know it.
+        let mut sent = match chat {
+            ChatTarget::Chat(id) if id.0.starts_with(ChatId::GROUP_PARTICIPANTS_PREFIX) => {
+                let id2 = self.new_id();
+                self.inject(EngineEvent::MessageSent { id: id2.clone(), chat_id: Some(id.clone()), delivery: DeliveryState::Sent, error: None, at: MOCK_SENT_AT });
+                let sender = self.lock().registration.handles.first().cloned().unwrap_or_else(|| Handle::new(""));
+                SentMessage { id: id2, chat_id: id.clone(), sent_at: MOCK_SENT_AT, sender, service: Service::Sms }
+            }
+            _ => self.sent(chat, true)?,
+        };
+        sent.service = Service::Sms;
+        Ok(sent)
     }
 
     // Event constructors for tests. Like the real engine's conversion, the
@@ -368,6 +403,39 @@ impl Engine for MockEngine {
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage> {
         self.record(MockCall::SendAttachment { chat: chat.clone(), path: path.to_path_buf(), mime: mime.to_string() })?;
         self.sent(chat, true)
+    }
+
+    async fn send_text_via(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, service: Service) -> EngineResult<SentMessage> {
+        if service == Service::Imessage {
+            return self.send_text(chat, text, reply_to).await;
+        }
+        self.record(MockCall::SendSms { chat: chat.clone(), text: Some(text.to_string()), path: None })?;
+        self.sent_sms(chat)
+    }
+
+    async fn send_attachment_via(&self, chat: &ChatTarget, path: &Path, mime: &str, service: Service) -> EngineResult<SentMessage> {
+        if service == Service::Imessage {
+            return self.send_attachment(chat, path, mime).await;
+        }
+        self.record(MockCall::SendSms { chat: chat.clone(), text: None, path: Some(path.to_path_buf()) })?;
+        self.sent_sms(chat)
+    }
+
+    async fn sms_forwarding(&self) -> SmsForwarding {
+        self.lock().sms.clone()
+    }
+
+    async fn set_sms_forwarding(&self, enable: bool) -> EngineResult<SmsForwarding> {
+        self.record(MockCall::SetSmsForwarding(enable))?;
+        self.logged_in()?;
+        let number = self.lock().registration.other_handles.iter().find(|h| h.starts_with("tel:")).cloned();
+        let Some(number) = number else {
+            return Err(EngineError::InvalidInput("no phone number to relay through (set sms_relay_number)".into()));
+        };
+        let state = if enable { SmsState::Requested } else { SmsState::Off };
+        let sms = SmsForwarding { state, number: Some(number), since: Some(MOCK_SENT_AT), detail: None };
+        self.set_sms(sms.clone());
+        Ok(sms)
     }
 
     async fn react(&self, chat: &ChatTarget, message_id: &MessageId, kind: ReactionKind, remove: bool) -> EngineResult<SentMessage> {

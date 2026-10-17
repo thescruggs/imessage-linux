@@ -161,6 +161,10 @@ pub trait Daemon1 {
     fn search(&self, query: &str, limit: u32) -> zbus::Result<String>;
     fn send_text(&self, chat_id_or_empty: &str, participants_json: &str, text: &str, reply_to: &str) -> zbus::Result<String>;
     fn send_file(&self, chat_id_or_empty: &str, participants_json: &str, path: &str, mime: &str) -> zbus::Result<String>;
+    fn send_text_as(&self, chat_id_or_empty: &str, participants_json: &str, text: &str, reply_to: &str, service: &str) -> zbus::Result<String>;
+    fn send_file_as(&self, chat_id_or_empty: &str, participants_json: &str, path: &str, mime: &str, service: &str) -> zbus::Result<String>;
+    fn enable_sms_forwarding(&self, enable: bool) -> zbus::Result<String>;
+    fn get_sms_forwarding(&self) -> zbus::Result<String>;
     fn react(&self, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> zbus::Result<()>;
     fn edit(&self, chat_id: &str, message_id: &str, text: &str) -> zbus::Result<()>;
     fn unsend(&self, chat_id: &str, message_id: &str) -> zbus::Result<()>;
@@ -197,6 +201,8 @@ pub trait Daemon1 {
     fn background_error(&self, message: String) -> zbus::Result<()>;
     #[zbus(signal)]
     fn handle_profile_updated(&self, handle: String, profile_json: String) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn sms_forwarding_changed(&self, state_json: String) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +220,9 @@ pub struct Status {
     /// Older daemons do not report it.
     #[serde(default)]
     pub profiles: Option<imessage_common::model::ProfilesStatus>,
+    /// Text Message Forwarding; older daemons do not report it.
+    #[serde(default)]
+    pub sms: Option<imessage_common::model::SmsForwarding>,
 }
 
 /// `ListMessages`.
@@ -230,6 +239,8 @@ pub struct SentMessage {
     pub chat_id: String,
     pub sent_at: u64,
     pub sender: imessage_common::model::Handle,
+    #[serde(default)]
+    pub service: imessage_common::model::Service,
 }
 
 /// `LookupHandles` element.
@@ -405,6 +416,25 @@ impl Client {
     pub async fn send_file(&self, target: &Target, path: &str, mime: &str) -> Result<Json<SentMessage>> {
         let (chat, participants) = target.args();
         parse("sent message", long_call("sending the file", self.proxy.send_file(&chat, &participants, path, mime)).await?)
+    }
+
+    /// `SendTextAs`: `service` = `imessage` / `sms`.
+    pub async fn send_text_as(&self, target: &Target, text: &str, reply_to: &str, service: &str) -> Result<Json<SentMessage>> {
+        let (chat, participants) = target.args();
+        parse("sent message", self.proxy.send_text_as(&chat, &participants, text, reply_to, service).await.map_err(map_zbus)?)
+    }
+
+    pub async fn send_file_as(&self, target: &Target, path: &str, mime: &str, service: &str) -> Result<Json<SentMessage>> {
+        let (chat, participants) = target.args();
+        parse("sent message", long_call("sending the file", self.proxy.send_file_as(&chat, &participants, path, mime, service)).await?)
+    }
+
+    pub async fn enable_sms_forwarding(&self, enable: bool) -> Result<Json<imessage_common::model::SmsForwarding>> {
+        parse("sms forwarding", long_call("asking the iPhone", self.proxy.enable_sms_forwarding(enable)).await?)
+    }
+
+    pub async fn sms_forwarding(&self) -> Result<Json<imessage_common::model::SmsForwarding>> {
+        parse("sms forwarding", self.proxy.get_sms_forwarding().await.map_err(map_zbus)?)
     }
 
     pub async fn react(&self, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> Result<()> {

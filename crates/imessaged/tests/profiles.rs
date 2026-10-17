@@ -55,6 +55,7 @@ fn incoming(id: &str, chat: &Chat, from: &str, at: u64) -> EngineEvent {
             reactions: vec![],
             effect: None,
             verified: true,
+            service: Default::default(),
         },
         chat: chat.clone(),
         attachments: vec![],

@@ -20,6 +20,9 @@
 //! other_handles     = ["+15551234567"]             # more addresses of yours this device is
 //!                     # not registered for (e.g. your iPhone's number): messages
 //!                     # from them are your own; never sent from
+//! sms_relay_number  = "+15551234567"               # your iPhone's number that relays text
+//!                     # messages (Text Message Forwarding); default: the first
+//!                     # phone number in other_handles
 //! ```
 //!
 //! **Logging and privacy.** The default filter ([`DEFAULT_LOG_LEVEL`]) keeps
@@ -155,6 +158,7 @@ pub struct FileConfig {
     pub store_credentials: Option<bool>,
     pub sender_handle: Option<String>,
     pub other_handles: Option<Vec<String>>,
+    pub sms_relay_number: Option<String>,
 }
 
 impl FileConfig {
@@ -184,6 +188,7 @@ pub struct Overrides {
     pub sender_handle: Option<String>,
     /// Replaces the file's list when `Some`.
     pub other_handles: Option<Vec<String>>,
+    pub sms_relay_number: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +216,9 @@ pub struct DaemonConfig {
     /// are the user's own (`is_from_me`, never a read receipt, chat ids as
     /// if they were registered); they are never registered or sent from.
     pub other_handles: Vec<String>,
+    /// The iPhone number (`tel:` URI) that relays text messages; `None` =
+    /// the first `tel:` entry of `other_handles` (see [`DaemonConfig::sms_number`]).
+    pub sms_relay_number: Option<String>,
 }
 
 impl DaemonConfig {
@@ -225,6 +233,7 @@ impl DaemonConfig {
             store_credentials: true,
             sender_handle: None,
             other_handles: vec![],
+            sms_relay_number: None,
         }
     }
 
@@ -262,7 +271,17 @@ impl DaemonConfig {
                 }
             }
         }
+        if let Some(v) = over.sms_relay_number.or(file.sms_relay_number) {
+            let v = v.trim();
+            c.sms_relay_number = (!v.is_empty()).then(|| Handle::try_normalize(v).unwrap_or_else(|| v.to_string()));
+        }
         c
+    }
+
+    /// The iPhone number text messages are relayed through: the configured
+    /// `sms_relay_number`, else the first phone number in `other_handles`.
+    pub fn sms_number(&self) -> Option<String> {
+        self.sms_relay_number.clone().or_else(|| self.other_handles.iter().find(|h| h.starts_with("tel:")).cloned())
     }
 
     /// Load `state_dir/config.toml` and apply overrides. A `sender_handle`
@@ -284,6 +303,11 @@ impl DaemonConfig {
         }
         if let Some(h) = self.other_handles.iter().find(|h| Handle::try_normalize(h).is_none()) {
             anyhow::bail!("invalid other_handles entry {h:?}: expected an email address or phone number");
+        }
+        if let Some(n) = &self.sms_relay_number
+            && !Handle::try_normalize(n).is_some_and(|h| h.starts_with("tel:"))
+        {
+            anyhow::bail!("invalid sms_relay_number {n:?}: expected a phone number");
         }
         Ok(())
     }
@@ -353,6 +377,7 @@ mod tests {
             store_credentials: Some(false),
             sender_handle: None,
             other_handles: None,
+            sms_relay_number: None,
         };
         let c = DaemonConfig::resolve("/s".into(), f, o);
         assert_eq!(c.anisette_url, "http://localhost:6969");
@@ -426,6 +451,21 @@ mod tests {
         assert_eq!(c.log_level, "warn");
         std::fs::write(dir.path().join(CONFIG_FILE), "log_level = [").unwrap();
         assert!(DaemonConfig::load(dir.path().into(), Overrides::default()).is_err());
+    }
+
+    #[test]
+    fn sms_relay_number_resolution() {
+        let c = DaemonConfig::resolve("/s".into(), FileConfig::default(), Overrides::default());
+        assert_eq!(c.sms_number(), None);
+        let f = FileConfig::parse("other_handles = [\"me@example.com\", \"+1 555 555 0100\"]").unwrap();
+        let c = DaemonConfig::resolve("/s".into(), f.clone(), Overrides::default());
+        assert_eq!(c.sms_number().as_deref(), Some("tel:+15555550100"));
+        let o = Overrides { sms_relay_number: Some("(555) 555-0199".into()), ..Default::default() };
+        let c = DaemonConfig::resolve("/s".into(), f, o);
+        assert_eq!(c.sms_number().as_deref(), Some("tel:5555550199"));
+        c.validate().unwrap();
+        let f = FileConfig::parse("sms_relay_number = \"me@example.com\"").unwrap();
+        assert!(DaemonConfig::resolve("/s".into(), f, Overrides::default()).validate().is_err());
     }
 
     #[test]

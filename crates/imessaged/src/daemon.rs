@@ -17,6 +17,7 @@ use crate::engine::{Engine, EngineError, EngineEvent, RustpushEngine};
 use crate::hub::{DEFAULT_TYPING_TIMEOUT, DaemonSignal, Hub};
 use crate::keyring;
 use crate::store::{Store, StoreHandle};
+use imessage_common::model::Service;
 
 pub struct Daemon {
     pub cfg: DaemonConfig,
@@ -226,6 +227,7 @@ async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
         }
         EngineEvent::TwoFactorRequired => return hub.emit(DaemonSignal::TwoFactorRequired).await,
         EngineEvent::Error(e) => return hub.emit(DaemonSignal::BackgroundError(e.clone())).await,
+        EngineEvent::SmsForwardingChanged(s) => return hub.emit(DaemonSignal::SmsForwardingChanged(s.clone())).await,
         _ => {}
     }
     if let EngineEvent::ProfileShared { handle, share, at } = ev {
@@ -267,12 +269,13 @@ async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
 fn log_event(ev: &EngineEvent) {
     match ev {
         EngineEvent::MessageReceived { message, .. } => {
-            log::info!("message {} in {} ({} part(s))", message.id, message.chat_id, message.parts.len())
+            log::info!("message {} in {} ({} part(s){})", message.id, message.chat_id, message.parts.len(), if message.service == Service::Sms { ", sms" } else { "" })
         }
         EngineEvent::MessageSent { id, delivery, .. } => log::info!("sent {id}: {delivery:?}"),
         EngineEvent::ConnectionChanged(s) => log::info!("connection: {s:?}"),
         EngineEvent::RegistrationChanged(r) => log::info!("registration: {} handle(s), renews at {:?}", r.handles.len(), r.expires_at),
         EngineEvent::TwoFactorRequired => log::info!("two-factor code required"),
+        EngineEvent::SmsForwardingChanged(s) => log::info!("sms forwarding: {}{}", s.state.as_str(), s.detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()),
         EngineEvent::Error(e) => log::warn!("engine error: {e}"),
         other => log::debug!("event: {}", event_name(other)),
     }
@@ -296,6 +299,7 @@ fn event_name(ev: &EngineEvent) -> &'static str {
         EngineEvent::ConnectionChanged(_) => "connection_changed",
         EngineEvent::RegistrationChanged(_) => "registration_changed",
         EngineEvent::TwoFactorRequired => "two_factor_required",
+        EngineEvent::SmsForwardingChanged(_) => "sms_forwarding_changed",
         EngineEvent::Error(_) => "error",
     }
 }

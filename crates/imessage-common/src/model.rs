@@ -346,6 +346,40 @@ pub enum DeliveryState {
     Failed,
 }
 
+/// How a message travelled: iMessage, or as a text message (SMS / MMS /
+/// RCS) relayed by the user's iPhone ("Text Message Forwarding").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Service {
+    #[default]
+    Imessage,
+    Sms,
+}
+
+impl Service {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Service::Imessage => "imessage",
+            Service::Sms => "sms",
+        }
+    }
+
+    /// `"imessage"` / `"sms"` (also `"text"`, `"rcs"`, `"mms"`), any case.
+    pub fn parse(s: &str) -> Option<Service> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "imessage" => Some(Service::Imessage),
+            "sms" | "mms" | "rcs" | "text" => Some(Service::Sms),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Service {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePart {
@@ -410,6 +444,10 @@ pub struct Message {
     /// must flag the sender as unverified. Always `true` for our own sends.
     #[serde(default = "default_true")]
     pub verified: bool,
+    /// iMessage, or a text message relayed by the user's iPhone (green
+    /// bubble). Missing in older JSON = iMessage.
+    #[serde(default)]
+    pub service: Service,
 }
 
 fn default_true() -> bool {
@@ -546,6 +584,54 @@ pub struct ProfilesStatus {
     pub detail: Option<String>,
 }
 
+/// Text Message Forwarding (SMS / MMS / RCS relayed by the user's
+/// iPhone) as the daemon knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SmsState {
+    /// Not requested (or turned off).
+    #[default]
+    Off,
+    /// We asked the iPhone; waiting for the user to turn this device on
+    /// under Settings > Messages > Text Message Forwarding.
+    Requested,
+    /// The iPhone confirmed, or relayed a text message to us.
+    Active,
+    /// The request could not be sent; `detail` says why.
+    Error,
+}
+
+impl SmsState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SmsState::Off => "off",
+            SmsState::Requested => "requested",
+            SmsState::Active => "active",
+            SmsState::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SmsForwarding {
+    #[serde(default)]
+    pub state: SmsState,
+    /// The iPhone's number that relays text messages (`tel:+…`), if known.
+    #[serde(default)]
+    pub number: Option<String>,
+    /// ms since epoch of the last state change.
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl SmsForwarding {
+    pub fn is_active(&self) -> bool {
+        self.state == SmsState::Active
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +709,14 @@ mod tests {
         assert_eq!(serde_json::to_string(&MessageId::new("ab")).unwrap(), r#""AB""#);
         // no profile: the handle JSON is unchanged
         assert_eq!(serde_json::to_string(&Handle::new("a@b.c")).unwrap(), r#"{"uri":"mailto:a@b.c"}"#);
+        assert_eq!(serde_json::to_string(&Service::Sms).unwrap(), r#""sms""#);
+        assert_eq!(serde_json::from_str::<Service>(r#""imessage""#).unwrap(), Service::Imessage);
+        assert_eq!(Service::parse("SMS"), Some(Service::Sms));
+        assert_eq!(Service::parse("rcs"), Some(Service::Sms));
+        assert_eq!(Service::parse("bogus"), None);
+        let f = SmsForwarding { state: SmsState::Requested, number: Some("tel:+15555550100".into()), since: Some(5), detail: None };
+        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"state":"requested","number":"tel:+15555550100","since":5}"#);
+        assert_eq!(serde_json::from_str::<SmsForwarding>("{}").unwrap(), SmsForwarding::default());
         let s = ProfilesStatus { state: ProfilesState::NeedsLogin, detail: None };
         assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"state":"needs_login"}"#);
     }

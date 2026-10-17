@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use imessage_common::model::{
-    Attachment, AttachmentId, Chat, ChatBackground, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind,
+    Attachment, AttachmentId, Chat, ChatBackground, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind, Service,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,7 @@ const MIGRATIONS: &[(i64, &str)] =
         (2, include_str!("migrations/0002_chat_backgrounds.sql")),
         (3, include_str!("migrations/0003_background_image.sql")),
         (4, include_str!("migrations/0004_profiles_icons.sql")),
+        (5, include_str!("migrations/0005_message_service.sql")),
     ];
 
 /// Default / maximum page sizes for list calls.
@@ -447,6 +448,16 @@ impl Store {
 
     /// Returns the message if it exists and changed. Unknown ids are
     /// remembered (bounded) and applied when the row is inserted.
+    /// The service of the chat's newest message (`None`: no messages).
+    pub fn chat_service(&self, chat: &ChatId) -> StoreResult<Option<Service>> {
+        let s: Option<String> = self.tx(|tx, _| {
+            Ok(tx
+                .query_row("SELECT service FROM messages WHERE chat_id = ?1 ORDER BY sent_at DESC, seq DESC LIMIT 1", params![chat.0], |r| r.get(0))
+                .optional()?)
+        })?;
+        Ok(s.map(|s| Service::parse(&s).unwrap_or_default()))
+    }
+
     pub fn update_delivery(&self, id: &MessageId, state: DeliveryState, error: Option<&str>) -> StoreResult<Option<Message>> {
         self.tx(|tx, early| update_delivery_tx(tx, early, id, state, error))
     }
@@ -907,6 +918,7 @@ impl Store {
             | EngineEvent::ConnectionChanged(_)
             | EngineEvent::RegistrationChanged(_)
             | EngineEvent::TwoFactorRequired
+            | EngineEvent::SmsForwardingChanged(_)
             | EngineEvent::Error(_) => {}
         }
         Ok(out)
@@ -1132,6 +1144,7 @@ fn row_to_message(r: &Row<'_>) -> rusqlite::Result<(Message, String)> {
             reactions: vec![],
             effect: r.get("effect")?,
             verified: r.get("verified")?,
+            service: Service::parse(&r.get::<_, String>("service")?).unwrap_or_default(),
         },
         parts,
     ))
@@ -1170,8 +1183,8 @@ fn insert_message_tx(
         None => {
             tx.prepare_cached(
                 "INSERT INTO messages (id, chat_id, sender, sent_at, text, parts, subject, reply_to, is_from_me, delivery,
-                                       edited, unsent, verified, effect, is_read)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                       edited, unsent, verified, effect, is_read, service)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )?
             .execute(params![
                 msg.id.0,
@@ -1189,6 +1202,7 @@ fn insert_message_tx(
                 msg.verified,
                 msg.effect,
                 msg.is_from_me, // our own messages are read
+                msg.service.as_str(),
             ])?;
         }
         Some((delivery, edited, unsent)) => {

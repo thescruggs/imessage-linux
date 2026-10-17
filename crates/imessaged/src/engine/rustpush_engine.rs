@@ -55,7 +55,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use icloud_auth::{AppleAccount, LoginState, PersistAccountData, VerifyBody};
-use imessage_common::model::{Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, ProfilesStatus, ReactionKind, RegistrationState};
+use imessage_common::model::{
+    Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, ProfilesStatus, ReactionKind, RegistrationState, Service, SmsForwarding,
+};
 use omnisette::remote_anisette_v3::RemoteAnisetteProviderV3;
 use omnisette::{AnisetteClient, ArcAnisetteClient};
 use rustpush::macos::MacOSConfig;
@@ -72,6 +74,7 @@ use zeroize::Zeroizing;
 
 mod liveness;
 mod profiles;
+mod sms;
 
 use liveness::{HANDLE_TIMEOUT, Liveness, Verdict, WATCHDOG_TICK};
 
@@ -1426,7 +1429,7 @@ impl Inner {
     /// which chat a message belongs to. Never used to pick a sender.
     fn with_other_handles(&self, handles: &[String]) -> Vec<String> {
         let mut all = handles.to_vec();
-        for h in &self.cfg.other_handles {
+        for h in self.cfg.other_handles.iter().chain(self.cfg.sms_number().as_ref()) {
             if !all.iter().any(|m| Handle::normalize(m) == Handle::normalize(h)) {
                 all.push(h.clone());
             }
@@ -1468,6 +1471,20 @@ impl Inner {
         lock(&self.chats).insert(id, conv);
     }
 
+    /// Upload `path` to MMCS; the message parts that carry it.
+    async fn upload_attachment(&self, path: &Path, mime: &str) -> EngineResult<MessageParts> {
+        let aps = lock(&self.aps).clone().ok_or(EngineError::NotLoggedIn)?;
+        self.client()?;
+        // Read once, off the runtime; rustpush's MMCS code reads synchronously.
+        let bytes = tokio::fs::read(path).await.map_err(|e| EngineError::InvalidInput(format!("{}: {e}", path.display())))?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
+        let prepared = MMCSFile::prepare_put(Cursor::new(&bytes[..])).await.map_err(perr)?;
+        let attachment = RpAttachment::new_mmcs(&aps, &prepared, Cursor::new(&bytes[..]), mime, convert::uti_for_mime(mime), &name, |_, _| {})
+            .await
+            .map_err(perr)?;
+        Ok(MessageParts(vec![IndexedMessagePart { part: RpMessagePart::Attachment(attachment), idx: None, ext: None }]))
+    }
+
     /// Send any rustpush message to a chat. `report` = emit MessageSent.
     async fn send(&self, chat: &ChatTarget, message: RpMessage, id_override: Option<&MessageId>, report: bool) -> EngineResult<SentMessage> {
         let client = self.client()?;
@@ -1477,12 +1494,30 @@ impl Inner {
         if let Some(id) = id_override {
             inst.id = id.0.clone();
         }
+        self.send_inst(&client, chat_id, inst, Handle::new(&sender), Service::Imessage, report).await
+    }
+
+    /// Send a prepared message. `report` = emit MessageSent (and a later
+    /// failure of the send job). iMessage conversations are remembered so
+    /// replies resolve; text-message ones are not (they have no group id
+    /// and their chat id is derived from the numbers).
+    async fn send_inst(
+        &self,
+        client: &IMClient,
+        chat_id: ChatId,
+        mut inst: MessageInst,
+        sender: Handle,
+        service: Service,
+        report: bool,
+    ) -> EngineResult<SentMessage> {
         let id = MessageId::new(&inst.id);
         match client.send(&mut inst).await {
             Ok(job) => {
                 // prepare_send stamps sent_timestamp; fall back to our clock.
                 let sent_at = if inst.sent_timestamp > 0 { inst.sent_timestamp } else { now_ms() };
-                if let Some(conv) = inst.conversation.clone() {
+                if service == Service::Imessage
+                    && let Some(conv) = inst.conversation.clone()
+                {
                     self.remember_conversation(chat_id.clone(), conv);
                 }
                 if report {
@@ -1503,7 +1538,7 @@ impl Inner {
                         });
                     }
                 }
-                Ok(SentMessage { id, chat_id, sent_at, sender: Handle::new(&sender) })
+                Ok(SentMessage { id, chat_id, sent_at, sender, service })
             }
             Err(e) => {
                 if report {
@@ -1572,7 +1607,8 @@ async fn receive_loop(
         // Delivery acknowledgement: certified delivery when the sender asked
         // for it (current rustpush), else the legacy "Delivered" message.
         if let Some(ctx) = &inst.certified_context {
-            match tokio::time::timeout(HANDLE_TIMEOUT, client.identity.certify_delivery(MADRID, ctx, false)).await {
+            let topic = if inst.message.is_sms() { sms::SMS_TOPIC } else { MADRID };
+            match tokio::time::timeout(HANDLE_TIMEOUT, client.identity.certify_delivery(topic, ctx, false)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => log::debug!("certify_delivery failed: {e}"),
                 Err(_) => log::warn!("certify_delivery took longer than {}s; giving it up", HANDLE_TIMEOUT.as_secs()),
@@ -1609,11 +1645,16 @@ async fn receive_loop(
             );
         }
 
+        inner.on_sms_inbound(&client, &inst, &my_handles, &all_mine).await;
+
         // Track conversations so replies / ChatTarget::Chat resolve. A
         // membership change is tracked under the group the old and new
         // members form (and dropped outside one), so it never rewrites a
         // 1:1 chat's participants.
-        let tracked = inst.conversation.as_ref().and_then(|conv| {
+        // Text messages are not tracked: their chat id comes from the
+        // numbers, and the iMessage conversation with the same number must
+        // not pick up the SMS participant list.
+        let tracked = inst.conversation.as_ref().filter(|_| convert::sms_parts(&inst).is_none()).and_then(|conv| {
             let id = match &inst.message {
                 RpMessage::ChangeParticipants(c) => convert::membership_chat_id(conv, &c.new_participants, inst.sender.as_deref(), &all_mine)?,
                 _ => convert::chat_id_for(conv, inst.sender.as_deref(), &all_mine),
@@ -1733,6 +1774,7 @@ impl Engine for RustpushEngine {
                 scrub_plist(&mut v);
             }
             s.registration = RegistrationState::default();
+            s.sms = SmsForwarding::default();
         }
         *lock(&inner.silent_cycles) = (0, None);
         *lock(&inner.profiles) = profiles::ProfilesSlot::default();
@@ -1794,19 +1836,38 @@ impl Engine for RustpushEngine {
     }
 
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage> {
-        let inner = &self.inner;
-        let aps = lock(&inner.aps).clone().ok_or(EngineError::NotLoggedIn)?;
-        inner.client()?;
-        // Read once, off the runtime; rustpush's MMCS code reads synchronously.
-        let bytes = tokio::fs::read(path).await.map_err(|e| EngineError::InvalidInput(format!("{}: {e}", path.display())))?;
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
-        let prepared = MMCSFile::prepare_put(Cursor::new(&bytes[..])).await.map_err(perr)?;
-        let attachment = RpAttachment::new_mmcs(&aps, &prepared, Cursor::new(&bytes[..]), mime, convert::uti_for_mime(mime), &name, |_, _| {})
-            .await
-            .map_err(perr)?;
+        let parts = self.inner.upload_attachment(path, mime).await?;
         let mut n = NormalMessage::new(String::new(), MessageType::IMessage);
-        n.parts = MessageParts(vec![IndexedMessagePart { part: RpMessagePart::Attachment(attachment), idx: None, ext: None }]);
-        inner.send(chat, RpMessage::Message(n), None, true).await
+        n.parts = parts;
+        self.inner.send(chat, RpMessage::Message(n), None, true).await
+    }
+
+    async fn send_text_via(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, service: Service) -> EngineResult<SentMessage> {
+        if service == Service::Imessage {
+            return self.send_text(chat, text, reply_to).await;
+        }
+        if text.is_empty() {
+            return Err(EngineError::InvalidInput("empty message".into()));
+        }
+        // Text messages carry no reply reference.
+        let parts = NormalMessage::new(text.to_string(), MessageType::IMessage).parts;
+        self.inner.send_sms(chat, parts).await
+    }
+
+    async fn send_attachment_via(&self, chat: &ChatTarget, path: &Path, mime: &str, service: Service) -> EngineResult<SentMessage> {
+        if service == Service::Imessage {
+            return self.send_attachment(chat, path, mime).await;
+        }
+        let parts = self.inner.upload_attachment(path, mime).await?;
+        self.inner.send_sms(chat, parts).await
+    }
+
+    async fn sms_forwarding(&self) -> SmsForwarding {
+        self.inner.sms_view()
+    }
+
+    async fn set_sms_forwarding(&self, enable: bool) -> EngineResult<SmsForwarding> {
+        self.inner.set_sms_forwarding(enable).await
     }
 
     async fn react(&self, chat: &ChatTarget, message_id: &MessageId, kind: ReactionKind, remove: bool) -> EngineResult<SentMessage> {

@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use crate::client::{self, CliError, Client, LoginOutcome, exit};
 use crate::format::{self, Style};
 use crate::resolve;
-use crate::{Command, Ctx, StoreCommand};
+use crate::{Command, Ctx, SmsCommand, StoreCommand};
 
 /// Wrong two-factor codes tolerated before giving up.
 const MAX_BAD_CODES: u32 = 3;
@@ -63,18 +63,23 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             Ok(exit::OK)
         }
         Command::Messages { chat, limit, before, reverse } => messages(&client, ctx, &chat, limit, before.as_deref().unwrap_or(""), reverse).await,
-        Command::Send { to, text, reply_to } => {
+        Command::Send { to, text, reply_to, sms, imessage } => {
             let text = text_arg(&text)?;
             let target = resolve::resolve_target(&client, &to).await?;
-            let sent = client.send_text(&target, &text, reply_to.as_deref().unwrap_or("")).await?;
+            let reply_to = reply_to.as_deref().unwrap_or("");
+            let sent = match service_arg(sms, imessage) {
+                Some(s) => client.send_text_as(&target, &text, reply_to, s).await?,
+                None => client.send_text(&target, &text, reply_to).await?,
+            };
             if ctx.json {
                 println!("{}", sent.raw);
             } else {
-                confirm(ctx, &format!("sent {} to {}", sent.value.id, sent.value.chat_id));
+                confirm(ctx, &format!("sent {} to {}{}", sent.value.id, sent.value.chat_id, as_text_message(&sent.value)));
             }
             Ok(exit::OK)
         }
-        Command::SendFile { to, file, mime } => {
+        Command::Sms { command } => sms(&client, ctx, command).await,
+        Command::SendFile { to, file, mime, sms, imessage } => {
             let path = std::fs::canonicalize(&file).map_err(|e| CliError::usage(format!("{}: {e}", file.display())))?;
             if !path.is_file() {
                 return Err(CliError::usage(format!("{}: not a regular file", path.display())).into());
@@ -82,11 +87,14 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             let mime = mime.unwrap_or_else(|| resolve::guess_mime(&path).to_string());
             let target = resolve::resolve_target(&client, &to).await?;
             let path_s = path.to_str().ok_or_else(|| CliError::usage(format!("{}: path is not UTF-8", path.display())))?;
-            let sent = client.send_file(&target, path_s, &mime).await?;
+            let sent = match service_arg(sms, imessage) {
+                Some(s) => client.send_file_as(&target, path_s, &mime, s).await?,
+                None => client.send_file(&target, path_s, &mime).await?,
+            };
             if ctx.json {
                 println!("{}", sent.raw);
             } else {
-                confirm(ctx, &format!("sent {} ({}) to {}", path.display(), sent.value.id, sent.value.chat_id));
+                confirm(ctx, &format!("sent {} ({}) to {}{}", path.display(), sent.value.id, sent.value.chat_id, as_text_message(&sent.value)));
             }
             Ok(exit::OK)
         }
@@ -257,6 +265,44 @@ fn print_messages(ms: &[Message], st: Style, show_chat: bool) {
     for m in ms {
         print!("{}", format::message(m, st, &now, show_chat));
     }
+}
+
+/// `--sms` / `--imessage` -> the SendTextAs service; `None` = the daemon picks.
+fn service_arg(sms: bool, imessage: bool) -> Option<&'static str> {
+    if sms {
+        Some("sms")
+    } else if imessage {
+        Some("imessage")
+    } else {
+        None
+    }
+}
+
+fn as_text_message(s: &client::SentMessage) -> &'static str {
+    if s.service == imessage_common::model::Service::Sms { " as a text message (via your iPhone)" } else { "" }
+}
+
+async fn sms(client: &Client, ctx: &Ctx, command: SmsCommand) -> anyhow::Result<u8> {
+    let s = match command {
+        SmsCommand::Enable => client.enable_sms_forwarding(true).await?,
+        SmsCommand::Disable => client.enable_sms_forwarding(false).await?,
+        SmsCommand::Status => client.sms_forwarding().await?,
+    };
+    if ctx.json {
+        println!("{}", s.raw);
+        return Ok(exit::OK);
+    }
+    print!("{}", format::sms_table(&s.value, ctx.style));
+    if command == SmsCommand::Enable && s.value.state == imessage_common::model::SmsState::Requested && !ctx.quiet {
+        eprintln!(
+            "{}",
+            ctx.err_style.dim(
+                "now, on your iPhone: Settings > Messages > Text Message Forwarding, and turn this device on.\n\
+                 `imsg sms status` says `active` once the iPhone confirms or relays its first text."
+            )
+        );
+    }
+    Ok(exit::OK)
 }
 
 async fn status(client: &Client, ctx: &Ctx) -> anyhow::Result<u8> {
@@ -470,6 +516,7 @@ async fn watch(client: &Client, ctx: &Ctx, chat: Option<&str>) -> anyhow::Result
     let mut two_factor = p.receive_two_factor_required().await.map_err(client::map_zbus)?;
     let mut bg = p.receive_background_error().await.map_err(client::map_zbus)?;
     let mut profiles = p.receive_handle_profile_updated().await.map_err(client::map_zbus)?;
+    let mut sms = p.receive_sms_forwarding_changed().await.map_err(client::map_zbus)?;
     let state = client.connection_state().await?;
     let filter = match chat {
         Some(c) => Some(watch_filter(client, c).await?),
@@ -549,6 +596,15 @@ async fn watch(client: &Client, ctx: &Ctx, chat: Option<&str>) -> anyhow::Result
                         None if p.is_some() => format!("{} shares a photo", h.address()),
                         None => format!("{} stopped sharing their name and photo", h.address()),
                     }))
+                }
+            }
+            Some(s) = sms.next() => {
+                let a = s.args().map_err(client::map_zbus)?;
+                if filter.is_some() { None }
+                else if ctx.json { Some(json_event("SmsForwardingChanged", &[("state", JsonField::Raw(a.state_json.clone()))])) }
+                else {
+                    let f: imessage_common::model::SmsForwarding = client::parse("sms forwarding", a.state_json.clone())?.value;
+                    Some(format!("{} {}", st.dim("sms forwarding"), format::sms_state_colored(&f, st)))
                 }
             }
             else => return Err(CliError::new(exit::NO_DAEMON, "signal streams ended (bus connection lost)").into()),

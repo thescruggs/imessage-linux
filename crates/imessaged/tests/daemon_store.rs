@@ -38,6 +38,7 @@ fn incoming(id: &str, chat: &Chat, from: &str, at: u64, text: &str) -> EngineEve
             reactions: vec![],
             effect: None,
             verified: true,
+            service: Default::default(),
         },
         chat: chat.clone(),
         attachments: vec![],

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use imessage_common::model::{
-    Chat, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessagePart, ProfilesState, ProfilesStatus, Reaction, ReactionKind,
+    Chat, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessagePart, ProfilesState, ProfilesStatus, Reaction, ReactionKind, Service, SmsForwarding, SmsState,
 };
 
 use crate::client::{Reachability, Status};
@@ -354,6 +354,9 @@ pub fn message(m: &Message, st: Style, now: &DateTime<impl TimeZone<Offset: std:
     if m.edited {
         head.push_str(&st.dim("  [edited]"));
     }
+    if m.service == Service::Sms {
+        head.push_str(&st.green("  [SMS]"));
+    }
     if m.is_from_me {
         let d = delivery_marker(m.delivery);
         head.push_str("  ");
@@ -433,8 +436,34 @@ pub fn status_table(s: &Status, st: Style) -> String {
         let t = profiles_text(p);
         rows.push(("profiles", if p.state == ProfilesState::Ready { t } else { st.yellow(&t) }));
     }
+    if let Some(sms) = &s.sms {
+        rows.push(("sms", sms_state_colored(sms, st)));
+    }
     if matches!(s.connection, ConnectionState::NeedsLogin) {
         rows.push(("hint", "run `imsg login`".into()));
+    }
+    let w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    rows.iter().map(|(k, v)| format!("{}  {v}\n", st.bold(&pad(k, w)))).collect()
+}
+
+/// `active (via +1555…)`, `requested`, `error (why)`, `off`.
+pub fn sms_state_colored(s: &SmsForwarding, st: Style) -> String {
+    let name = s.state.as_str();
+    let via = s.number.as_ref().map(|n| format!(" (via {})", short_handle(&Handle::new(n)))).unwrap_or_default();
+    match s.state {
+        SmsState::Active => format!("{}{via}", st.green(name)),
+        SmsState::Requested => format!("{}{via}", st.yellow(name)),
+        SmsState::Error => format!("{} ({})", st.red(name), s.detail.as_deref().unwrap_or("?")),
+        SmsState::Off => name.to_string(),
+    }
+}
+
+/// `imsg sms status`.
+pub fn sms_table(s: &SmsForwarding, st: Style) -> String {
+    let mut rows: Vec<(&str, String)> = vec![("state", sms_state_colored(s, st))];
+    rows.push(("number", s.number.as_ref().map(|n| short_handle(&Handle::new(n))).unwrap_or_else(|| "- (set sms_relay_number or other_handles)".into())));
+    if let Some(t) = s.since {
+        rows.push(("since", abs_time_secs(t / 1000)));
     }
     let w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     rows.iter().map(|(k, v)| format!("{}  {v}\n", st.bold(&pad(k, w)))).collect()
@@ -510,6 +539,7 @@ mod tests {
             ],
             effect: None,
             verified: true,
+            service: Default::default(),
         }
     }
 
@@ -622,10 +652,15 @@ mod tests {
             registration: Default::default(),
             unread: Some(0),
             profiles: Some(ProfilesStatus { state: ProfilesState::NeedsLogin, detail: Some("Apple wants a fresh sign-in for iCloud".into()) }),
+            sms: Some(SmsForwarding { state: SmsState::Active, number: Some("tel:+15555550100".into()), since: None, detail: None }),
         };
         let t = status_table(&s, Style::PLAIN);
         assert!(t.contains("profiles    needs `imsg login` (Apple wants a fresh sign-in for iCloud)"), "{t}");
         assert!(t.contains("connection  needs_login"), "{t}");
+        assert!(t.contains("sms         active (via +15555550100)"), "{t}");
+        let e = SmsForwarding { state: SmsState::Error, detail: Some("no iPhone".into()), ..Default::default() };
+        assert_eq!(sms_state_colored(&e, Style::PLAIN), "error (no iPhone)");
+        assert!(sms_table(&SmsForwarding::default(), Style::PLAIN).contains("state   off"));
         assert!(t.contains("hint        run `imsg login`"), "{t}");
         assert!(!t.contains("sends as"), "{t}");
         assert!(!t.contains("also mine"), "{t}");

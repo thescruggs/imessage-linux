@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 
 use imessage_common::import::{ImportAttachment, ImportBatch, ImportMessage, ImportReaction, ImportResult};
-use imessage_common::model::{AttachmentId, Chat, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind};
+use imessage_common::model::{AttachmentId, Chat, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind, Service};
 use serde::{Deserialize, Serialize};
 
 use crate::Ctx;
@@ -581,6 +581,7 @@ pub fn convert(records: Vec<Record>, stage: &Path, opts: &ConvertOptions) -> Con
             reactions: vec![],
             effect: m.effect.clone().filter(|e| !e.is_empty()),
             verified: true,
+            service: if sms { Service::Sms } else { Service::Imessage },
         };
         // Several Mac chats can map to one id (SMS + iMessage with the same
         // number; group rows sharing a group GUID after membership
@@ -1015,7 +1016,8 @@ mod tests {
         assert_eq!(b.message.sender.uri, "mailto:bob@example.com");
         assert_eq!(by_id("m4").unwrap().message.chat_id.0, "mailto:me@icloud.example");
         assert!(by_id("s1").is_none() && by_id("orphan").is_none());
-        assert!(by_id("m6").is_some(), "SMS kept by default");
+        assert_eq!(by_id("m6").expect("SMS kept by default").message.service, Service::Sms);
+        assert_eq!(by_id("m5").unwrap().message.service, Service::Imessage);
 
         assert_eq!(c.reactions.len(), 2);
         assert_eq!(c.reactions[0].message_id.0, "M3");

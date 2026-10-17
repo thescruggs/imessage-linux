@@ -11,7 +11,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use imessage_common::model::{
     Chat, ChatId, ConnectionState, DeliveryReceipt, DeliveryState, Handle, Message, MessageId, MessagePart,
-    ProfilesStatus, ReactionKind, ReadReceipt, RegistrationState, TypingEvent,
+    ProfilesStatus, ReactionKind, ReadReceipt, RegistrationState, Service, SmsForwarding, TypingEvent,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -105,6 +105,9 @@ pub struct SentMessage {
     pub sent_at: u64,
     /// The handle the engine actually sent from (one of ours).
     pub sender: Handle,
+    /// iMessage, or a text message relayed by the user's iPhone.
+    #[serde(default)]
+    pub service: Service,
 }
 
 /// Where to send.
@@ -265,6 +268,9 @@ pub enum EngineEvent {
     ConnectionChanged(ConnectionState),
     RegistrationChanged(RegistrationState),
     TwoFactorRequired,
+    /// Text Message Forwarding changed state (requested, confirmed by the
+    /// iPhone, turned off there, ...).
+    SmsForwardingChanged(SmsForwarding),
     Error(String),
 }
 
@@ -292,6 +298,33 @@ pub trait Engine: Send + Sync {
 
     async fn send_text(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>) -> EngineResult<SentMessage>;
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage>;
+    /// [`Engine::send_text`] over `service`: `Sms` sends a text message
+    /// through the user's iPhone (Text Message Forwarding), to phone
+    /// numbers only. Engines without SMS support refuse it.
+    async fn send_text_via(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, service: Service) -> EngineResult<SentMessage> {
+        match service {
+            Service::Imessage => self.send_text(chat, text, reply_to).await,
+            Service::Sms => Err(EngineError::Unsupported("text messages (SMS) are not supported by this engine".into())),
+        }
+    }
+    /// [`Engine::send_attachment`] over `service` (`Sms` = MMS via the iPhone).
+    async fn send_attachment_via(&self, chat: &ChatTarget, path: &Path, mime: &str, service: Service) -> EngineResult<SentMessage> {
+        match service {
+            Service::Imessage => self.send_attachment(chat, path, mime).await,
+            Service::Sms => Err(EngineError::Unsupported("text messages (SMS) are not supported by this engine".into())),
+        }
+    }
+    /// Text Message Forwarding state.
+    async fn sms_forwarding(&self) -> SmsForwarding {
+        SmsForwarding::default()
+    }
+    /// Ask the user's iPhone to relay text messages to this device
+    /// (`enable`), or stop. Turning it on also needs the user to switch this
+    /// device on in the iPhone's Settings > Messages > Text Message
+    /// Forwarding; the state is `requested` until the iPhone confirms.
+    async fn set_sms_forwarding(&self, _enable: bool) -> EngineResult<SmsForwarding> {
+        Err(EngineError::Unsupported("text messages (SMS) are not supported by this engine".into()))
+    }
     async fn react(&self, chat: &ChatTarget, message_id: &MessageId, kind: ReactionKind, remove: bool) -> EngineResult<SentMessage>;
     async fn edit(&self, chat: &ChatTarget, message_id: &MessageId, new_text: &str) -> EngineResult<SentMessage>;
     async fn unsend(&self, chat: &ChatTarget, message_id: &MessageId) -> EngineResult<SentMessage>;

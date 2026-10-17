@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use imessage_common::model::{
     Attachment, AttachmentId, Chat, ChatId, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessageId, MessagePart,
-    ProfilesStatus, Reaction, ReactionKind, RegistrationState,
+    ProfilesStatus, Reaction, ReactionKind, RegistrationState, Service, SmsForwarding,
 };
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
@@ -30,6 +30,11 @@ pub const BACKGROUNDS_DIR: &str = "backgrounds";
 /// Backgrounds one fetch task downloads in a row (the chat's background
 /// changed while the previous one was downloading).
 pub const BACKGROUND_FETCH_ROUNDS: usize = 3;
+/// How long an IDS answer "on iMessage" is trusted when picking iMessage or
+/// SMS for a send.
+pub const REACHABLE_TTL: Duration = Duration::from_secs(6 * 3600);
+/// The same for "not on iMessage" (people get iPhones).
+pub const UNREACHABLE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Everything the daemon announces (D-Bus signals mirror these 1:1).
 #[allow(clippy::large_enum_variant)]
@@ -49,6 +54,8 @@ pub enum DaemonSignal {
     /// A contact's shared name / photo changed (`None`: they stopped
     /// sharing).
     HandleProfileUpdated { handle: String, profile: Option<HandleProfile> },
+    /// Text Message Forwarding changed state.
+    SmsForwardingChanged(SmsForwarding),
 }
 
 /// What an operation failed with (mapped to D-Bus error names in `dbus.rs`).
@@ -87,6 +94,8 @@ pub struct Status {
     pub unread: Option<u32>,
     /// Whether contacts' shared names and photos can be fetched.
     pub profiles: ProfilesStatus,
+    /// Text Message Forwarding (SMS relayed by the iPhone).
+    pub sms: SmsForwarding,
 }
 
 /// `LookupHandles` result element.
@@ -224,6 +233,9 @@ pub struct Hub {
     typing: Typing,
     typing_timeout: Duration,
     stop: watch::Sender<bool>,
+    /// IDS reachability answers (handle -> (on iMessage, when asked)) for
+    /// choosing between iMessage and SMS.
+    reachability: Mutex<HashMap<String, (bool, Instant)>>,
 }
 
 impl Hub {
@@ -240,6 +252,7 @@ impl Hub {
             typing: Typing::default(),
             typing_timeout,
             stop: watch::channel(false).0,
+            reachability: Mutex::new(HashMap::new()),
         })
     }
 
@@ -446,6 +459,99 @@ impl Hub {
             registration,
             unread,
             profiles: self.engine.profiles_status().await,
+            sms: self.engine.sms_forwarding().await,
+        }
+    }
+
+    /// Ask the iPhone to relay text messages to us (or stop).
+    pub async fn enable_sms_forwarding(&self, enable: bool) -> OpResult<SmsForwarding> {
+        Ok(self.engine.set_sms_forwarding(enable).await?)
+    }
+
+    pub async fn sms_forwarding(&self) -> SmsForwarding {
+        self.engine.sms_forwarding().await
+    }
+
+    /// Our own addresses (registered + `other_handles`), normalized.
+    async fn own_handles(&self) -> HashSet<String> {
+        let reg = self.engine.registration_state().await;
+        let sms = self.engine.sms_forwarding().await;
+        reg.handles.iter().map(|h| h.uri.clone()).chain(reg.other_handles.iter().cloned()).chain(sms.number).map(|h| Handle::normalize(&h)).collect()
+    }
+
+    /// The phone numbers a send to `target` goes to, if it is a 1:1 chat
+    /// with a phone number, a text-message group (`group-p:` of numbers) or
+    /// a participant list of numbers only; `None` otherwise (an email
+    /// address, an iMessage group with a group id).
+    async fn phone_recipients(&self, target: &ChatTarget) -> Option<Vec<String>> {
+        let raw: Vec<String> = match target {
+            ChatTarget::Participants(p) => p.iter().map(|h| Handle::try_normalize(h)).collect::<Option<Vec<_>>>()?,
+            ChatTarget::Chat(id) if id.group_guid().is_some() => return None,
+            ChatTarget::Chat(id) => match id.0.strip_prefix(ChatId::GROUP_PARTICIPANTS_PREFIX) {
+                Some(list) => list.split(',').map(str::to_string).collect(),
+                None => vec![id.0.clone()],
+            },
+        };
+        let ours = self.own_handles().await;
+        let mut others: Vec<String> = raw.into_iter().filter(|h| !ours.contains(h)).collect();
+        others.dedup();
+        (!others.is_empty() && others.iter().all(|h| h.starts_with("tel:"))).then_some(others)
+    }
+
+    /// Which of `handles` are on iMessage, from the cache or IDS.
+    async fn reachable(&self, handles: &[String]) -> OpResult<HashMap<String, bool>> {
+        let now = Instant::now();
+        let mut out = HashMap::new();
+        let mut ask = vec![];
+        {
+            let cache = self.reachability.lock().unwrap_or_else(|p| p.into_inner());
+            for h in handles {
+                match cache.get(h) {
+                    Some((ok, at)) if now.duration_since(*at) < if *ok { REACHABLE_TTL } else { UNREACHABLE_TTL } => {
+                        out.insert(h.clone(), *ok);
+                    }
+                    _ => ask.push(h.clone()),
+                }
+            }
+        }
+        if !ask.is_empty() {
+            let answers = self.engine.lookup_handles(ask).await?;
+            let mut cache = self.reachability.lock().unwrap_or_else(|p| p.into_inner());
+            for (h, ok) in answers {
+                cache.insert(h.clone(), (ok, now));
+                out.insert(h, ok);
+            }
+        }
+        Ok(out)
+    }
+
+    /// iMessage or SMS for a send. An explicit `hint` wins. Otherwise SMS
+    /// when Text Message Forwarding is active and the recipients are phone
+    /// numbers of which at least one is not on iMessage (Messages.app's
+    /// rule); iMessage when anything is uncertain (lookup failed).
+    pub async fn choose_service(&self, target: &ChatTarget, hint: Option<Service>) -> Service {
+        if let Some(s) = hint {
+            return s;
+        }
+        if !self.engine.sms_forwarding().await.is_active() {
+            return Service::Imessage;
+        }
+        let Some(numbers) = self.phone_recipients(target).await else { return Service::Imessage };
+        match self.reachable(&numbers).await {
+            Ok(r) if numbers.iter().any(|n| r.get(n) == Some(&false)) => Service::Sms,
+            Ok(_) => Service::Imessage,
+            Err(e) => {
+                log::warn!("cannot tell whether the recipients are on iMessage ({e}); sending as iMessage");
+                Service::Imessage
+            }
+        }
+    }
+
+    /// Text messages have no tapbacks, edits, unsend or typing indicators.
+    async fn refuse_sms(&self, id: &MessageId, what: &str) -> OpResult<()> {
+        match self.stored_message(id).await? {
+            Some(m) if m.service == Service::Sms => Err(EngineError::Unsupported(format!("{what} is not available for text messages (SMS)")).into()),
+            _ => Ok(()),
         }
     }
 
@@ -666,7 +772,20 @@ impl Hub {
                 v
             }
             ChatTarget::Chat(id) if !id.is_group() => vec![Handle::new(&id.0)],
-            ChatTarget::Chat(_) => vec![],
+            ChatTarget::Chat(id) => match id.0.strip_prefix(ChatId::GROUP_PARTICIPANTS_PREFIX) {
+                Some(list) => list.split(',').map(Handle::new).collect(),
+                None => vec![],
+            },
+        };
+        // A text message's chat may differ from what the target names (our
+        // own numbers dropped, a group of numbers keyed by them): store the
+        // chat the engine sent to with the people in it.
+        let participants = if msg.chat_id.0.starts_with(ChatId::GROUP_PARTICIPANTS_PREFIX) {
+            msg.chat_id.0[ChatId::GROUP_PARTICIPANTS_PREFIX.len()..].split(',').map(Handle::new).collect()
+        } else if !msg.chat_id.is_group() && msg.service == Service::Sms {
+            vec![Handle::new(&msg.chat_id.0)]
+        } else {
+            participants
         };
         let chat = Chat {
             id: msg.chat_id.clone(),
@@ -712,16 +831,25 @@ impl Hub {
             reactions: vec![],
             effect: None,
             verified: true,
+            service: sent.service,
         }
     }
 
     pub async fn send_text(self: &Arc<Self>, target: ChatTarget, text: &str, reply_to: Option<MessageId>) -> OpResult<SentMessage> {
+        self.send_text_as(target, text, reply_to, None).await
+    }
+
+    /// `service`: `None` = pick ([`Hub::choose_service`]).
+    pub async fn send_text_as(self: &Arc<Self>, target: ChatTarget, text: &str, reply_to: Option<MessageId>, service: Option<Service>) -> OpResult<SentMessage> {
         if text.is_empty() {
             return Err(OpError::InvalidInput("empty message".into()));
         }
-        let r = self.engine.send_text(&target, text, reply_to.as_ref()).await;
+        let service = self.choose_service(&target, service).await;
+        // Text messages carry no reply reference.
+        let reply_to = reply_to.filter(|_| service == Service::Imessage);
+        let r = self.engine.send_text_via(&target, text, reply_to.as_ref(), service).await;
         let sent = match r {
-            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.send_text(&target, text, reply_to.as_ref()).await?,
+            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.send_text_via(&target, text, reply_to.as_ref(), service).await?,
             r => r?,
         };
         let msg = self.outgoing(&sent, vec![MessagePart::Text { text: text.to_string() }], reply_to);
@@ -730,6 +858,11 @@ impl Hub {
     }
 
     pub async fn send_file(self: &Arc<Self>, target: ChatTarget, path: &str, mime: &str) -> OpResult<SentMessage> {
+        self.send_file_as(target, path, mime, None).await
+    }
+
+    /// `service`: `None` = pick ([`Hub::choose_service`]); `Sms` = MMS.
+    pub async fn send_file_as(self: &Arc<Self>, target: ChatTarget, path: &str, mime: &str, service: Option<Service>) -> OpResult<SentMessage> {
         let p = PathBuf::from(path);
         if !p.is_absolute() {
             return Err(OpError::InvalidInput(format!("{path:?} is not an absolute path")));
@@ -739,9 +872,10 @@ impl Hub {
             return Err(OpError::InvalidInput(format!("{path} is not a regular file")));
         }
         let mime = if mime.trim().is_empty() { "application/octet-stream" } else { mime.trim() };
-        let r = self.engine.send_attachment(&target, &p, mime).await;
+        let service = self.choose_service(&target, service).await;
+        let r = self.engine.send_attachment_via(&target, &p, mime, service).await;
         let sent = match r {
-            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.send_attachment(&target, &p, mime).await?,
+            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.send_attachment_via(&target, &p, mime, service).await?,
             r => r?,
         };
         let filename = safe_component(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), "attachment");
@@ -806,6 +940,7 @@ impl Hub {
         let kind = parse_reaction_kind(kind)?;
         let target = Self::target(chat_id, &[])?;
         let mid = MessageId::new(message_id);
+        self.refuse_sms(&mid, "a tapback").await?;
         let r = self.engine.react(&target, &mid, kind.clone(), remove).await;
         let sent = match r {
             Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.react(&target, &mid, kind.clone(), remove).await?,
@@ -825,6 +960,7 @@ impl Hub {
         let target = Self::target(chat_id, &[])?;
         let mid = MessageId::new(message_id);
         self.require_own(&mid, "edit").await?;
+        self.refuse_sms(&mid, "editing").await?;
         let r = self.engine.edit(&target, &mid, text).await;
         let sent = match r {
             Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.edit(&target, &mid, text).await?,
@@ -841,6 +977,7 @@ impl Hub {
         let target = Self::target(chat_id, &[])?;
         let mid = MessageId::new(message_id);
         self.require_own(&mid, "unsend").await?;
+        self.refuse_sms(&mid, "unsend").await?;
         let r = self.engine.unsend(&target, &mid).await;
         let sent = match r {
             Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.unsend(&target, &mid).await?,
@@ -854,6 +991,9 @@ impl Hub {
 
     pub async fn set_typing(&self, chat_id: &str, typing: bool) -> OpResult<()> {
         let target = Self::target(chat_id, &[])?;
+        if self.chat_is_sms(&ChatId(chat_id.trim().to_string())).await {
+            return Err(EngineError::Unsupported("typing indicators are not available for text messages (SMS)".into()).into());
+        }
         match self.engine.set_typing(&target, typing).await {
             Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => Ok(self.engine.set_typing(&target, typing).await?),
             r => Ok(r?),
@@ -879,10 +1019,11 @@ impl Hub {
                 let updated = s.mark_read(&c, u.as_ref())?;
                 let receipt_for = match u {
                     Some(u) => match s.get_message(&u)? {
-                        Some(m) if !from_others(&m) => None,
+                        // ours, or a text message (no read receipts for SMS)
+                        Some(m) if !from_others(&m) || m.service == Service::Sms => None,
                         _ => Some(u),
                     },
-                    None => s.list_messages(&c, None, crate::store::DEFAULT_PAGE)?.messages.into_iter().rev().find(|m| from_others(m)).map(|m| m.id),
+                    None => s.list_messages(&c, None, crate::store::DEFAULT_PAGE)?.messages.into_iter().rev().find(|m| from_others(m)).filter(|m| m.service == Service::Imessage).map(|m| m.id),
                 };
                 Ok((updated, receipt_for))
             })
@@ -902,7 +1043,24 @@ impl Hub {
     }
 
     pub async fn lookup_handles(&self, handles: Vec<String>) -> OpResult<Vec<Reachability>> {
-        Ok(self.engine.lookup_handles(handles).await?.into_iter().map(|(handle, reachable)| Reachability { handle, reachable }).collect())
+        let answers = self.engine.lookup_handles(handles).await?;
+        let now = Instant::now();
+        let mut cache = self.reachability.lock().unwrap_or_else(|p| p.into_inner());
+        for (h, ok) in &answers {
+            cache.insert(h.clone(), (*ok, now));
+        }
+        Ok(answers.into_iter().map(|(handle, reachable)| Reachability { handle, reachable }).collect())
+    }
+
+    /// Whether the chat's newest message is a text message (then it is an
+    /// SMS conversation for now: no typing indicators, a green composer).
+    async fn chat_is_sms(&self, chat: &ChatId) -> bool {
+        if chat.group_guid().is_some() {
+            return false;
+        }
+        let Ok(store) = self.store() else { return false };
+        let c = chat.clone();
+        store.call(move |s| s.chat_service(&c)).await.ok().flatten() == Some(Service::Sms)
     }
 
     /// Path of the downloaded file, downloading it to

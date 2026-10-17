@@ -38,6 +38,7 @@ fn msg(id: &str, chat: &ChatId, from: &str, at: u64, text: &str, from_me: bool) 
         reactions: vec![],
         effect: None,
         verified: true,
+        service: Default::default(),
     }
 }
 

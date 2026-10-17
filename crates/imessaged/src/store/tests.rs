@@ -46,6 +46,7 @@ fn msg(id: &str, chat: &ChatId, sender: &str, at: u64, text: &str) -> Message {
         reactions: vec![],
         effect: None,
         verified: true,
+        service: Default::default(),
     }
 }
 
@@ -863,4 +864,23 @@ fn group_icons_set_download_remove() {
     // a group with only an icon is not "empty"
     s.apply_event(&ev(Some(icon("I4", 10)), 500)).unwrap();
     assert_eq!(s.delete_empty_groups().unwrap(), 0);
+}
+
+#[test]
+fn message_service_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path());
+    let chat = direct_chat("+15555550123");
+    let mut sms = msg("S1", &chat.id, "tel:+15555550123", 10, "via the phone");
+    sms.service = Service::Sms;
+    s.apply_event(&received(sms, chat.clone())).unwrap();
+    s.apply_event(&received(msg("I1", &chat.id, "tel:+15555550123", 20, "over iMessage"), chat.clone())).unwrap();
+    // one thread for both services
+    let page = s.list_messages(&chat.id, None, 10).unwrap();
+    let services: Vec<Service> = page.messages.iter().map(|m| m.service).collect();
+    assert_eq!(services, vec![Service::Sms, Service::Imessage]);
+    assert_eq!(s.get_message(&MessageId::new("S1")).unwrap().unwrap().service, Service::Sms);
+    // JSON carries it
+    let j = serde_json::to_value(s.get_message(&MessageId::new("S1")).unwrap().unwrap()).unwrap();
+    assert_eq!(j["service"], "sms");
 }

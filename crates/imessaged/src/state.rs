@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
-use imessage_common::model::RegistrationState;
+use imessage_common::model::{RegistrationState, SmsForwarding};
 use rand::RngCore;
 use rustpush::{APSState, IDSNGMIdentity, IDSUser};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -73,6 +73,9 @@ pub struct SavedState {
     /// Summary for clients, recomputed after every registration.
     #[serde(default)]
     pub registration: RegistrationState,
+    /// Text Message Forwarding: requested / confirmed by the iPhone.
+    #[serde(default)]
+    pub sms: SmsForwarding,
 }
 
 /// rustpush serializes `APSState::token = None` by omitting the key, but its

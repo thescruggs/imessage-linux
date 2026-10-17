@@ -116,6 +116,14 @@ pub enum Command {
         /// Reply inline to this message id.
         #[arg(long, value_name = "MSG_ID")]
         reply_to: Option<String>,
+        /// Send as a text message (SMS) through your iPhone (Text Message
+        /// Forwarding; `imsg sms enable`). Default: SMS only when the
+        /// recipient is not on iMessage and forwarding is active.
+        #[arg(long, conflicts_with = "imessage")]
+        sms: bool,
+        /// Send as iMessage even if the recipient looks unreachable.
+        #[arg(long)]
+        imessage: bool,
     },
     /// Send a file as an attachment.
     SendFile {
@@ -126,6 +134,12 @@ pub enum Command {
         /// MIME type (default: guessed from the extension).
         #[arg(long)]
         mime: Option<String>,
+        /// Send as a picture/text message (MMS) through your iPhone.
+        #[arg(long, conflicts_with = "imessage")]
+        sms: bool,
+        /// Send as iMessage.
+        #[arg(long)]
+        imessage: bool,
     },
     /// Add (or remove) a tapback.
     React {
@@ -240,6 +254,11 @@ pub enum Command {
         #[arg(long, requires = "backgrounds")]
         create: bool,
     },
+    /// Text Message Forwarding: SMS / MMS / RCS relayed by your iPhone.
+    Sms {
+        #[command(subcommand)]
+        command: SmsCommand,
+    },
     /// Message store maintenance.
     Store {
         #[command(subcommand)]
@@ -252,6 +271,17 @@ pub enum Command {
     },
     /// Print the imsg and imessaged versions.
     Version,
+}
+
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum SmsCommand {
+    /// Ask your iPhone to relay text messages here; then turn this device on
+    /// in the iPhone's Settings > Messages > Text Message Forwarding.
+    Enable,
+    /// Stop text message forwarding to this device.
+    Disable,
+    /// Show the forwarding state.
+    Status,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -361,8 +391,14 @@ mod tests {
         let c = parse(&["send", "a@x.com,b@x.com", "hello", "world", "--reply-to", "ID"]).unwrap();
         assert_eq!(
             c.command,
-            Command::Send { to: "a@x.com,b@x.com".into(), text: vec!["hello".into(), "world".into()], reply_to: Some("ID".into()) }
+            Command::Send { to: "a@x.com,b@x.com".into(), text: vec!["hello".into(), "world".into()], reply_to: Some("ID".into()), sms: false, imessage: false }
         );
+        let c = parse(&["send", "--sms", "+15555550123", "hi"]).unwrap();
+        assert!(matches!(c.command, Command::Send { sms: true, imessage: false, .. }));
+        assert!(parse(&["send", "--sms", "--imessage", "+15555550123", "hi"]).is_err());
+        assert_eq!(parse(&["sms", "enable"]).unwrap().command, Command::Sms { command: SmsCommand::Enable });
+        assert_eq!(parse(&["sms", "status"]).unwrap().command, Command::Sms { command: SmsCommand::Status });
+        assert!(parse(&["sms"]).is_err());
         let c = parse(&["send", "bob@x.com", "--", "-1", "--not-a-flag"]).unwrap();
         assert!(matches!(c.command, Command::Send { text, .. } if text == vec!["-1".to_string(), "--not-a-flag".to_string()]));
         let c = parse(&["send", "bob@x.com", "-"]).unwrap();
