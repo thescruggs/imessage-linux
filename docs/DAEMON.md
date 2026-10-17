@@ -252,6 +252,7 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `key_provider` | `--key-provider` / `IMESSAGED_KEY_PROVIDER` | `auto` (`auto`, `secret-service`, `file`) |
 | `log_level` | `--log-level` / `IMESSAGED_LOG` (`RUST_LOG` wins) | `info,rustpush=warn,icloud_auth=warn,omnisette=warn,keystore=warn,zbus=warn,tracing=warn` |
 | `store_credentials` | `--store-credentials` / `IMESSAGED_STORE_CREDENTIALS` | `true` |
+| — | `IMESSAGED_PROFILES_FORCE_REFRESH=1` (env only; debugging) | unset: re-run the silent iCloud sign-in at the next start, see [Liveness watchdog](#liveness-watchdog-enginerustpush_enginelivenessrs) |
 | `anisette_command` | `--anisette-command` / `IMESSAGED_ANISETTE_COMMAND` | unset (use `anisette_url`); see [Anisette source](#anisette-source) |
 | `sender_handle` | `--sender-handle` / `IMESSAGED_SENDER_HANDLE` | unset = the first registered email handle |
 | `other_handles` | `--other-handle` (repeatable) / `IMESSAGED_OTHER_HANDLES` (comma-separated) | `[]` |
@@ -514,6 +515,56 @@ at 30 s (reset after 60 s of healthy running). The receive loop
 re-subscribes to `messages_cont` on restart. Supervisors stop on shutdown
 or when the client is replaced (`client_gen`), and aborting a supervisor
 aborts its child.
+
+### Liveness watchdog (`engine/rustpush_engine/liveness.rs`)
+
+Why it exists: rustpush acknowledges **every** APNs notification by
+itself (the ack task in `APSConnectionResource::new`), and keeps the
+socket alive by itself (a ping every 60 s; a missed pong reconnects).
+Neither depends on our receive loop. A notification that reaches the
+process but is never handled by the receive loop is therefore gone for
+good: Apple has it as delivered and does not resend it after a restart.
+The receive loop handles messages one at a time, inline through
+`IMClient::handle`, and rustpush's handler has unbounded waits in it
+(IDS push commands fetch the account's handles over HTTPS through a
+client with no timeout; some paths return silently). And the connection
+state (`Connected`) is computed from the APNs and IDS resource states
+alone, so a stuck or missing receive loop is invisible there. This
+happened on 2026-10-17 14:55–15:10: `Connected`, pongs flowing, nothing
+received for 15 minutes, the messages lost.
+
+What the daemon does about it:
+
+* the receive loop logs `receive loop running (client generation N)` at
+  info when it starts, and at debug every APNs message it takes from the
+  broadcast (`APNs pong`, `APNs notification on <topic>`), so the journal
+  shows whether traffic reaches it;
+* handling one message (rustpush's `handle`, and each delivery
+  acknowledgement) is bounded by `HANDLE_TIMEOUT` (120 s; every wait
+  inside rustpush is itself bounded at 15–60 s, so only a genuine stall
+  gets there). On timeout that message is given up (warn, `Error` event)
+  and the loop goes on with the next one;
+* a closed APNs broadcast ends the loop with an error (logged, respawned
+  with a fresh subscription) instead of a silent `Ok`;
+* a watchdog task (`APNs watchdog`, per client generation) checks every
+  30 s (`WATCHDOG_TICK`): if the connection is `Connected` and the
+  receive loop has seen no APNs message at all for `SILENCE_LIMIT`
+  (3 × the 60 s keep-alive = 180 s; a healthy socket shows a pong at
+  least every 60 s) it logs a warning, emits an `Error` event and forces
+  an APNs reconnect (`request_update`), which re-filters the topics and
+  re-runs `IMClient`'s connection setup; at most once per
+  `SILENCE_LIMIT`. A loop busy inside the handler counts as alive. The
+  rule is the pure `liveness::verdict`, unit tested.
+
+Debugging aid: `IMESSAGED_PROFILES_FORCE_REFRESH=1` in the daemon's
+environment makes the next start ignore the saved `cloudkit_tokens` and
+run the silent "no iCloud tokens yet" sign-in again (the tokens are
+replaced, never deleted). With it, that sign-in alone did **not**
+reproduce the 14:55 deafness (inbound worked 60 ms after the test
+message), so the trigger was something one-off at that start (the first
+MobileMe sign-in of this device, which may well have made Apple push an
+IDS command to the account's devices, is the prime suspect; it could not
+be captured because the build in use logged nothing of the kind).
 
 ## Anisette source
 

@@ -34,6 +34,12 @@
 //!    under [`supervise::supervise`]: a panic inside rustpush's handle path
 //!    is logged, emitted as `EngineEvent::Error`, the connection shows
 //!    `Connecting` while degraded, and the task is respawned (1 s .. 30 s).
+//! 6. **Liveness** (`liveness.rs`): rustpush acks every APNs notification
+//!    by itself, so one the receive loop never handles is lost for good.
+//!    The loop bounds each message's handling (`HANDLE_TIMEOUT`), logs when
+//!    it starts and what it sees (debug), and a watchdog forces an APNs
+//!    reconnect when a `Connected` connection delivered nothing to it (not
+//!    even a keep-alive pong) for `SILENCE_LIMIT`.
 //!
 //! Only one `RustpushEngine` may exist per process: rustpush's keystore is
 //! a process global.
@@ -64,7 +70,10 @@ use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+mod liveness;
 mod profiles;
+
+use liveness::{HANDLE_TIMEOUT, Liveness, Verdict, WATCHDOG_TICK};
 
 use super::supervise::{self, Backoff};
 use super::{convert, SentMessage};
@@ -563,6 +572,9 @@ struct Inner {
     profiles: StdMutex<profiles::ProfilesSlot>,
     /// Serializes building the CloudKit client.
     profiles_init: Mutex<()>,
+    /// What the receive loop sees on APNs (`liveness.rs`); read by the
+    /// watchdog.
+    liveness: Liveness,
 }
 
 /// Cheap to clone; all clones share one engine.
@@ -676,6 +688,7 @@ impl RustpushEngine {
             shutdown: watch::channel(false).0,
             profiles: StdMutex::new(profiles::ProfilesSlot::default()),
             profiles_init: Mutex::new(()),
+            liveness: Liveness::default(),
         });
         inner.update_status(|_| {});
 
@@ -1063,9 +1076,47 @@ impl Inner {
         let (a, c) = (aps.clone(), client.clone());
         let recv = self.spawn_supervised("receive loop", Some(generation), move |inner| {
             let sub = first_sub.take().unwrap_or_else(|| a.messages_cont.subscribe());
-            receive_loop(Arc::downgrade(inner), c.clone(), sub)
+            receive_loop(Arc::downgrade(inner), c.clone(), sub, generation)
         });
-        lock(&self.client_tasks).extend([monitor, recv]);
+
+        // Liveness watchdog (`liveness.rs`): a Connected connection that
+        // carried nothing (not even a keep-alive pong) to the receive loop
+        // for SILENCE_LIMIT is forced to reconnect.
+        let a = aps.clone();
+        let watchdog = self.spawn_supervised("APNs watchdog", Some(generation), move |inner| {
+            let weak = Arc::downgrade(inner);
+            let aps = a.clone();
+            async move {
+                let mut tick = tokio::time::interval(WATCHDOG_TICK);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let Some(inner) = weak.upgrade() else { return Ok(()) };
+                    if inner.is_shutting_down() || inner.client_gen.load(Ordering::SeqCst) != generation {
+                        return Ok(());
+                    }
+                    let l = &inner.liveness;
+                    if let Some(d) = l.handling_for()
+                        && d > HANDLE_TIMEOUT + WATCHDOG_TICK
+                    {
+                        // The loop bounds its own waits; this should not happen.
+                        log::warn!("receive loop has been handling one APNs message for {}s", d.as_secs());
+                    }
+                    let connected = inner.connection() == ConnectionState::Connected;
+                    if let Verdict::Reconnect(quiet) = liveness::verdict(connected, l.quiet_for(), l.since_kick()) {
+                        log::warn!(
+                            "APNs: no traffic reached the receive loop for {}s (not even a keep-alive pong) while Connected; \
+                             forcing a reconnect",
+                            quiet.as_secs()
+                        );
+                        inner.emit(EngineEvent::Error(format!("APNs silent for {}s while connected; reconnecting", quiet.as_secs())));
+                        l.kicked();
+                        aps.request_update().await;
+                    }
+                }
+            }
+        });
+        lock(&self.client_tasks).extend([monitor, recv, watchdog]);
         self.update_status(|s| {
             s.needs_login = false;
             s.two_factor = false;
@@ -1465,8 +1516,17 @@ impl Inner {
 }
 
 /// APS -> IMClient::handle -> convert -> events, plus delivery receipts.
-/// Runs under the supervisor; `Ok(())` = channel closed / engine gone.
-async fn receive_loop(weak: Weak<Inner>, client: Arc<IMClient>, mut sub: broadcast::Receiver<rustpush::APSMessage>) -> Result<(), String> {
+/// Runs under the supervisor; `Ok(())` = engine gone. A closed broadcast
+/// is an `Err` (the supervisor logs it and re-subscribes) rather than a
+/// silent exit, and no single message may hold the loop longer than
+/// [`HANDLE_TIMEOUT`] (`liveness.rs`).
+async fn receive_loop(
+    weak: Weak<Inner>,
+    client: Arc<IMClient>,
+    mut sub: broadcast::Receiver<rustpush::APSMessage>,
+    generation: u64,
+) -> Result<(), String> {
+    log::info!("receive loop running (client generation {generation})");
     loop {
         let msg = match sub.recv().await {
             Ok(m) => m,
@@ -1474,17 +1534,32 @@ async fn receive_loop(weak: Weak<Inner>, client: Arc<IMClient>, mut sub: broadca
                 log::warn!("receive loop lagged; {n} APNs messages dropped");
                 continue;
             }
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            Err(broadcast::error::RecvError::Closed) => return Err("APNs message broadcast closed".into()),
         };
-        let inst = match client.handle(msg).await {
-            Ok(Some(i)) => i,
-            Ok(None) => continue,
-            Err(e) => {
+        let Some(inner) = weak.upgrade() else { return Ok(()) };
+        inner.liveness.saw();
+        match &msg {
+            rustpush::APSMessage::Pong => log::debug!("APNs pong"),
+            rustpush::APSMessage::Notification { topic, .. } => log::debug!("APNs notification on {}", liveness::topic_name(topic)),
+            _ => {}
+        }
+        inner.liveness.handling_begin();
+        let handled = tokio::time::timeout(HANDLE_TIMEOUT, client.handle(msg)).await;
+        inner.liveness.handling_end();
+        let inst = match handled {
+            Ok(Ok(Some(i))) => i,
+            Ok(Ok(None)) => continue,
+            Ok(Err(e)) => {
                 log::warn!("failed to decode incoming message: {e}");
                 continue;
             }
+            Err(_) => {
+                let why = format!("handling an APNs message took longer than {}s; giving it up (that message is lost)", HANDLE_TIMEOUT.as_secs());
+                log::warn!("{why}");
+                inner.emit(EngineEvent::Error(why));
+                continue;
+            }
         };
-        let Some(inner) = weak.upgrade() else { return Ok(()) };
 
         // Redeliveries (APNs resends until acked) are detected here but
         // still acknowledged below, so the sender's "Delivered" completes.
@@ -1497,8 +1572,10 @@ async fn receive_loop(weak: Weak<Inner>, client: Arc<IMClient>, mut sub: broadca
         // Delivery acknowledgement: certified delivery when the sender asked
         // for it (current rustpush), else the legacy "Delivered" message.
         if let Some(ctx) = &inst.certified_context {
-            if let Err(e) = client.identity.certify_delivery(MADRID, ctx, false).await {
-                log::debug!("certify_delivery failed: {e}");
+            match tokio::time::timeout(HANDLE_TIMEOUT, client.identity.certify_delivery(MADRID, ctx, false)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log::debug!("certify_delivery failed: {e}"),
+                Err(_) => log::warn!("certify_delivery took longer than {}s; giving it up", HANDLE_TIMEOUT.as_secs()),
             }
         } else if convert::wants_delivered_receipt(&inst, &all_mine)
             && let Some(conv) = inst.conversation.clone()
@@ -1512,8 +1589,10 @@ async fn receive_loop(weak: Weak<Inner>, client: Arc<IMClient>, mut sub: broadca
             let mut receipt = MessageInst::new(conv, &me, RpMessage::Delivered);
             receipt.id = inst.id.clone();
             receipt.target = inst.target.clone();
-            if let Err(e) = client.send(&mut receipt).await {
-                log::debug!("delivered receipt failed: {e}");
+            match tokio::time::timeout(HANDLE_TIMEOUT, client.send(&mut receipt)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => log::debug!("delivered receipt failed: {e}"),
+                Err(_) => log::warn!("delivered receipt took longer than {}s; giving it up", HANDLE_TIMEOUT.as_secs()),
             }
         }
         if duplicate {

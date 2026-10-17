@@ -666,6 +666,7 @@ mod tests {
             unread_count: 0,
             is_group: false,
             background: None,
+            icon_path: None,
         };
         assert_eq!(already_there(&chat, "P", Some(&poster), None), None);
         let bg = |id: &str, payload: Option<&Path>, path: Option<&str>| ChatBackground {

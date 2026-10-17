@@ -170,6 +170,15 @@ impl Inner {
             self.set_profiles_status(ProfilesState::NeedsLogin, Some("no saved Apple ID session".into()), None);
             return Err(EngineError::Unsupported("shared profiles need `imsg login`".into()));
         };
+        // Debug override: run the "no tokens yet" path again (the saved
+        // tokens are not deleted; the fresh ones replace them).
+        let forced = tokens.is_some() && std::env::var_os("IMESSAGED_PROFILES_FORCE_REFRESH").is_some_and(|v| v == "1");
+        let tokens = if forced {
+            log::warn!("shared profiles: IMESSAGED_PROFILES_FORCE_REFRESH=1: ignoring the saved iCloud tokens (debug override)");
+            None
+        } else {
+            tokens
+        };
         let fresh = tokens.is_none();
         if fresh {
             log::info!("shared profiles: the saved session has no iCloud tokens yet; asking Apple for them with the saved credentials");
