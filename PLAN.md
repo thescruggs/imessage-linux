@@ -93,5 +93,5 @@ repeats until the reviewer has no blocking findings and `cargo test` /
 
 * Phone-number handle (needs an always-on iPhone relay). Email handle only.
 * FaceTime, FindMy (rustpush supports some; not wired). SMS/RCS through the
-  iPhone (Text Message Forwarding) is wired since 0.1.12 (docs/DAEMON.md).
+  iPhone (Text Message Forwarding) is wired (after 0.1.11; docs/DAEMON.md).
 * Apple Contact Key Verification must be disabled on the account.
