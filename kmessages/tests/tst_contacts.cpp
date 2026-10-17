@@ -17,6 +17,7 @@
 #include <QJsonDocument>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
 
@@ -194,6 +195,52 @@ private Q_SLOTS:
 #else
         QSKIP("built without KPeople");
 #endif
+    }
+
+    void sharedProfiles()
+    {
+        ContactResolver r(false);
+        r.setPeople(fakeDaemonPeople());
+        QSignalSpy changed(&r, &ContactResolver::contactsChanged);
+        QTemporaryDir dir;
+        const QString png = dir.filePath(u"p.png"_s);
+        QVERIFY(solid(Qt::green, 300).save(png));
+
+        // A handle the address book does not know: the shared name and photo.
+        const QString zed = u"mailto:zed@example.com"_s;
+        r.setSharedProfile(zed, SharedProfile{u"Zed Zero"_s, u"Zed"_s, {}, png, 42});
+        QCOMPARE(changed.count(), 1);
+        r.setSharedProfile(zed, SharedProfile{u"Zed Zero"_s, u"Zed"_s, {}, png, 42});
+        QCOMPARE(changed.count(), 1); // unchanged: no signal
+        QCOMPARE((Handle{zed, {}}.displayName()), u"Zed Zero"_s);
+        QCOMPARE((Handle{zed, {}}.shortName()), u"Zed"_s);
+        QVERIFY(r.nameFor(zed).isEmpty()); // address-book names only
+        QCOMPARE(r.sharedNameFor(zed), u"Zed Zero"_s);
+        const QString src = r.avatarSource(zed);
+        QCOMPARE(src, r.sharedPhotoSource(zed));
+        QVERIFY2(src.startsWith(u"image://attachment/"_s) && src.endsWith(u"?u=42"_s), qPrintable(src));
+        QCOMPARE(r.photoFor(zed).size(), QSize(256, 256)); // scaled like address-book photos
+
+        // The address book wins for the name, and its photo for the avatar;
+        // without one there, the shared photo is used.
+        r.setSharedProfiles({Handle{u"mailto:bob@example.com"_s, {}, SharedProfile{u"Bobby"_s, {}, {}, png, 1}},
+                             Handle{u"mailto:carol@example.com"_s, {}, SharedProfile{u"Caz"_s, {}, {}, png, 1}}});
+        QCOMPARE(changed.count(), 2);
+        QCOMPARE((Handle{u"mailto:bob@example.com"_s, {}}.displayName()), u"Robert Smith"_s);
+        QVERIFY(r.avatarSource(u"mailto:bob@example.com"_s).startsWith(u"image://contact/"_s));
+        QCOMPARE((Handle{u"mailto:carol@example.com"_s, {}}.displayName()), u"Carol Jones"_s);
+        QVERIFY(r.avatarSource(u"mailto:carol@example.com"_s).startsWith(u"image://attachment/"_s));
+        QVERIFY(r.lookup(u"mailto:carol@example.com"_s)->hasPhoto);
+
+        // A chat payload without `profile` for a participant clears theirs.
+        r.setSharedProfiles({Handle{zed, {}}});
+        QCOMPARE(changed.count(), 3);
+        QCOMPARE((Handle{zed, {}}.displayName()), u"zed@example.com"_s);
+        QVERIFY(r.avatarSource(zed).isEmpty());
+        // A shared photo without a name names nobody.
+        r.setSharedProfile(zed, SharedProfile{{}, {}, {}, png, 2});
+        QVERIFY(!r.lookup(zed));
+        QVERIFY(!r.avatarSource(zed).isEmpty());
     }
 
     void modelsUseContacts()

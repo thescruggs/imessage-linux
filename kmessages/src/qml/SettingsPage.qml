@@ -34,6 +34,18 @@ FormCard.FormCardPage {
                 return page.state_;
             }
         }
+        FormCard.FormDelegateSeparator {
+            visible: profilesStatus.visible
+        }
+        FormCard.FormTextDelegate {
+            id: profilesStatus
+            // Only worth a line when something needs doing.
+            visible: App.daemon.profilesState === "needs_login" || App.daemon.profilesState === "unavailable"
+            text: i18n("Shared names and photos")
+            description: App.daemon.profilesState === "needs_login"
+                ? i18n("Run `imsg login` once to see the names and photos your contacts share.")
+                : i18n("Unavailable: %1", App.daemon.profilesDetail)
+        }
         FormCard.FormDelegateSeparator {}
         FormCard.FormTextDelegate {
             text: i18n("Sending from")

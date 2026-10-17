@@ -18,15 +18,32 @@
 namespace km
 {
 
+/// The name and photo a person shared with us (Messages "Share Name and
+/// Photo"), as the daemon fetched it (`profile` in docs/DBUS.md).
+struct SharedProfile {
+    QString name; ///< the display name they chose
+    QString first;
+    QString last;
+    QString photo; ///< absolute path of the photo, empty = none
+    qint64 updatedAt = 0; ///< ms since epoch
+
+    /// `name`, else "first last".
+    QString displayName() const;
+    bool isEmpty() const { return displayName().isEmpty() && photo.isEmpty(); }
+    bool operator==(const SharedProfile &o) const = default;
+};
+
 /// An IDS URI (`mailto:…` / `tel:…`) with an optional human name.
 struct Handle {
     QString uri;
     QString display; ///< empty if the daemon did not send one
+    std::optional<SharedProfile> profile = std::nullopt; ///< what they shared with us (chat participants only)
 
     /// The address without its scheme.
     QString address() const;
-    /// The contact's name (ContactResolver), else `display` if set, else a
-    /// readable address (phone numbers formatted lightly).
+    /// The contact's name (ContactResolver: the address book, else the name
+    /// the person shared), else `display` if set, else a readable address
+    /// (phone numbers formatted lightly).
     QString displayName() const;
     /// First name for group titles ("Alice, Bob & Carol"); the full
     /// displayName() when there is no name.
@@ -47,6 +64,7 @@ struct Chat {
     uint unreadCount = 0;
     QString backgroundId; ///< transcript background, empty = none
     QString backgroundPath; ///< its image (absolute path), empty = none / not downloaded
+    QString iconPath; ///< the group's photo (absolute path), empty = none / not downloaded
 
     /// Name to show: display name, else the participants' names.
     QString title() const;
@@ -129,6 +147,8 @@ struct Status {
     qint64 registeredAt = 0; ///< seconds
     qint64 expiresAt = 0; ///< seconds
     int unread = -1; ///< -1 = store unavailable (null)
+    QString profilesState; ///< `profiles.state` (ready / pending / needs_login / unavailable), empty = older daemon
+    QString profilesDetail;
 };
 
 struct SentMessage {
@@ -178,6 +198,11 @@ std::optional<MessagePage> parseMessagePage(const QString &json, QString *error 
 std::optional<Status> parseStatus(const QString &json, QString *error = nullptr);
 std::optional<SentMessage> parseSentMessage(const QString &json, QString *error = nullptr);
 std::optional<QList<HandleReachability>> parseLookup(const QString &json, QString *error = nullptr);
+/// A HandleProfile object, or std::nullopt for `null` / nothing to show.
+std::optional<SharedProfile> sharedProfile(const QJsonValue &v);
+/// `GetHandleProfile` / `HandleProfileUpdated` payload: false on malformed
+/// JSON; `*out` = std::nullopt for `null`.
+bool parseHandleProfile(const QString &json, std::optional<SharedProfile> *out, QString *error = nullptr);
 }
 
 } // namespace km

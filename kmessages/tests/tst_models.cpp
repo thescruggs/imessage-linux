@@ -3,6 +3,7 @@
 // DaemonClient + models against tests/fake_daemon.py on a private bus.
 #include "appsettings.h"
 #include "chatlistmodel.h"
+#include "contactresolver.h"
 #include "daemonclient.h"
 #include "fakedaemon.h"
 #include "handlelookupmodel.h"
@@ -170,6 +171,65 @@ private Q_SLOTS:
         QCOMPARE(filter.rowCount(), 1);
         filter.setFilterText(QString());
         QCOMPARE(filter.rowCount(), 4);
+    }
+
+    void sharedProfilesAndGroupIcons()
+    {
+        ContactResolver contacts(false); // no address book: shared profiles only
+        auto client = connectedClient();
+        ChatListModel chats(client.get());
+        QTRY_COMPARE_WITH_TIMEOUT(chats.rowCount(), 4, Timeout);
+        const auto role = [&](const QString &chatId, int r) {
+            return chats.data(chats.index(chats.indexOf(chatId)), r);
+        };
+        QCOMPARE(role(Dave, ChatListModel::NameRole).toString(), u"+1 (555) 123-4567"_s);
+        auto messages = loadedMessages(client.get(), &chats, Team);
+
+        // Dave shares a name and photo: the signal updates the resolver, every
+        // model re-reads its rows.
+        QSignalSpy updated(client.get(), &DaemonClient::handleProfileUpdated);
+        QSignalSpy messageRows(messages.get(), &QAbstractItemModel::dataChanged);
+        m_fake.control(u"SetProfile"_s, {Dave, u"Dee Ray"_s, u"Dee"_s, true});
+        QTRY_COMPARE_WITH_TIMEOUT(updated.count(), 1, Timeout);
+        QCOMPARE(updated.first().first().toString(), Dave);
+        QCOMPARE(contacts.sharedNameFor(Dave), u"Dee Ray"_s);
+        QCOMPARE(role(Dave, ChatListModel::NameRole).toString(), u"Dee Ray"_s);
+        QCOMPARE(role(Dave, ChatListModel::InitialsRole).toString(), u"DR"_s);
+        const QString photo = role(Dave, ChatListModel::AvatarSourceRole).toString();
+        QVERIFY2(photo.startsWith(u"image://attachment/"_s), qPrintable(photo));
+        QCOMPARE(photo, contacts.sharedPhotoSource(Dave));
+        QVERIFY(messageRows.count() >= 1);
+        QCOMPARE(role(Team, ChatListModel::ParticipantsRole).toStringList().at(2), u"Dee Ray"_s);
+        QCOMPARE(role(Team, ChatListModel::ParticipantSharedNamesRole).toStringList(), (QStringList{QString(), QString(), u"Dee Ray"_s}));
+        QCOMPARE(role(Team, ChatListModel::ParticipantSharedPhotosRole).toStringList().at(2), photo);
+        int tent = -1;
+        for (int i = 0; i < messages->rowCount(); ++i) {
+            if (messages->data(messages->index(i), MessageListModel::TextRole).toString() == u"I have a tent for 4"_s) {
+                tent = i;
+            }
+        }
+        QVERIFY(tent >= 0);
+        QCOMPARE(messages->data(messages->index(tent), MessageListModel::SenderNameRole).toString(), u"Dee Ray"_s);
+        QCOMPARE(messages->data(messages->index(tent), MessageListModel::AvatarSourceRole).toString(), photo);
+        // A shared name wins over the daemon's `display` (Bob Smith), like an
+        // address-book name does.
+        m_fake.control(u"SetProfile"_s, {Bob, u"Bobby"_s, QString(), false});
+        QTRY_COMPARE_WITH_TIMEOUT(role(Bob, ChatListModel::NameRole).toString(), u"Bobby"_s, Timeout);
+        QVERIFY(role(Bob, ChatListModel::AvatarSourceRole).toString().isEmpty());
+
+        // Stopping clears it again.
+        m_fake.control(u"SetProfile"_s, {Dave, QString(), QString(), false});
+        QTRY_COMPARE_WITH_TIMEOUT(role(Dave, ChatListModel::NameRole).toString(), u"+1 (555) 123-4567"_s, Timeout);
+        QVERIFY(contacts.sharedNameFor(Dave).isEmpty());
+        QVERIFY(role(Dave, ChatListModel::AvatarSourceRole).toString().isEmpty());
+
+        // Group photo: the group's avatar shows it.
+        QVERIFY(role(Team, ChatListModel::AvatarSourceRole).toString().isEmpty());
+        m_fake.control(u"SetGroupIcon"_s, {Team, true});
+        QTRY_VERIFY_WITH_TIMEOUT(role(Team, ChatListModel::AvatarSourceRole).toString().startsWith(u"image://attachment/"_s), Timeout);
+        QCOMPARE(role(Team, ChatListModel::IconSourceRole).toString(), role(Team, ChatListModel::AvatarSourceRole).toString());
+        m_fake.control(u"SetGroupIcon"_s, {Team, false});
+        QTRY_VERIFY_WITH_TIMEOUT(role(Team, ChatListModel::AvatarSourceRole).toString().isEmpty(), Timeout);
     }
 
     void messagePaging()

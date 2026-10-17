@@ -22,6 +22,7 @@
     <method name="LookupHandles"><arg name="handles_json" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="DownloadAttachment"><arg name="attachment_id" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="ImportChatBackground"><arg name="chat_id" type="s" direction="in"/><arg name="path" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="GetHandleProfile"><arg name="handle" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="Version"><arg type="s" direction="out"/></method>
     <property name="ConnectionState" type="s" access="read"/>
     <property name="Registered" type="b" access="read"/>
@@ -32,5 +33,6 @@
     <signal name="ConnectionStateChanged"><arg name="state" type="s"/></signal>
     <signal name="TwoFactorRequired"/>
     <signal name="BackgroundError"><arg name="message" type="s"/></signal>
+    <signal name="HandleProfileUpdated"><arg name="handle" type="s"/><arg name="profile_json" type="s"/></signal>
   </interface>
 </node>

@@ -30,6 +30,9 @@ class DaemonClient : public QObject
     /// `ConnectionState` property (`connected`, `needs_login`, …); `unavailable` while the daemon is not on the bus.
     Q_PROPERTY(QString connectionState READ connectionState NOTIFY connectionStateChanged)
     Q_PROPERTY(QString connectionDetail READ connectionDetail NOTIFY statusChanged)
+    /// Shared names and photos: `ready`, `pending`, `needs_login`, `unavailable` ("" = older daemon).
+    Q_PROPERTY(QString profilesState READ profilesState NOTIFY statusChanged)
+    Q_PROPERTY(QString profilesDetail READ profilesDetail NOTIFY statusChanged)
     Q_PROPERTY(bool registered READ isRegistered NOTIFY statusChanged)
     Q_PROPERTY(QString version READ version NOTIFY statusChanged)
     Q_PROPERTY(QStringList ownHandles READ ownHandles NOTIFY statusChanged)
@@ -60,6 +63,8 @@ public:
     bool isAvailable() const { return m_available; }
     QString connectionState() const { return m_available ? m_status.connectionState : QStringLiteral("unavailable"); }
     QString connectionDetail() const { return m_status.connectionDetail; }
+    QString profilesState() const { return m_status.profilesState; }
+    QString profilesDetail() const { return m_status.profilesDetail; }
     bool isRegistered() const { return m_status.registered; }
     QString version() const { return m_status.version; }
     QStringList ownHandles() const { return m_status.handles; }
@@ -161,6 +166,8 @@ Q_SIGNALS:
     void typingChanged(const QString &chatId, const QString &handle, bool typing);
     void twoFactorRequired();
     void backgroundError(const QString &message);
+    /// A contact's shared name / photo changed (already applied to the ContactResolver).
+    void handleProfileUpdated(const QString &handle);
     /// The daemon (re)appeared or reported dropped events: reload everything.
     void resyncRequested();
 
@@ -181,6 +188,7 @@ private Q_SLOTS:
     void onPropertiesChanged(const QString &interface, const QVariantMap &changed, const QStringList &invalidated);
     void onTwoFactorRequired();
     void onBackgroundError(const QString &message);
+    void onHandleProfileUpdated(const QString &handle, const QString &json);
 
 private:
     void call(const QString &method,

@@ -48,6 +48,9 @@ public:
         AvatarSourceRole, ///< contact photo URL for 1:1 chats, else ""
         ParticipantAvatarsRole, ///< contact photo URL per participant ("" = none)
         ParticipantAddressesRole, ///< formatted address per participant
+        ParticipantSharedNamesRole, ///< the name each participant shared with us ("" = none)
+        ParticipantSharedPhotosRole, ///< URL of the photo each participant shared ("" = none)
+        IconSourceRole, ///< the group photo's URL, "" = none
     };
     Q_ENUM(Roles)
 

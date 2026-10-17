@@ -42,6 +42,8 @@ private Q_SLOTS:
         QCOMPARE(s->registeredAt, 1700000000);
         QCOMPARE(s->expiresAt, 1702592000);
         QCOMPARE(s->unread, 3);
+        QCOMPARE(s->profilesState, u"ready"_s);
+        QVERIFY(s->profilesDetail.isEmpty());
     }
 
     void statusNeedsLoginAndError()
@@ -60,6 +62,39 @@ private Q_SLOTS:
         QCOMPARE(e->connectionState, u"error"_s);
         QCOMPARE(e->connectionDetail, u"registration failing, retrying: timeout"_s);
         QCOMPARE(e->unread, -1); // null
+        QVERIFY(e->profilesState.isEmpty()); // older daemon
+    }
+
+    void sharedProfiles()
+    {
+        // Participants carry `profile`, groups `icon_path`.
+        QString err;
+        auto c = Json::parseChat(uR"({"id":"group:G","is_group":true,"unread_count":0,"icon_path":"/s/chat_icons/g/I.jpg",
+            "participants":[{"uri":"mailto:bob@example.com","profile":{"name":"Bobby","first":"Bob","last":null,"photo":"/s/profiles/b/R.jpg","updated_at":1700000000000}},
+                            {"uri":"tel:+15551234567","profile":{"first":"Dee","last":"Ray"}},
+                            {"uri":"mailto:carol@example.com","profile":{}}]})"_s, &err);
+        QVERIFY2(c, qPrintable(err));
+        QCOMPARE(c->iconPath, u"/s/chat_icons/g/I.jpg"_s);
+        const auto &bob = c->participants.at(0).profile;
+        QVERIFY(bob);
+        QCOMPARE(bob->name, u"Bobby"_s);
+        QCOMPARE(bob->first, u"Bob"_s);
+        QVERIFY(bob->last.isEmpty());
+        QCOMPARE(bob->photo, u"/s/profiles/b/R.jpg"_s);
+        QCOMPARE(bob->updatedAt, 1700000000000LL);
+        QCOMPARE(bob->displayName(), u"Bobby"_s);
+        QCOMPARE(c->participants.at(1).profile->displayName(), u"Dee Ray"_s);
+        QVERIFY(!c->participants.at(2).profile); // nothing to show
+        QVERIFY(Json::parseChat(fixture("chat.json"))->iconPath.isEmpty());
+
+        // GetHandleProfile / HandleProfileUpdated payloads
+        std::optional<SharedProfile> p;
+        QVERIFY(Json::parseHandleProfile(u"null"_s, &p));
+        QVERIFY(!p);
+        QVERIFY(Json::parseHandleProfile(uR"({"name":"Ann","photo":null,"updated_at":5})"_s, &p));
+        QVERIFY(p && p->name == u"Ann"_s && p->photo.isEmpty() && p->updatedAt == 5);
+        QVERIFY(!Json::parseHandleProfile(u"[1]"_s, &p, &err));
+        QVERIFY(!Json::parseHandleProfile(u"{"_s, &p, &err));
     }
 
     void chat()

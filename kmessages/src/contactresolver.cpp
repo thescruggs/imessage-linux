@@ -168,23 +168,112 @@ std::optional<ContactResolver::Match> ContactResolver::lookup(const QString &uri
 {
     const auto idx = snapshot();
     const Person *p = idx->find(uri);
-    if (!p) {
+    const auto shared = sharedProfile(uri);
+    const bool sharedPhoto = shared && !shared->photo.isEmpty();
+    if (p) {
+        return Match{p->name, p->givenName.isEmpty() ? firstWord(p->name) : p->givenName, !p->photo.isNull() || sharedPhoto};
+    }
+    if (shared && !shared->displayName().isEmpty()) {
+        const QString name = shared->displayName();
+        const QString given = !shared->first.trimmed().isEmpty() && shared->name.trimmed().isEmpty() ? shared->first.trimmed() : firstWord(name);
+        return Match{name, given, sharedPhoto};
+    }
+    return std::nullopt;
+}
+
+std::optional<SharedProfile> ContactResolver::sharedProfile(const QString &uri) const
+{
+    QMutexLocker lock(&m_profilesMutex);
+    const auto it = m_profiles.constFind(uri);
+    if (it == m_profiles.cend()) {
         return std::nullopt;
     }
-    return Match{p->name, p->givenName.isEmpty() ? firstWord(p->name) : p->givenName, !p->photo.isNull()};
+    return *it;
+}
+
+QString ContactResolver::sharedNameFor(const QString &uri) const
+{
+    const auto p = sharedProfile(uri);
+    return p ? p->displayName() : QString();
+}
+
+QString ContactResolver::sharedPhotoSource(const QString &uri) const
+{
+    const auto p = sharedProfile(uri);
+    if (!p || p->photo.isEmpty()) {
+        return {};
+    }
+    // `u` busts QML's image cache when the photo was fetched again.
+    return u"image://attachment/%1?u=%2"_s.arg(QString::fromLatin1(QUrl::toPercentEncoding(p->photo)), QString::number(p->updatedAt));
+}
+
+bool ContactResolver::applySharedProfile(const QString &uri, const std::optional<SharedProfile> &profile)
+{
+    if (uri.isEmpty()) {
+        return false;
+    }
+    QMutexLocker lock(&m_profilesMutex);
+    const auto it = m_profiles.find(uri);
+    if (!profile || profile->isEmpty()) {
+        if (it == m_profiles.end()) {
+            return false;
+        }
+        m_profiles.erase(it);
+        return true;
+    }
+    if (it != m_profiles.end() && *it == *profile) {
+        return false;
+    }
+    m_profiles.insert(uri, *profile);
+    return true;
+}
+
+void ContactResolver::sharedProfilesChanged()
+{
+    ++m_revision;
+    Q_EMIT contactsChanged();
+}
+
+void ContactResolver::setSharedProfile(const QString &uri, const std::optional<SharedProfile> &profile)
+{
+    if (applySharedProfile(uri, profile)) {
+        sharedProfilesChanged();
+    }
+}
+
+void ContactResolver::setSharedProfiles(const QList<Handle> &handles)
+{
+    bool changed = false;
+    for (const auto &h : handles) {
+        changed |= applySharedProfile(h.uri, h.profile);
+    }
+    if (changed) {
+        sharedProfilesChanged();
+    }
 }
 
 QString ContactResolver::nameFor(const QString &uri) const
 {
-    const auto m = lookup(uri);
-    return m ? m->name : QString();
+    const auto idx = snapshot();
+    const Person *p = idx->find(uri);
+    return p ? p->name : QString();
 }
 
 QImage ContactResolver::photoFor(const QString &uri) const
 {
     const auto idx = snapshot();
     const Person *p = idx->find(uri);
-    return p ? p->photo : QImage();
+    if (p && !p->photo.isNull()) {
+        return p->photo;
+    }
+    const auto shared = sharedProfile(uri);
+    QImage img;
+    if (shared && !shared->photo.isEmpty() && img.load(shared->photo)) {
+        if (img.width() > PhotoMaxSize || img.height() > PhotoMaxSize) {
+            img = img.scaled(PhotoMaxSize, PhotoMaxSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        }
+    }
+    return img;
 }
 
 QString ContactResolver::avatarSource(const QString &uri) const
@@ -192,7 +281,7 @@ QString ContactResolver::avatarSource(const QString &uri) const
     const auto idx = snapshot();
     const Person *p = idx->find(uri);
     if (!p || p->photo.isNull()) {
-        return {};
+        return sharedPhotoSource(uri);
     }
     // The revision busts QML's image cache when the photo may have changed.
     return u"image://contact/%1?%2"_s.arg(QString::fromLatin1(QUrl::toPercentEncoding(uri)), QString::number(idx->revision));

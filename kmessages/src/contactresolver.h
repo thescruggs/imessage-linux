@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: SSPL-1.0
 //
 // Contact names and photos for IDS handles, the way Messages.app shows
-// them. The source is KPeople (vCards in $XDG_DATA_HOME/kpeoplevcard/,
-// Akonadi when its KPeople plugin is installed, …); see README "Contacts".
+// them. Two sources: the address book through KPeople (vCards in
+// $XDG_DATA_HOME/kpeoplevcard/, Akonadi when its KPeople plugin is
+// installed, …; see README "Contacts"), and, for handles the address book
+// does not know, the name and photo the person shared with us ("Share Name
+// and Photo", from the daemon).
 #pragma once
 
+#include "types.h"
+
+#include <QHash>
 #include <QImage>
 #include <QMutex>
 #include <QObject>
@@ -62,13 +68,29 @@ public:
     int count() const;
     int revision() const { return m_revision; }
 
+    /// The address-book person for `uri`, else the shared profile's name.
     std::optional<Match> lookup(const QString &uri) const;
-    /// Contact name for `uri`, or an empty string.
+    /// Address-book name for `uri`, or an empty string.
     Q_INVOKABLE QString nameFor(const QString &uri) const;
-    /// Photo for `uri` (null if none). Thread-safe.
+    /// Photo for `uri`: the address book's, else the shared one (null if none). Thread-safe.
     QImage photoFor(const QString &uri) const;
-    /// `image://contact/…` URL for a QML Image/Avatar source, or "" if the handle has no photo.
+    /// URL for a QML Image/Avatar source: `image://contact/…` for an
+    /// address-book photo, else `image://attachment/…` for a shared photo,
+    /// or "" if the handle has neither.
     Q_INVOKABLE QString avatarSource(const QString &uri) const;
+
+    /// What `uri` shared with us, if anything.
+    std::optional<SharedProfile> sharedProfile(const QString &uri) const;
+    /// The shared name for `uri`, or "".
+    Q_INVOKABLE QString sharedNameFor(const QString &uri) const;
+    /// `image://attachment/…` URL of the shared photo, or "".
+    Q_INVOKABLE QString sharedPhotoSource(const QString &uri) const;
+    /// Record what the daemon says `uri` shared (std::nullopt = nothing).
+    /// Emits contactsChanged() when that changes anything.
+    void setSharedProfile(const QString &uri, const std::optional<SharedProfile> &profile);
+    /// The same for every participant of a chat payload (a participant
+    /// without `profile` shares nothing); one contactsChanged() at most.
+    void setSharedProfiles(const QList<Handle> &handles);
     /// People whose name or address contains every word of `text`, one row
     /// per email / phone number, best matches first.
     QList<Candidate> search(const QString &text, int limit = 30) const;
@@ -100,8 +122,13 @@ private:
     void scheduleReindex();
     void reindexChunk();
 
+    bool applySharedProfile(const QString &uri, const std::optional<SharedProfile> &profile);
+    void sharedProfilesChanged();
+
     std::shared_ptr<Shared> m_shared;
     int m_revision = 0;
+    mutable QMutex m_profilesMutex;
+    QHash<QString, SharedProfile> m_profiles; ///< by IDS URI
     QAbstractItemModel *m_persons = nullptr; ///< KPeople::PersonsModel
     QTimer m_reindexTimer;
     // in-progress incremental re-index of m_persons

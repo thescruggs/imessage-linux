@@ -29,6 +29,7 @@ namespace
 const QString Bob = u"mailto:bob@example.com"_s;
 const QString Team = u"group:5B0E2C1A-3F4D-4E21-9A55-0C7E1B2D3F40"_s;
 const QString Dave = u"tel:+15551234567"_s;
+const QString Carol = u"mailto:carol@example.com"_s;
 constexpr int Timeout = 8000;
 
 QStringList g_qmlWarnings;
@@ -273,6 +274,38 @@ private Q_SLOTS:
         // Removing it takes effect live too.
         m_fake.control(u"SetBackground"_s, {Bob, false});
         QTRY_VERIFY_WITH_TIMEOUT(m_controller->currentChatBackground().isEmpty(), Timeout);
+    }
+
+    void sharedProfilesAndGroupPhoto()
+    {
+        const QString eve = u"mailto:eve@example.org"_s;
+        // Carol is in the address book without a photo, Eve not at all.
+        m_fake.control(u"SetProfile"_s, {Carol, u"Caz"_s, u"Carol"_s, true});
+        m_fake.control(u"SetProfile"_s, {eve, u"Evie Adams"_s, u"Evie"_s, true});
+        m_fake.control(u"SetGroupIcon"_s, {Team, true});
+        auto *chats = m_controller->chatList();
+        const auto role = [&](const QString &chatId, int r) {
+            return chats->data(chats->index(chats->indexOf(chatId)), r);
+        };
+        QTRY_COMPARE_WITH_TIMEOUT(role(eve, ChatListModel::NameRole).toString(), u"Evie Adams"_s, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(role(Team, ChatListModel::AvatarSourceRole).toString().startsWith(u"image://attachment/"_s), Timeout);
+        QVERIFY(role(eve, ChatListModel::AvatarSourceRole).toString().startsWith(u"image://attachment/"_s));
+
+        invoke("openChat", Team);
+        auto *msgs = m_controller->messages();
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->isLoaded() && msgs->chatId() == Team && msgs->rowCount() == 7, Timeout);
+        invoke("toggleDetails");
+        QCOMPARE(role(Team, ChatListModel::ParticipantSharedNamesRole).toStringList().at(1), u"Caz"_s);
+        settle(800);
+        shoot(u"shared-profiles"_s);
+        invoke("toggleDetails");
+
+        // Back to how the other screenshots expect it.
+        m_fake.control(u"SetProfile"_s, {Carol, QString(), QString(), false});
+        m_fake.control(u"SetProfile"_s, {eve, QString(), QString(), false});
+        m_fake.control(u"SetGroupIcon"_s, {Team, false});
+        QTRY_COMPARE_WITH_TIMEOUT(role(eve, ChatListModel::NameRole).toString(), u"Eve Adams"_s, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(role(Team, ChatListModel::AvatarSourceRole).toString().isEmpty(), Timeout);
     }
 
     void unverifiedAndUnsent()

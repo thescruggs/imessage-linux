@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: SSPL-1.0
 #include "daemonclient.h"
+#include "contactresolver.h"
 #include "outgoingfiles.h"
 
 #include <KLocalizedString>
@@ -28,6 +29,15 @@ const QString DaemonClient::Interface = u"org.imessage.Daemon1"_s;
 
 namespace
 {
+/// Chat payloads carry the participants' shared names and photos: hand
+/// them to the contact resolver, which names and pictures everyone.
+void noteSharedProfiles(const Chat &c)
+{
+    if (auto *contacts = ContactResolver::instance()) {
+        contacts->setSharedProfiles(c.participants);
+    }
+}
+
 constexpr int LongTimeoutMs = 120 * 1000; // login, 2FA, file transfer, activation
 constexpr int MediumTimeoutMs = 60 * 1000; // React / Edit / Unsend / MarkRead: an IDS round trip
 const QString ErrorPrefix = u"org.imessage.Daemon1.Error."_s;
@@ -52,6 +62,7 @@ DaemonClient::DaemonClient(const QDBusConnection &bus, QObject *parent)
         {"ConnectionStateChanged", SLOT(onConnectionStateChanged(QString))},
         {"TwoFactorRequired", SLOT(onTwoFactorRequired())},
         {"BackgroundError", SLOT(onBackgroundError(QString))},
+        {"HandleProfileUpdated", SLOT(onHandleProfileUpdated(QString, QString))},
     };
     for (const auto &s : signals_) {
         if (!m_bus.connect(Service, Path, Interface, QString::fromLatin1(s.name), this, s.slot)) {
@@ -220,6 +231,9 @@ void DaemonClient::listChats(uint limit, uint offset, std::function<void(const Q
 {
     call(u"ListChats"_s, {limit, offset}, [ok, err](const QDBusMessage &r) {
         KM_PARSE_OR_FAIL(Json::parseChatList, v, r, err)
+        for (const auto &c : std::as_const(*v)) {
+            noteSharedProfiles(c);
+        }
         ok(*v);
     }, err);
 }
@@ -228,6 +242,7 @@ void DaemonClient::getChat(const QString &chatId, std::function<void(const Chat 
 {
     call(u"GetChat"_s, {chatId}, [ok, err](const QDBusMessage &r) {
         KM_PARSE_OR_FAIL(Json::parseChat, v, r, err)
+        noteSharedProfiles(*v);
         ok(*v);
     }, err);
 }
@@ -579,6 +594,7 @@ void DaemonClient::onChatUpdated(const QString &json)
 {
     QString error;
     if (auto c = Json::parseChat(json, &error)) {
+        noteSharedProfiles(*c);
         Q_EMIT chatUpdated(*c);
     } else {
         qCWarning(KM_DBUS) << "bad ChatUpdated payload:" << error;
@@ -630,6 +646,20 @@ void DaemonClient::onPropertiesChanged(const QString &interface, const QVariantM
 void DaemonClient::onTwoFactorRequired()
 {
     Q_EMIT twoFactorRequired();
+}
+
+void DaemonClient::onHandleProfileUpdated(const QString &handle, const QString &json)
+{
+    std::optional<SharedProfile> profile;
+    QString error;
+    if (!Json::parseHandleProfile(json, &profile, &error)) {
+        qCWarning(KM_DBUS) << "bad HandleProfileUpdated payload:" << error;
+        return;
+    }
+    if (auto *contacts = ContactResolver::instance()) {
+        contacts->setSharedProfile(handle, profile);
+    }
+    Q_EMIT handleProfileUpdated(handle);
 }
 
 void DaemonClient::onBackgroundError(const QString &message)

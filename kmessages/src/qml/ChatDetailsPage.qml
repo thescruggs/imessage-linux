@@ -64,6 +64,10 @@ Kirigami.ScrollablePage {
             required property string modelData
             readonly property string uri: page.chat.participantUris[index]
             readonly property string address: page.chat.participantAddresses[index] ?? ""
+            // What they shared with us ("Share Name and Photo"), if anything.
+            readonly property string sharedName: (page.chat.participantSharedNames ?? [])[index] ?? ""
+            readonly property string sharedPhoto: (page.chat.participantSharedPhotos ?? [])[index] ?? ""
+            readonly property string avatar: (page.chat.participantAvatars ?? [])[index] ?? ""
             width: ListView.view.width
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
@@ -71,7 +75,7 @@ Kirigami.ScrollablePage {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 2
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 2
                     name: person.modelData
-                    source: (page.chat.participantAvatars ?? [])[person.index] ?? ""
+                    source: person.avatar
                     initialsMode: /^[+(0-9]/.test(person.modelData) ? Components.Avatar.InitialsMode.UseIcon : Components.Avatar.InitialsMode.UseInitials
                     iconSource: "user"
                 }
@@ -91,6 +95,29 @@ Kirigami.ScrollablePage {
                         font: Kirigami.Theme.smallFont
                         opacity: 0.7
                         elide: Text.ElideRight
+                    }
+                    QQC2.Label {
+                        objectName: "sharedNameLabel"
+                        Layout.fillWidth: true
+                        visible: person.sharedName !== ""
+                        text: i18nc("the name a person shared with us via Share Name and Photo", "Shared name: %1", person.sharedName)
+                        font: Kirigami.Theme.smallFont
+                        opacity: 0.7
+                        elide: Text.ElideRight
+                    }
+                }
+                // Their shared photo, when the address book's photo is shown instead.
+                Components.Avatar {
+                    objectName: "sharedPhoto"
+                    visible: person.sharedPhoto !== "" && person.avatar !== person.sharedPhoto
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 1.5
+                    Layout.preferredHeight: Kirigami.Units.gridUnit * 1.5
+                    name: person.sharedName
+                    source: person.sharedPhoto
+                    QQC2.ToolTip.visible: sharedPhotoHover.hovered
+                    QQC2.ToolTip.text: i18n("Shared photo")
+                    HoverHandler {
+                        id: sharedPhotoHover
                     }
                 }
             }

@@ -15,6 +15,14 @@ using namespace Qt::StringLiterals;
 namespace km
 {
 
+QString SharedProfile::displayName() const
+{
+    if (!name.trimmed().isEmpty()) {
+        return name.trimmed();
+    }
+    return QStringList{first.trimmed(), last.trimmed()}.join(u' ').trimmed();
+}
+
 QString Handle::address() const
 {
     if (uri.startsWith("mailto:"_L1)) {
@@ -441,7 +449,43 @@ std::optional<Handle> handle(const QJsonValue &v, QString *error)
         return std::nullopt;
     }
     const auto o = v.toObject();
-    return Handle{o.value("uri"_L1).toString(), optString(o.value("display"_L1))};
+    return Handle{o.value("uri"_L1).toString(), optString(o.value("display"_L1)), sharedProfile(o.value("profile"_L1))};
+}
+
+std::optional<SharedProfile> sharedProfile(const QJsonValue &v)
+{
+    if (!v.isObject()) {
+        return std::nullopt;
+    }
+    const auto o = v.toObject();
+    SharedProfile p;
+    p.name = optString(o.value("name"_L1));
+    p.first = optString(o.value("first"_L1));
+    p.last = optString(o.value("last"_L1));
+    p.photo = optString(o.value("photo"_L1));
+    p.updatedAt = optInt(o.value("updated_at"_L1));
+    if (p.isEmpty()) {
+        return std::nullopt;
+    }
+    return p;
+}
+
+bool parseHandleProfile(const QString &json, std::optional<SharedProfile> *out, QString *error)
+{
+    QJsonParseError pe;
+    // "null" is a valid document only when wrapped; parse it by hand.
+    const auto doc = QJsonDocument::fromJson("["_ba + json.toUtf8() + "]"_ba, &pe);
+    if (pe.error != QJsonParseError::NoError || !doc.isArray() || doc.array().size() != 1) {
+        setError(error, u"bad profile JSON"_s);
+        return false;
+    }
+    const auto v = doc.array().at(0);
+    if (!v.isNull() && !v.isObject()) {
+        setError(error, u"expected a profile object or null"_s);
+        return false;
+    }
+    *out = sharedProfile(v);
+    return true;
 }
 
 std::optional<Chat> chat(const QJsonObject &o, QString *error)
@@ -469,6 +513,7 @@ std::optional<Chat> chat(const QJsonObject &o, QString *error)
     if (!c.backgroundId.isEmpty()) {
         c.backgroundPath = optString(bg.value("path"_L1));
     }
+    c.iconPath = optString(o.value("icon_path"_L1));
     return c;
 }
 
@@ -619,6 +664,9 @@ std::optional<Status> parseStatus(const QString &json, QString *error)
         }
         s.sender = hh->uri;
     }
+    const auto profiles = o->value("profiles"_L1).toObject();
+    s.profilesState = optString(profiles.value("state"_L1));
+    s.profilesDetail = optString(profiles.value("detail"_L1));
     s.registeredAt = optInt(reg.value("registered_at"_L1));
     s.expiresAt = optInt(reg.value("expires_at"_L1));
     const auto unread = o->value("unread"_L1);

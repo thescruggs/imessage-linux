@@ -242,6 +242,7 @@ class FakeDaemon(dbus.service.Object):
         self.send_file_delay_ms = 0
         self.download_no_reply = 0  # FailDownloadsWithNoReply  # SetUnreadablePrefixes: paths the "sandboxed" daemon cannot see
         self.pending_2fa = False
+        self.profiles = {}  # SetProfile: handle -> HandleProfile dict
         self.tmp = tempfile.mkdtemp(prefix="kmessages-fake-")
 
     # -- helpers ----------------------------------------------------------
@@ -271,7 +272,8 @@ class FakeDaemon(dbus.service.Object):
                                  "expires_at": 1702592000 if registered else None,
                                  "sender": {"uri": ME} if registered else None,
                                  "other_handles": list(self.other_handles)},
-                "unread": self.store.unread_total()}
+                "unread": self.store.unread_total(),
+                "profiles": {"state": "ready"}}
 
     def chat(self, cid):
         c = self.store.chats.get(cid)
@@ -534,6 +536,14 @@ class FakeDaemon(dbus.service.Object):
                 f.write(png_bytes() if part["mime"].startswith("image/") else b"%PDF-1.4\n% fake\n")
         return path
 
+    @dbus.service.method(IFACE, in_signature="s", out_signature="s")
+    def GetHandleProfile(self, handle):
+        self.log("GetHandleProfile", handle)
+        n = normalize(handle)
+        if n is None:
+            raise Error("InvalidHandle", f"invalid handle: {handle}")
+        return dumps(self.profiles.get(n))
+
     @dbus.service.method(IFACE, in_signature="", out_signature="s")
     def Version(self):
         return VERSION
@@ -586,6 +596,10 @@ class FakeDaemon(dbus.service.Object):
     def TwoFactorRequired(self):
         pass
 
+    @dbus.service.signal(IFACE, signature="ss")
+    def HandleProfileUpdated(self, handle, profile_json):
+        pass
+
     @dbus.service.signal(IFACE, signature="s")
     def BackgroundError(self, message):
         pass
@@ -624,6 +638,52 @@ class FakeDaemon(dbus.service.Object):
                                "set_by": "mailto:bob@example.com", "set_at": int(time.time() * 1000)}
         else:
             c["background"] = None
+        self.ChatUpdated(dumps(c))
+
+    @dbus.service.method(CTRL, in_signature="sssb", out_signature="")
+    def SetProfile(self, handle, name, first, photo):
+        """`handle` shares `name` (and a photo, a generated PNG) like the real
+        daemon after a fetch: HandleProfileUpdated, then ChatUpdated for every
+        chat with that participant. An empty name and no photo = stopped."""
+        profile = None
+        if name or first or photo:
+            profile = {"name": name or None, "first": first or None, "last": None, "photo": None,
+                       "updated_at": int(time.time() * 1000)}
+            if photo:
+                d = os.path.join(self.tmp, "profiles")
+                os.makedirs(d, exist_ok=True)
+                path = os.path.join(d, guid() + ".png")
+                with open(path, "wb") as f:
+                    f.write(png_bytes(96, 96))
+                profile["photo"] = path
+            self.profiles[handle] = profile
+        else:
+            self.profiles.pop(handle, None)
+        for c in self.store.chats.values():
+            for p in c["participants"]:
+                if p["uri"] == handle:
+                    if profile:
+                        p["profile"] = profile
+                    else:
+                        p.pop("profile", None)
+        self.HandleProfileUpdated(handle, dumps(profile))
+        for c in self.store.chats.values():
+            if any(p["uri"] == handle for p in c["participants"]):
+                self.ChatUpdated(dumps(c))
+
+    @dbus.service.method(CTRL, in_signature="sb", out_signature="")
+    def SetGroupIcon(self, chat_id, on):
+        """Give the group a photo (a generated PNG) or remove it."""
+        c = self.chat(chat_id)
+        if on:
+            d = os.path.join(self.tmp, "chat_icons")
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, guid() + ".png")
+            with open(path, "wb") as f:
+                f.write(png_bytes(128, 128))
+            c["icon_path"] = path
+        else:
+            c.pop("icon_path", None)
         self.ChatUpdated(dumps(c))
 
     @dbus.service.method(CTRL, in_signature="ssb", out_signature="")

@@ -4,6 +4,7 @@
 #include "daemonclient.h"
 
 #include <QLoggingCategory>
+#include <QUrl>
 
 using namespace Qt::StringLiterals;
 
@@ -76,7 +77,22 @@ QHash<int, QByteArray> ChatListModel::roleNames() const
         {AvatarSourceRole, "avatarSource"},
         {ParticipantAvatarsRole, "participantAvatars"},
         {ParticipantAddressesRole, "participantAddresses"},
+        {ParticipantSharedNamesRole, "participantSharedNames"},
+        {ParticipantSharedPhotosRole, "participantSharedPhotos"},
+        {IconSourceRole, "iconSource"},
     };
+}
+
+namespace
+{
+/// `image://attachment/…` for a group's photo, "" without one.
+QString groupIconSource(const Chat &c)
+{
+    if (!c.isGroup || c.iconPath.isEmpty()) {
+        return {};
+    }
+    return u"image://attachment/%1"_s.arg(QString::fromLatin1(QUrl::toPercentEncoding(c.iconPath)));
+}
 }
 
 QVariant ChatListModel::data(const QModelIndex &index, int role) const
@@ -134,8 +150,29 @@ QVariant ChatListModel::data(const QModelIndex &index, int role) const
     case LastMessageFromMeRole:
         return e.lastFromMe;
     case AvatarSourceRole: {
+        if (c.isGroup) {
+            return groupIconSource(c);
+        }
         const auto *contacts = ContactResolver::instance();
-        return contacts && !c.isGroup && c.participants.size() == 1 ? contacts->avatarSource(c.participants.first().uri) : QString();
+        return contacts && c.participants.size() == 1 ? contacts->avatarSource(c.participants.first().uri) : QString();
+    }
+    case IconSourceRole:
+        return groupIconSource(c);
+    case ParticipantSharedNamesRole: {
+        const auto *contacts = ContactResolver::instance();
+        QStringList names;
+        for (const auto &p : c.participants) {
+            names << (contacts ? contacts->sharedNameFor(p.uri) : QString());
+        }
+        return names;
+    }
+    case ParticipantSharedPhotosRole: {
+        const auto *contacts = ContactResolver::instance();
+        QStringList sources;
+        for (const auto &p : c.participants) {
+            sources << (contacts ? contacts->sharedPhotoSource(p.uri) : QString());
+        }
+        return sources;
     }
     case ParticipantAddressesRole: {
         QStringList addresses;

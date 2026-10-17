@@ -51,12 +51,15 @@ AttachmentImageProvider::AttachmentImageProvider()
 
 QImage AttachmentImageProvider::requestImage(const QString &id, QSize *size, const QSize &requestedSize)
 {
-    // id = <percent-encoded path>[?rw=<corner radius as a fraction of the width>]
-    QString path = id;
+    // id = <percent-encoded path>[?rw=<corner radius as a fraction of the width>][&…]
+    // (the path is percent-encoded, so the first '?' starts the query; other
+    // parameters, like the cache-busting `u=`, are ignored)
+    const QString path = id.section(u'?', 0, 0);
     qreal radiusFraction = 0;
-    if (const auto q = id.lastIndexOf(u"?rw="_s); q >= 0) {
-        radiusFraction = id.mid(q + 4).toDouble();
-        path = id.left(q);
+    for (const auto &kv : id.section(u'?', 1).split(u'&', Qt::SkipEmptyParts)) {
+        if (kv.startsWith("rw="_L1)) {
+            radiusFraction = kv.mid(3).toDouble();
+        }
     }
     QImageReader reader(QUrl::fromPercentEncoding(path.toUtf8()));
     reader.setAutoTransform(true);
