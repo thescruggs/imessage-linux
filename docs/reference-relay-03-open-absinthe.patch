@@ -1,0 +1,976 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index fc06f30..532fb78 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -5,6 +5,11 @@ edition = "2024"
+ 
+ [dependencies]
+ serde = { version = "1.0.219", features = ["derive"] }
++# Apple's IMDAppleServices is an x86-64 Mach-O; we run it under emulation to produce
++# validation data, so we need a CPU emulator and a Mach-O reader.
++unicorn-engine = "2.1"
++log = "0.4"
++rand = "0.8"
+ 
+ [features]
+-serde = []
+\ No newline at end of file
++serde = []
+diff --git a/src/nac.rs b/src/nac.rs
+index f2b074b..6c853d4 100644
+--- a/src/nac.rs
++++ b/src/nac.rs
+@@ -90,21 +90,810 @@ impl HardwareConfig {
+ 
+ 
+ 
+-pub struct ValidationCtx;
+ 
++// ---------------------------------------------------------------------------
++// Validation data ("NAC")
++//
++// Apple's IMDAppleServices produces the signed blob IDS wants at registration. There is no
++// Android build of it, so we run the x86-64 Mach-O under emulation and answer the ~37
++// CoreFoundation / IOKit calls it makes with this machine's configured Mac identity. Ported
++// from pypush's emulated/{nac,jelly}.py.
++//
++// The binary is mapped flat at address 0, so every address below is a FILE offset.
++// ---------------------------------------------------------------------------
++
++use std::collections::HashMap;
++
++use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
++use unicorn_engine::{RegisterX86, Unicorn};
++
++/// Apple's IMDAppleServices, sha1 e1181ccad82e6629d52c6a006645ad87ee59bd13.
++const BINARY: &[u8] = include_bytes!("IMDAppleServices");
++
++const PAGE_SIZE: u64 = 0x1000;
++const BINARY_BASE: u64 = 0x0;
++const HOOK_BASE: u64 = 0x00D0_0000;
++const HOOK_SIZE: u64 = 0x1000;
++const STACK_BASE: u64 = 0x0030_0000;
++const STACK_SIZE: u64 = 0x0010_0000;
++const HEAP_BASE: u64 = 0x0040_0000;
++const HEAP_SIZE: u64 = 0x0010_0000;
++const STOP_ADDRESS: u64 = 0x0090_0000;
++
++// Entry points inside the binary.
++const NAC_INIT: u64 = 0xB1DB0;
++const NAC_KEY_ESTABLISHMENT: u64 = 0xB1DD0;
++const NAC_SIGN: u64 = 0xB1DF0;
++
++/// The key IMDAppleServices reads ROM and MLB under. The case matters: it queries with an
++/// UPPERCASE `4A6A`, and a lowercase key silently misses, dropping ROM+MLB from the request and
++/// producing validation data Apple rejects (389 bytes instead of 517).
++const ROM_MLB_PREFIX: &str = "4D1EDE05-38C7-4A6A-9CC6-4BCCA8B38C14";
++
++const ARG_REGS: [RegisterX86; 6] = [
++    RegisterX86::RDI,
++    RegisterX86::RSI,
++    RegisterX86::RDX,
++    RegisterX86::RCX,
++    RegisterX86::R8,
++    RegisterX86::R9,
++];
++
++/// The hooked symbols, in order. A symbol's index here IS its address (HOOK_BASE + index), so
++/// this list must not be reordered. Entries that are data symbols rather than functions (the
++/// `_k…` globals) are never called — they only need an address to be bound to.
++const HOOKS: &[&str] = &[
++    "_malloc",
++    "___stack_chk_guard",
++    "___memset_chk",
++    "_sysctlbyname",
++    "_memcpy",
++    "_kIOMasterPortDefault",
++    "_IORegistryEntryFromPath",
++    "_kCFAllocatorDefault",
++    "_IORegistryEntryCreateCFProperty",
++    "_CFGetTypeID",
++    "_CFStringGetTypeID",
++    "_CFDataGetTypeID",
++    "_CFDataGetLength",
++    "_CFDataGetBytes",
++    "_CFRelease",
++    "_IOObjectRelease",
++    "_statfs$INODE64",
++    "_DASessionCreate",
++    "_DADiskCreateFromBSDName",
++    "_kDADiskDescriptionVolumeUUIDKey",
++    "_DADiskCopyDescription",
++    "_CFDictionaryGetValue",
++    "_CFUUIDCreateString",
++    "_CFStringGetLength",
++    "_CFStringGetMaximumSizeForEncoding",
++    "_CFStringGetCString",
++    "_free",
++    "_IOServiceMatching",
++    "_IOServiceGetMatchingService",
++    "_CFDictionaryCreateMutable",
++    "_kCFBooleanTrue",
++    "_CFDictionarySetValue",
++    "_IOServiceGetMatchingServices",
++    "_IOIteratorNext",
++    "___bzero",
++    "_IORegistryEntryGetParentEntry",
++    "_arc4random",
++];
++
++/// A CoreFoundation value, as far as the emulated binary can tell. Handed out as 1-based
++/// indices into [`EmuState::objects`] — index 0 would be indistinguishable from NULL.
++#[derive(Clone, Debug)]
++enum CfObj {
++    Data(Vec<u8>),
++    Str(String),
++    Dict(HashMap<String, CfObj>),
++    /// A pointer the binary handed us that isn't one of ours; passed back through unchanged.
++    Raw(u64),
++}
++
++struct EmuState {
++    objects: Vec<CfObj>,
++    heap_used: u64,
++    /// IOServiceGetMatchingServices/IOIteratorNext fake exactly one ethernet interface.
++    eth_iterator: bool,
++    iokit: HashMap<String, CfObj>,
++    root_disk_uuid: String,
++}
++
++impl EmuState {
++    fn malloc(&mut self, size: u64) -> u64 {
++        let addr = HEAP_BASE + self.heap_used;
++        // 16-byte align; the binary stores SSE values on some of these.
++        self.heap_used += (size + 15) & !15;
++        addr
++    }
++
++    fn push(&mut self, obj: CfObj) -> u64 {
++        self.objects.push(obj);
++        self.objects.len() as u64
++    }
++
++    fn get(&self, idx: u64) -> Option<&CfObj> {
++        if idx == 0 { return None; }
++        self.objects.get((idx - 1) as usize)
++    }
++
++    /// Either one of our objects or, for an index past the table, the raw pointer itself.
++    fn maybe_object(&self, obj: u64) -> CfObj {
++        if obj == 0 || obj > self.objects.len() as u64 {
++            CfObj::Raw(obj)
++        } else {
++            self.objects[(obj - 1) as usize].clone()
++        }
++    }
++}
++
++impl HardwareConfig {
++    /// The IOKit registry this machine should appear to have, keyed exactly as
++    /// IMDAppleServices queries it.
++    fn iokit(&self) -> HashMap<String, CfObj> {
++        let mut m = HashMap::new();
++        let mut nul = |s: &str| CfObj::Data(s.bytes().chain(std::iter::once(0)).collect());
++        m.insert("product-name".into(), nul(&self.product_name));
++        m.insert("board-id".into(), nul(&self.board_id));
++        m.insert("IOPlatformSerialNumber".into(), CfObj::Str(self.platform_serial_number.clone()));
++        m.insert("IOPlatformUUID".into(), CfObj::Str(self.platform_uuid.clone()));
++        m.insert("IOMACAddress".into(), CfObj::Data(self.io_mac_address.to_vec()));
++        // MLB is raw bytes here, NOT null-terminated (unlike board-id/product-name).
++        m.insert(format!("{ROM_MLB_PREFIX}:MLB"), CfObj::Data(self.mlb.clone().into_bytes()));
++        m.insert(format!("{ROM_MLB_PREFIX}:ROM"), CfObj::Data(self.rom.clone()));
++        m.insert("Gq3489ugfi".into(), CfObj::Data(self.platform_serial_number_enc.clone()));
++        m.insert("Fyp98tpgj".into(), CfObj::Data(self.platform_uuid_enc.clone()));
++        m.insert("kbjfrfpoJU".into(), CfObj::Data(self.root_disk_uuid_enc.clone()));
++        m.insert("oycqAZloTNDm".into(), CfObj::Data(self.rom_enc.clone()));
++        m.insert("abKPld1EcMni".into(), CfObj::Data(self.mlb_enc.clone()));
++        m
++    }
++}
++
++// ---- Mach-O ---------------------------------------------------------------
++// Read directly rather than through a crate: we need section `reserved1` and the dysymtab's
++// `indirectsymoff`, which the obvious readers don't surface.
++
++fn u32le(b: &[u8], off: usize) -> u32 {
++    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
++}
++fn u64le(b: &[u8], off: usize) -> u64 {
++    let mut v = [0u8; 8];
++    v.copy_from_slice(&b[off..off + 8]);
++    u64::from_le_bytes(v)
++}
++fn u32be(b: &[u8], off: usize) -> u32 {
++    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
++}
++
++/// The x86-64 slice of the universal binary.
++fn x64_slice(bin: &[u8]) -> Result<&[u8], AbsintheError> {
++    const FAT_MAGIC: u32 = 0xCAFE_BABE;
++    const CPU_TYPE_X86_64: u32 = 0x0100_0007;
++    if bin.len() < 8 || u32be(bin, 0) != FAT_MAGIC {
++        return Err(AbsintheError(-1));
++    }
++    let n = u32be(bin, 4) as usize;
++    for i in 0..n {
++        let a = 8 + i * 20;
++        if a + 20 > bin.len() {
++            break;
++        }
++        if u32be(bin, a) == CPU_TYPE_X86_64 {
++            let off = u32be(bin, a + 8) as usize;
++            let size = u32be(bin, a + 12) as usize;
++            return bin.get(off..off + size).ok_or(AbsintheError(-2));
++        }
++    }
++    Err(AbsintheError(-3))
++}
++
++#[derive(Default)]
++struct MachInfo {
++    /// (file offset, size, reserved1, section type) for each section.
++    sections: Vec<(u64, u64, u32, u8)>,
++    /// Segment file offsets, in load order (bind opcodes index into this).
++    segment_offsets: Vec<u64>,
++    symoff: usize,
++    stroff: usize,
++    indirectsymoff: usize,
++    bind_off: usize,
++    bind_size: usize,
++}
++
++fn parse_macho(b: &[u8]) -> Result<MachInfo, AbsintheError> {
++    const LC_SEGMENT_64: u32 = 0x19;
++    const LC_SYMTAB: u32 = 0x2;
++    const LC_DYSYMTAB: u32 = 0xb;
++    const LC_DYLD_INFO: u32 = 0x22;
++    const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
++
++    let mut info = MachInfo::default();
++    if b.len() < 32 {
++        return Err(AbsintheError(-4));
++    }
++    let ncmds = u32le(b, 16) as usize;
++    let mut off = 32usize;
++    for _ in 0..ncmds {
++        if off + 8 > b.len() {
++            break;
++        }
++        let cmd = u32le(b, off);
++        let cmdsize = u32le(b, off + 4) as usize;
++        if cmdsize == 0 {
++            break;
++        }
++        match cmd {
++            LC_SEGMENT_64 => {
++                info.segment_offsets.push(u64le(b, off + 40)); // fileoff
++                let nsects = u32le(b, off + 64) as usize;
++                for i in 0..nsects {
++                    let s = off + 72 + i * 80;
++                    if s + 80 > b.len() {
++                        break;
++                    }
++                    let size = u64le(b, s + 40);
++                    let offset = u32le(b, s + 48) as u64;
++                    let flags = u32le(b, s + 64);
++                    let reserved1 = u32le(b, s + 68);
++                    info.sections.push((offset, size, reserved1, (flags & 0xff) as u8));
++                }
++            }
++            LC_SYMTAB => {
++                info.symoff = u32le(b, off + 8) as usize;
++                info.stroff = u32le(b, off + 16) as usize;
++            }
++            LC_DYSYMTAB => {
++                info.indirectsymoff = u32le(b, off + 56) as usize;
++            }
++            LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
++                info.bind_off = u32le(b, off + 16) as usize;
++                info.bind_size = u32le(b, off + 20) as usize;
++            }
++            _ => {}
++        }
++        off += cmdsize;
++    }
++    Ok(info)
++}
++
++fn c_string(b: &[u8], start: usize) -> String {
++    let mut out = String::new();
++    let mut i = start;
++    while i < b.len() && b[i] != 0 {
++        out.push(b[i] as char);
++        i += 1;
++    }
++    out
++}
++
++fn uleb128(b: &[u8], i: &mut usize) -> u64 {
++    let mut result = 0u64;
++    let mut shift = 0u32;
++    loop {
++        if *i >= b.len() {
++            break;
++        }
++        let byte = b[*i];
++        *i += 1;
++        result |= ((byte & 0x7f) as u64) << shift;
++        if byte & 0x80 == 0 {
++            break;
++        }
++        shift += 7;
++    }
++    result
++}
++
++// ---- emulator -------------------------------------------------------------
++
++fn uce(e: unicorn_engine::unicorn_const::uc_error) -> AbsintheError {
++    log::error!("[nac] unicorn error: {e:?}");
++    AbsintheError(-100)
++}
++
++fn round_up(v: u64, to: u64) -> u64 {
++    (v + to - 1) & !(to - 1)
++}
++
++/// Read a `__builtin_CFString` (isa, flags, char*, length) out of guest memory.
++fn read_cfstr(uc: &mut Unicorn<EmuState>, ptr: u64) -> Option<String> {
++    let hdr = uc.mem_read_as_vec(ptr, 32).ok()?;
++    let str_ptr = u64le(&hdr, 16);
++    let length = u64le(&hdr, 24);
++    if length > 0x10000 {
++        return None;
++    }
++    let data = uc.mem_read_as_vec(str_ptr, length as usize).ok()?;
++    String::from_utf8(data).ok()
++}
++
++/// Read a NUL-terminated C string out of guest memory.
++fn read_cstr(uc: &mut Unicorn<EmuState>, ptr: u64) -> Option<String> {
++    let data = uc.mem_read_as_vec(ptr, 256).ok()?;
++    let end = data.iter().position(|b| *b == 0).unwrap_or(data.len());
++    String::from_utf8(data[..end].to_vec()).ok()
++}
++
++/// Every hooked symbol lands here; the address says which one.
++fn dispatch(uc: &mut Unicorn<EmuState>, address: u64, _size: u32) {
++    let idx = (address - HOOK_BASE) as usize;
++    let Some(name) = HOOKS.get(idx) else { return };
++
++    let mut a = [0u64; 6];
++    for (i, r) in ARG_REGS.iter().enumerate() {
++        a[i] = uc.reg_read(*r).unwrap_or(0);
++    }
++    let mut ret = |uc: &mut Unicorn<EmuState>, v: u64| {
++        let _ = uc.reg_write(RegisterX86::RAX, v);
++    };
++
++    match *name {
++        "_malloc" => {
++            let p = uc.get_data_mut().malloc(a[0]);
++            ret(uc, p);
++        }
++        "___memset_chk" => {
++            let _ = uc.mem_write(a[0], &vec![(a[1] & 0xff) as u8; a[2] as usize]);
++            ret(uc, 0);
++        }
++        "_memcpy" => {
++            if let Ok(src) = uc.mem_read_as_vec(a[1], a[2] as usize) {
++                let _ = uc.mem_write(a[0], &src);
++            }
++            ret(uc, 0);
++        }
++        "___bzero" => {
++            let _ = uc.mem_write(a[0], &vec![0u8; a[1] as usize]);
++            ret(uc, 0);
++        }
++        "_sysctlbyname" | "_statfs$INODE64" | "_CFRelease" | "_IOObjectRelease" | "_free" => {
++            ret(uc, 0)
++        }
++        "_IORegistryEntryFromPath" => ret(uc, 1),
++        "_CFStringGetTypeID" => ret(uc, 2),
++        "_CFDataGetTypeID" => ret(uc, 1),
++        "_DASessionCreate" => ret(uc, 201),
++        "_DADiskCreateFromBSDName" => ret(uc, 202),
++        "_IOServiceGetMatchingService" => ret(uc, 92),
++        // Hands back its second argument — the UUID it was asked to stringify.
++        "_CFUUIDCreateString" => ret(uc, a[1]),
++        // Hands back its first argument — the length it was asked to size.
++        "_CFStringGetMaximumSizeForEncoding" => ret(uc, a[0]),
++        "_arc4random" => {
++            let v: u32 = rand::random();
++            ret(uc, v as u64);
++        }
++
++        "_IORegistryEntryCreateCFProperty" => {
++            let key = read_cfstr(uc, a[1]);
++            let found = key.as_ref().and_then(|k| uc.get_data_mut().iokit.get(k).cloned());
++            match found {
++                Some(v) => {
++                    log::debug!("[nac] IOKit {:?} -> {} bytes/chars", key, match &v {
++                        CfObj::Data(d) => d.len(), CfObj::Str(s) => s.len(), _ => 0 });
++                    let i = uc.get_data_mut().push(v);
++                    ret(uc, i);
++                }
++                None => {
++                    log::debug!("[nac] IOKit {key:?} -> none");
++                    ret(uc, 0);
++                }
++            }
++        }
++        "_CFGetTypeID" => {
++            let v = match uc.get_data_mut().get(a[0]) {
++                Some(CfObj::Data(_)) => 1,
++                Some(CfObj::Str(_)) => 2,
++                other => {
++                    log::error!("[nac] CFGetTypeID on {other:?}");
++                    0
++                }
++            };
++            ret(uc, v);
++        }
++        "_CFDataGetLength" => {
++            let v = match uc.get_data_mut().get(a[0]) {
++                Some(CfObj::Data(d)) => d.len() as u64,
++                other => {
++                    log::error!("[nac] CFDataGetLength on {other:?}");
++                    0
++                }
++            };
++            ret(uc, v);
++        }
++        "_CFDataGetBytes" => {
++            let slice = match uc.get_data_mut().get(a[0]) {
++                Some(CfObj::Data(d)) => {
++                    let (s, e) = (a[1] as usize, a[2] as usize);
++                    Some(d[s.min(d.len())..e.min(d.len())].to_vec())
++                }
++                other => {
++                    log::error!("[nac] CFDataGetBytes on {other:?}");
++                    None
++                }
++            };
++            let n = match slice {
++                Some(d) => {
++                    let _ = uc.mem_write(a[3], &d);
++                    d.len() as u64
++                }
++                None => 0,
++            };
++            ret(uc, n);
++        }
++        "_CFStringGetLength" => {
++            let v = match uc.get_data_mut().get(a[0]) {
++                Some(CfObj::Str(s)) => s.chars().count() as u64,
++                other => {
++                    log::error!("[nac] CFStringGetLength on {other:?}");
++                    0
++                }
++            };
++            ret(uc, v);
++        }
++        "_CFStringGetCString" => {
++            let bytes = match uc.get_data_mut().get(a[0]) {
++                Some(CfObj::Str(s)) => Some(s.clone().into_bytes()),
++                other => {
++                    log::error!("[nac] CFStringGetCString on {other:?}");
++                    None
++                }
++            };
++            let n = match bytes {
++                Some(b) => {
++                    let _ = uc.mem_write(a[1], &b);
++                    b.len() as u64
++                }
++                None => 0,
++            };
++            ret(uc, n);
++        }
++        "_CFDictionaryCreateMutable" => {
++            let i = uc.get_data_mut().push(CfObj::Dict(HashMap::new()));
++            ret(uc, i);
++        }
++        "_CFDictionaryGetValue" => {
++            // The `_kDADiskDescriptionVolumeUUIDKey` global is bound into the hook page, which
++            // is filled with 0xC3, so dereferencing it yields this. Same intent as the key.
++            let key = if a[1] == 0xc3c3_c3c3_c3c3_c3c3 {
++                Some("DADiskDescriptionVolumeUUIDKey".to_string())
++            } else {
++                match uc.get_data_mut().maybe_object(a[1]) {
++                    CfObj::Str(s) => Some(s),
++                    other => {
++                        log::error!("[nac] CFDictionaryGetValue: key {other:?} isn't a string");
++                        None
++                    }
++                }
++            };
++            let found = match (key.as_ref(), uc.get_data_mut().get(a[0])) {
++                (Some(k), Some(CfObj::Dict(d))) => d.get(k).cloned(),
++                (_, other) => {
++                    log::error!("[nac] CFDictionaryGetValue on {other:?}");
++                    None
++                }
++            };
++            match found {
++                Some(v) => {
++                    let i = uc.get_data_mut().push(v);
++                    ret(uc, i);
++                }
++                None => {
++                    log::error!("[nac] CFDictionaryGetValue: {key:?} not found");
++                    ret(uc, 0);
++                }
++            }
++        }
++        "_CFDictionarySetValue" => {
++            let st = uc.get_data_mut();
++            let key = match st.maybe_object(a[1]) {
++                CfObj::Str(s) => Some(s),
++                other => {
++                    log::error!("[nac] CFDictionarySetValue: key {other:?} isn't a string");
++                    None
++                }
++            };
++            let val = st.maybe_object(a[2]);
++            if let Some(k) = key {
++                if let Some(CfObj::Dict(d)) = st.objects.get_mut((a[0] - 1) as usize) {
++                    d.insert(k, val);
++                } else {
++                    log::error!("[nac] CFDictionarySetValue on a non-dict");
++                }
++            }
++        }
++        "_IOServiceMatching" => {
++            let name = read_cstr(uc, a[0]).unwrap_or_default();
++            log::debug!("[nac] IOServiceMatching {name}");
++            let st = uc.get_data_mut();
++            let mut d = HashMap::new();
++            d.insert("IOProviderClass".to_string(), CfObj::Str(name));
++            let i = st.push(CfObj::Dict(d));
++            ret(uc, i);
++        }
++        "_DADiskCopyDescription" => {
++            let st = uc.get_data_mut();
++            let uuid = st.root_disk_uuid.clone();
++            let mut d = HashMap::new();
++            d.insert("DADiskDescriptionVolumeUUIDKey".to_string(), CfObj::Str(uuid));
++            let i = st.push(CfObj::Dict(d));
++            ret(uc, i);
++        }
++        "_IOServiceGetMatchingServices" => {
++            uc.get_data_mut().eth_iterator = true;
++            let _ = uc.mem_write(a[2], &[93u8]);
++            ret(uc, 0);
++        }
++        "_IOIteratorNext" => {
++            let st = uc.get_data_mut();
++            let v = if st.eth_iterator {
++                st.eth_iterator = false;
++                94
++            } else {
++                0
++            };
++            ret(uc, v);
++        }
++        "_IORegistryEntryGetParentEntry" => {
++            let _ = uc.mem_write(a[2], &[(a[0] as u8).wrapping_add(100)]);
++            ret(uc, 0);
++        }
++        // Data symbols: bound so the binary has an address to read, never called.
++        _ => {}
++    }
++}
++
++/// Map the binary, bind its imports to our hooks, and lay out stack/heap.
++fn new_emulator(hw: &HardwareConfig) -> Result<Unicorn<'static, EmuState>, AbsintheError> {
++    let bin = x64_slice(BINARY)?;
++    let info = parse_macho(bin)?;
++
++    let state = EmuState {
++        objects: Vec::new(),
++        heap_used: 0,
++        eth_iterator: false,
++        iokit: hw.iokit(),
++        root_disk_uuid: hw.root_disk_uuid.clone(),
++    };
++    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, state).map_err(uce)?;
++
++    // One page of `ret`s. Each hooked symbol gets its own address in it, and a code hook over
++    // the page turns an entry into a call into our Rust implementation.
++    uc.mem_map(HOOK_BASE, HOOK_SIZE, Prot::ALL).map_err(uce)?;
++    uc.mem_write(HOOK_BASE, &vec![0xC3u8; HOOK_SIZE as usize]).map_err(uce)?;
++    uc.add_code_hook(HOOK_BASE, HOOK_BASE + HOOK_SIZE, dispatch).map_err(uce)?;
++    let hook_addr = |name: &str| HOOKS.iter().position(|h| *h == name).map(|i| HOOK_BASE + i as u64);
++
++    // The binary is mapped flat at 0, so file offsets double as addresses.
++    let mapped = round_up(bin.len() as u64, PAGE_SIZE);
++    uc.mem_map(BINARY_BASE, mapped, Prot::ALL).map_err(uce)?;
++    uc.mem_write(BINARY_BASE, bin).map_err(uce)?;
++    // Leave page 0 unmapped so a null dereference faults instead of reading header bytes.
++    uc.mem_unmap(0, PAGE_SIZE).map_err(uce)?;
++
++    let mut bind = |uc: &mut Unicorn<EmuState>, location: u64, name: &str| {
++        if let Some(addr) = hook_addr(name) {
++            let _ = uc.mem_write(location, &addr.to_le_bytes());
++        }
++    };
++
++    // Lazy/non-lazy symbol pointer sections, resolved through the indirect symbol table.
++    const S_NON_LAZY_SYMBOL_POINTERS: u8 = 0x6;
++    const S_LAZY_SYMBOL_POINTERS: u8 = 0x7;
++    for (offset, size, reserved1, kind) in info.sections.iter().copied() {
++        if kind != S_LAZY_SYMBOL_POINTERS && kind != S_NON_LAZY_SYMBOL_POINTERS {
++            continue;
++        }
++        for i in 0..(size / 8) {
++            let ind = info.indirectsymoff + ((reserved1 as usize + i as usize) * 4);
++            if ind + 4 > bin.len() {
++                break;
++            }
++            let sym_index = (u32le(bin, ind) & 0x3fff_ffff) as usize;
++            let sym = info.symoff + sym_index * 16;
++            if sym + 4 > bin.len() {
++                continue;
++            }
++            let strx = u32le(bin, sym) as usize;
++            let name = c_string(bin, info.stroff + strx);
++            bind(&mut uc, offset + i * 8, &name);
++        }
++    }
++
++    // The dyld bind opcode stream.
++    run_bind_opcodes(&mut uc, &bin[info.bind_off..info.bind_off + info.bind_size], &info.segment_offsets, &mut bind);
++
++    uc.mem_map(STACK_BASE, STACK_SIZE, Prot::ALL).map_err(uce)?;
++    uc.reg_write(RegisterX86::RSP, STACK_BASE + STACK_SIZE).map_err(uce)?;
++    uc.reg_write(RegisterX86::RBP, STACK_BASE + STACK_SIZE).map_err(uce)?;
++    uc.mem_map(HEAP_BASE, HEAP_SIZE, Prot::ALL).map_err(uce)?;
++    // Calls return here; the page is all `ret`, and emu_start stops at its first address.
++    uc.mem_map(STOP_ADDRESS, PAGE_SIZE, Prot::ALL).map_err(uce)?;
++    uc.mem_write(STOP_ADDRESS, &vec![0xC3u8; PAGE_SIZE as usize]).map_err(uce)?;
++
++    Ok(uc)
++}
++
++fn run_bind_opcodes(
++    uc: &mut Unicorn<EmuState>,
++    binds: &[u8],
++    segments: &[u64],
++    bind: &mut impl FnMut(&mut Unicorn<EmuState>, u64, &str),
++) {
++    const DONE: u8 = 0x00;
++    const SET_DYLIB_ORDINAL_IMM: u8 = 0x10;
++    const SET_DYLIB_ORDINAL_ULEB: u8 = 0x20;
++    const SET_DYLIB_SPECIAL_IMM: u8 = 0x30;
++    const SET_SYMBOL_TRAILING_FLAGS_IMM: u8 = 0x40;
++    const SET_TYPE_IMM: u8 = 0x50;
++    const SET_ADDEND_SLEB: u8 = 0x60;
++    const SET_SEGMENT_AND_OFFSET_ULEB: u8 = 0x70;
++    const ADD_ADDR_ULEB: u8 = 0x80;
++    const DO_BIND: u8 = 0x90;
++    const DO_BIND_ADD_ADDR_ULEB: u8 = 0xA0;
++    const DO_BIND_ADD_ADDR_IMM_SCALED: u8 = 0xB0;
++    const DO_BIND_ULEB_TIMES_SKIPPING_ULEB: u8 = 0xC0;
++
++    let mut i = 0usize;
++    let mut symbol = String::new();
++    let mut seg_index = 0usize;
++    let mut seg_offset = 0u64;
++    let seg_base = |idx: usize| segments.get(idx).copied().unwrap_or(0);
++
++    while i < binds.len() {
++        let current = binds[i];
++        i += 1;
++        let opcode = current & 0xF0;
++        let immediate = current & 0x0F;
++        match opcode {
++            DONE => break,
++            SET_DYLIB_ORDINAL_IMM | SET_DYLIB_SPECIAL_IMM | SET_TYPE_IMM => {}
++            SET_DYLIB_ORDINAL_ULEB => {
++                uleb128(binds, &mut i);
++            }
++            SET_SYMBOL_TRAILING_FLAGS_IMM => {
++                symbol.clear();
++                while i < binds.len() && binds[i] != 0 {
++                    symbol.push(binds[i] as char);
++                    i += 1;
++                }
++                i += 1; // the NUL
++            }
++            SET_ADDEND_SLEB => {
++                uleb128(binds, &mut i);
++            }
++            SET_SEGMENT_AND_OFFSET_ULEB => {
++                seg_index = immediate as usize;
++                seg_offset = uleb128(binds, &mut i);
++            }
++            ADD_ADDR_ULEB => {
++                seg_offset = seg_offset.wrapping_add(uleb128(binds, &mut i));
++            }
++            DO_BIND => {
++                bind(uc, seg_base(seg_index) + seg_offset, &symbol);
++                seg_offset += 8;
++            }
++            DO_BIND_ADD_ADDR_ULEB => {
++                bind(uc, seg_base(seg_index) + seg_offset, &symbol);
++                seg_offset = seg_offset.wrapping_add(uleb128(binds, &mut i) + 8);
++            }
++            DO_BIND_ADD_ADDR_IMM_SCALED => {
++                bind(uc, seg_base(seg_index) + seg_offset, &symbol);
++                seg_offset += immediate as u64 * 8 + 8;
++            }
++            DO_BIND_ULEB_TIMES_SKIPPING_ULEB => {
++                let count = uleb128(binds, &mut i);
++                let skip = uleb128(binds, &mut i);
++                for _ in 0..count {
++                    bind(uc, seg_base(seg_index) + seg_offset, &symbol);
++                    seg_offset += skip + 8;
++                }
++            }
++            other => log::warn!("[nac] unknown bind opcode {other:#x}"),
++        }
++    }
++}
++
++/// Call into the binary with the System V argument registers, returning RAX.
++fn call(uc: &mut Unicorn<EmuState>, address: u64, args: &[u64]) -> Result<u64, AbsintheError> {
++    // Push the return address; the stop page is a run of `ret`, and emu_start halts there.
++    let rsp = uc.reg_read(RegisterX86::RSP).map_err(uce)? - 8;
++    uc.reg_write(RegisterX86::RSP, rsp).map_err(uce)?;
++    uc.mem_write(rsp, &STOP_ADDRESS.to_le_bytes()).map_err(uce)?;
++    for (i, v) in args.iter().enumerate().take(6) {
++        uc.reg_write(ARG_REGS[i], *v).map_err(uce)?;
++    }
++    uc.emu_start(address, STOP_ADDRESS, 0, 0).map_err(uce)?;
++    uc.reg_read(RegisterX86::RAX).map_err(uce)
++}
++
++fn alloc(uc: &mut Unicorn<EmuState>, size: u64) -> u64 {
++    uc.get_data_mut().malloc(size)
++}
++
++fn read_u64(uc: &mut Unicorn<EmuState>, addr: u64) -> Result<u64, AbsintheError> {
++    let b = uc.mem_read_as_vec(addr, 8).map_err(uce)?;
++    Ok(u64le(&b, 0))
++}
++
++/// Turn a non-zero return from the binary into the signed error code it means.
++fn nac_err(ret: u64) -> AbsintheError {
++    AbsintheError(ret as u32 as i32)
++}
++
++pub struct ValidationCtx {
++    uc: Unicorn<'static, EmuState>,
++    ctx: u64,
++}
++
++// The emulator is owned entirely by this struct and never shared.
+ unsafe impl Send for ValidationCtx { }
+ 
+ impl ValidationCtx {
+     pub fn new(cert_chain: &[u8], out_request_bytes: &mut Vec<u8>, hw_config: &HardwareConfig) -> Result<ValidationCtx, AbsintheError> {
+-        todo!()
++        let mut uc = new_emulator(hw_config)?;
++
++        let cert_addr = alloc(&mut uc, cert_chain.len() as u64);
++        uc.mem_write(cert_addr, cert_chain).map_err(uce)?;
++        let out_ctx = alloc(&mut uc, 8);
++        let out_req = alloc(&mut uc, 8);
++        let out_len = alloc(&mut uc, 8);
++
++        let ret = call(&mut uc, NAC_INIT, &[
++            cert_addr,
++            cert_chain.len() as u64,
++            out_ctx,
++            out_req,
++            out_len,
++        ])?;
++        if ret != 0 {
++            log::error!("[nac] nac_init failed: {}", nac_err(ret).0);
++            return Err(nac_err(ret));
++        }
++
++        let ctx = read_u64(&mut uc, out_ctx)?;
++        let req_addr = read_u64(&mut uc, out_req)?;
++        let req_len = read_u64(&mut uc, out_len)?;
++        *out_request_bytes = uc.mem_read_as_vec(req_addr, req_len as usize).map_err(uce)?;
++        log::info!("[nac] init ok, request is {} bytes", out_request_bytes.len());
++
++        Ok(ValidationCtx { uc, ctx })
+     }
+ 
+     pub fn key_establishment(&mut self, response: &[u8]) -> Result<(), AbsintheError> {
+-        todo!()
++        let addr = alloc(&mut self.uc, response.len() as u64);
++        self.uc.mem_write(addr, response).map_err(uce)?;
++        let ret = call(&mut self.uc, NAC_KEY_ESTABLISHMENT, &[self.ctx, addr, response.len() as u64])?;
++        if ret != 0 {
++            log::error!("[nac] key_establishment failed: {}", nac_err(ret).0);
++            return Err(nac_err(ret));
++        }
++        Ok(())
+     }
+ 
+-
+     pub fn sign(&self) -> Result<Vec<u8>, AbsintheError> {
+-        todo!()
++        // The emulator mutates as it runs; the trait we implement hands us &self, so take a
++        // short-lived mutable view of what we exclusively own.
++        let me = self as *const ValidationCtx as *mut ValidationCtx;
++        let uc = unsafe { &mut (*me).uc };
++
++        let out_data = alloc(uc, 8);
++        let out_len = alloc(uc, 8);
++        let ret = call(uc, NAC_SIGN, &[self.ctx, 0, 0, out_data, out_len])?;
++        if ret != 0 {
++            log::error!("[nac] sign failed: {}", nac_err(ret).0);
++            return Err(nac_err(ret));
++        }
++        let addr = read_u64(uc, out_data)?;
++        let len = read_u64(uc, out_len)?;
++        let data = uc.mem_read_as_vec(addr, len as usize).map_err(uce)?;
++        // A short blob means a data-producing hook missed: ROM/MLB dropping out takes this
++        // from 517 bytes to 389, and Apple rejects the whole registration with status 6001.
++        log::info!("[nac] validation data: {} bytes", data.len());
++        Ok(data)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/tests/nac_reference.rs b/tests/nac_reference.rs
+new file mode 100644
+index 0000000..b839e0b
+--- /dev/null
++++ b/tests/nac_reference.rs
+@@ -0,0 +1,130 @@
++//! Runs the emulated IMDAppleServices end-to-end against pypush's published reference hardware
++//! and reports the size of the validation data it produces.
++//!
++//! Byte length is the signal that matters: a hook that silently fails to hand over a piece of
++//! hardware identity shortens the blob (517 -> 389 when ROM and MLB go missing), and Apple
++//! rejects the short one with an opaque status 6001 at registration. Comparing against the
++//! Python reference for the SAME hardware is the fastest way to catch a divergent hook.
++//!
++//! Needs network: the flow is cert -> request -> Apple session-info -> sign. Ignored by
++//! default; run with `cargo test -p open-absinthe --release -- --ignored --nocapture`.
++
++use std::process::Command;
++
++fn b64(s: &str) -> Vec<u8> {
++    // Small dependency-free base64 decoder; this is test-only glue.
++    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    let mut out = Vec::new();
++    let mut acc = 0u32;
++    let mut bits = 0u32;
++    for c in s.bytes() {
++        if c == b'=' || c == b'\n' {
++            continue;
++        }
++        let Some(v) = T.iter().position(|t| *t == c) else { continue };
++        acc = (acc << 6) | v as u32;
++        bits += 6;
++        if bits >= 8 {
++            bits -= 8;
++            out.push((acc >> bits) as u8);
++        }
++    }
++    out
++}
++
++/// Pull one string field out of the JSON the harness wrote. Avoids a serde_json dependency.
++fn field<'a>(json: &'a str, key: &str) -> &'a str {
++    let pat = format!("\"{key}\": \"");
++    let i = json.find(&pat).unwrap_or_else(|| panic!("missing {key}")) + pat.len();
++    let rest = &json[i..];
++    &rest[..rest.find('"').expect("unterminated")]
++}
++
++fn curl(args: &[&str]) -> Vec<u8> {
++    let out = Command::new("curl").args(args).output().expect("curl");
++    assert!(out.status.success(), "curl failed: {}", String::from_utf8_lossy(&out.stderr));
++    out.stdout
++}
++
++#[test]
++#[ignore]
++fn validation_data_matches_reference_length() {
++    let dir = std::env::var("NAC_REF_DIR").expect("set NAC_REF_DIR to the harness directory");
++    let json = std::fs::read_to_string(format!("{dir}/refhw.json")).expect("refhw.json");
++
++    let hw = open_absinthe::nac::HardwareConfig {
++        product_name: field(&json, "product_name").to_string(),
++        io_mac_address: b64(field(&json, "io_mac_address")).try_into().expect("mac"),
++        platform_serial_number: field(&json, "platform_serial_number").to_string(),
++        platform_uuid: field(&json, "platform_uuid").to_string(),
++        root_disk_uuid: field(&json, "root_disk_uuid").to_string(),
++        board_id: field(&json, "board_id").to_string(),
++        os_build_num: field(&json, "os_build_num").to_string(),
++        platform_serial_number_enc: b64(field(&json, "platform_serial_number_enc")),
++        platform_uuid_enc: b64(field(&json, "platform_uuid_enc")),
++        root_disk_uuid_enc: b64(field(&json, "root_disk_uuid_enc")),
++        rom: b64(field(&json, "rom")),
++        rom_enc: b64(field(&json, "rom_enc")),
++        mlb: field(&json, "mlb").to_string(),
++        mlb_enc: b64(field(&json, "mlb_enc")),
++    };
++
++    // The public identity cert, same URL pypush uses.
++    let cert_plist = curl(&["-s", "http://static.ess.apple.com/identity/validation/cert-1.0.plist"]);
++    std::fs::write(format!("{dir}/cert.plist"), &cert_plist).unwrap();
++    let cert = plist_data(&cert_plist, "cert");
++
++    let mut request = Vec::new();
++    let mut ctx = open_absinthe::nac::ValidationCtx::new(&cert, &mut request, &hw)
++        .expect("nac_init");
++    println!("request: {} bytes", request.len());
++    assert!(!request.is_empty(), "nac_init produced an empty request");
++
++    // Apple turns the request into session info.
++    std::fs::write(format!("{dir}/request.bin"), &request).unwrap();
++    let body = std::process::Command::new("python3")
++        .args(["-c", &format!(
++            "import plistlib,sys;sys.stdout.buffer.write(plistlib.dumps({{'session-info-request':open('{dir}/request.bin','rb').read()}}))"
++        )])
++        .output().expect("python3").stdout;
++    std::fs::write(format!("{dir}/init.plist"), &body).unwrap();
++    // This endpoint answers curl and urllib with status 5003 but accepts `requests`; rather
++    // than chase the difference, use an interpreter that has it (NAC_REF_PYTHON).
++    let py = std::env::var("NAC_REF_PYTHON").unwrap_or_else(|_| "python3".into());
++    let out = Command::new(&py)
++        .args(["-c", &format!(
++            "import requests,urllib3,sys;urllib3.disable_warnings();\
++sys.stdout.buffer.write(requests.post('https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation',\
++data=open('{dir}/init.plist','rb').read(),verify=False).content)"
++        )])
++        .output().expect("python3");
++    assert!(out.status.success(), "initializeValidation failed: {}", String::from_utf8_lossy(&out.stderr));
++    let resp = out.stdout;
++
++    let session_info = plist_data(&resp, "session-info");
++    println!("session-info: {} bytes", session_info.len());
++
++    ctx.key_establishment(&session_info).expect("key_establishment");
++    let data = ctx.sign().expect("sign");
++    println!("VALIDATION DATA: {} bytes", data.len());
++    assert!(
++        data.len() > 450,
++        "validation data is only {} bytes — a hardware hook is missing (ROM/MLB drop it to 389)",
++        data.len()
++    );
++}
++
++/// Pull a <data> value out of an Apple plist response, via python3 (test-only glue).
++fn plist_data(plist: &[u8], key: &str) -> Vec<u8> {
++    let dir = std::env::var("NAC_REF_DIR").unwrap();
++    let p = format!("{dir}/tmp.plist");
++    std::fs::write(&p, plist).unwrap();
++    let out = Command::new("python3")
++        .args(["-c", &format!(
++            "import plistlib,sys;sys.stdout.buffer.write(plistlib.load(open('{p}','rb'))['{key}'])"
++        )])
++        .output()
++        .expect("python3");
++    assert!(out.status.success(), "plist read failed: {}", String::from_utf8_lossy(&out.stderr));
++    out.stdout
++}

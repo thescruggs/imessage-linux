@@ -1,0 +1,4 @@
+[submodule "third_party/rustpush"]
+	path = third_party/rustpush
+	url = https://github.com/OpenBubbles/rustpush
+	ignore = dirty

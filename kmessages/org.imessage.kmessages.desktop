@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Messages
+GenericName=iMessage Client
+Comment=Send and receive iMessages through imessaged
+Exec=kmessages
+Icon=dialog-messages
+Terminal=false
+Categories=Qt;KDE;Network;InstantMessaging;
+Keywords=iMessage;chat;SMS;Apple;
+StartupNotify=true
+X-KDE-StartupNotify=true
+SingleMainWindow=true

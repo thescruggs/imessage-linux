@@ -1,0 +1,2 @@
+{"version": "0.1.0", "connection": {"state": "error", "detail": "registration failing, retrying: timeout"}, "registered": false,
+ "registration": {"handles": [], "registered_at": null, "expires_at": null}, "unread": null}

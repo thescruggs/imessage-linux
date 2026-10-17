@@ -1,0 +1,993 @@
+diff --git a/icloud-auth/Cargo.toml b/icloud-auth/Cargo.toml
+index d033701..68bc714 100644
+--- a/icloud-auth/Cargo.toml
++++ b/icloud-auth/Cargo.toml
+@@ -8,6 +8,7 @@ edition = "2021"
+ [features]
+ remote-anisette-v3 = ["omnisette/remote-anisette-v3"]
+ remote-clearadi = ["omnisette/remote-clearadi"]
++local-anisette = ["omnisette/local-anisette"]
+ 
+ [dependencies]
+ serde = { version = "1.0.147", features = ["derive"] }
+diff --git a/omnisette/Cargo.toml b/omnisette/Cargo.toml
+index f35a4ea..20de5a3 100644
+--- a/omnisette/Cargo.toml
++++ b/omnisette/Cargo.toml
+@@ -8,6 +8,8 @@ async = ["dep:async-trait"]
+ default = ["dep:remove-async-await", "async"]
+ remote-anisette-v3 = ["async", "dep:tokio-tungstenite", "dep:futures-util"]
+ remote-clearadi = ["async", "dep:clearadi"]
++# Apple's own ADI (libstoreservicescore.so) run on-device through android-loader.
++local-anisette = ["async"]
+ 
+ [dependencies]
+ base64 = "0.21"
+diff --git a/omnisette/src/adi_proxy.rs b/omnisette/src/adi_proxy.rs
+new file mode 100644
+index 0000000..8a01434
+--- /dev/null
++++ b/omnisette/src/adi_proxy.rs
+@@ -0,0 +1,386 @@
++use crate::adi_proxy::ProvisioningError::InvalidResponse;
++use crate::anisette_headers_provider::AnisetteHeadersProvider;
++use crate::AnisetteError;
++use base64::engine::general_purpose::STANDARD as base64_engine;
++use base64::Engine;
++use log::debug;
++use plist::{Dictionary, Value};
++use rand::RngCore;
++#[cfg(not(feature = "async"))]
++use reqwest::blocking::{Client, ClientBuilder, Response};
++use reqwest::header::{HeaderMap, HeaderValue, InvalidHeaderValue};
++#[cfg(feature = "async")]
++use reqwest::{Client, ClientBuilder, Response};
++use sha2::{Digest, Sha256};
++use std::collections::HashMap;
++use std::fmt::{Display, Formatter};
++use std::io::{self, Read, Write};
++use std::path::PathBuf;
++use thiserror::Error;
++
++#[derive(Debug)]
++pub struct ServerError {
++    pub code: i64,
++    pub description: String,
++}
++
++#[derive(Debug)]
++pub enum ProvisioningError {
++    InvalidResponse,
++    ServerError(ServerError),
++}
++
++impl std::fmt::Display for ProvisioningError {
++    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{self:?}")
++    }
++}
++
++impl std::error::Error for ProvisioningError {}
++
++#[derive(Debug, Error)]
++pub enum ADIError {
++    Unknown(i32),
++    ProvisioningError(#[from] ProvisioningError),
++    PlistError(#[from] plist::Error),
++    ReqwestError(#[from] reqwest::Error),
++    Base64Error(#[from] base64::DecodeError),
++    InvalidHeaderValue(#[from] InvalidHeaderValue),
++    IOError(#[from] io::Error)
++}
++
++impl ADIError {
++    pub fn resolve(error_number: i32) -> ADIError {
++        ADIError::Unknown(error_number)
++    }
++}
++
++#[cfg_attr(feature = "async", async_trait::async_trait)]
++trait ToPlist {
++    #[cfg_attr(not(feature = "async"), remove_async_await::remove_async_await)]
++    async fn plist(self) -> Result<Dictionary, ADIError>;
++}
++
++#[cfg_attr(feature = "async", async_trait::async_trait)]
++impl ToPlist for Response {
++    #[cfg_attr(not(feature = "async"), remove_async_await::remove_async_await)]
++    async fn plist(self) -> Result<Dictionary, ADIError> {
++        if let Ok(property_list) = Value::from_reader_xml(&*self.bytes().await?) {
++            Ok(property_list.as_dictionary().unwrap().to_owned())
++        } else {
++            Err(ProvisioningError::InvalidResponse.into())
++        }
++    }
++}
++
++impl Display for ADIError {
++    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{self:?}")
++    }
++}
++
++pub struct SynchronizeData {
++    pub mid: Vec<u8>,
++    pub srm: Vec<u8>,
++}
++
++pub struct StartProvisioningData {
++    pub cpim: Vec<u8>,
++    pub session: u32,
++}
++
++pub struct RequestOTPData {
++    pub otp: Vec<u8>,
++    pub mid: Vec<u8>,
++}
++
++#[cfg_attr(feature = "async", async_trait::async_trait(?Send))]
++pub trait ADIProxy: Send + Sync {   
++    fn erase_provisioning(&mut self, ds_id: i64) -> Result<(), ADIError>;
++    fn synchronize(&mut self, ds_id: i64, sim: &[u8]) -> Result<SynchronizeData, ADIError>;
++    fn destroy_provisioning_session(&mut self, session: u32) -> Result<(), ADIError>;
++    fn end_provisioning(&mut self, session: u32, ptm: &[u8], tk: &[u8]) -> Result<(), ADIError>;
++    fn start_provisioning(
++        &mut self,
++        ds_id: i64,
++        spim: &[u8],
++    ) -> Result<StartProvisioningData, ADIError>;
++    fn is_machine_provisioned(&self, ds_id: i64) -> bool;
++    fn request_otp(&self, ds_id: i64) -> Result<RequestOTPData, ADIError>;
++
++    fn set_local_user_uuid(&mut self, local_user_uuid: String);
++    fn set_device_identifier(&mut self, device_identifier: String) -> Result<(), ADIError>;
++
++    fn get_local_user_uuid(&self) -> String;
++    fn get_device_identifier(&self) -> String;
++    fn get_serial_number(&self) -> String;
++}
++
++pub trait ConfigurableADIProxy: ADIProxy {
++    fn set_identifier(&mut self, identifier: &str) -> Result<(), ADIError>;
++    fn set_provisioning_path(&mut self, path: &str) -> Result<(), ADIError>;
++}
++
++pub const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
++pub const CLIENT_INFO_HEADER: &str =
++    "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>";
++pub const DS_ID: i64 = -2;
++pub const IDENTIFIER_LENGTH: usize = 16;
++pub type Identifier = [u8; IDENTIFIER_LENGTH];
++
++trait AppleRequestResult {
++    fn check_status(&self) -> Result<(), ADIError>;
++    fn get_response(&self) -> Result<&Dictionary, ADIError>;
++}
++
++impl AppleRequestResult for Dictionary {
++    fn check_status(&self) -> Result<(), ADIError> {
++        let status = self
++            .get("Status")
++            .ok_or(InvalidResponse)?
++            .as_dictionary()
++            .unwrap();
++        let code = status.get("ec").unwrap().as_signed_integer().unwrap();
++        if code != 0 {
++            let description = status.get("em").unwrap().as_string().unwrap().to_string();
++            Err(ProvisioningError::ServerError(ServerError { code, description }).into())
++        } else {
++            Ok(())
++        }
++    }
++
++    fn get_response(&self) -> Result<&Dictionary, ADIError> {
++        if let Some(response) = self.get("Response") {
++            let response = response.as_dictionary().unwrap();
++            response.check_status()?;
++            Ok(response)
++        } else {
++            Err(InvalidResponse.into())
++        }
++    }
++}
++
++impl dyn ADIProxy {
++    fn make_http_client(&mut self) -> Result<Client, ADIError> {
++        let mut headers = HeaderMap::new();
++        headers.insert("Content-Type", HeaderValue::from_str("text/x-xml-plist")?);
++
++        headers.insert(
++            "X-Mme-Client-Info",
++            HeaderValue::from_str(CLIENT_INFO_HEADER)?,
++        );
++        headers.insert(
++            "X-Mme-Device-Id",
++            HeaderValue::from_str(self.get_device_identifier().as_str())?,
++        );
++        headers.insert(
++            "X-Apple-I-MD-LU",
++            HeaderValue::from_str(self.get_local_user_uuid().as_str())?,
++        );
++        headers.insert(
++            "X-Apple-I-SRL-NO",
++            HeaderValue::from_str(self.get_serial_number().as_str())?,
++        );
++
++        debug!("Headers sent: {headers:?}");
++
++        let http_client = ClientBuilder::new()
++            .http1_title_case_headers()
++            .danger_accept_invalid_certs(true) // TODO: pin the apple certificate
++            .user_agent(AKD_USER_AGENT)
++            .default_headers(headers)
++            .build()?;
++
++        Ok(http_client)
++    }
++
++    #[cfg_attr(not(feature = "async"), remove_async_await::remove_async_await)]
++    async fn provision_device(&mut self) -> Result<(), ADIError> {
++        let client = self.make_http_client()?;
++
++        let url_bag_res = client
++            .get("https://gsa.apple.com/grandslam/GsService2/lookup")
++            .send()
++            .await?
++            .plist()
++            .await?;
++
++        let urls = url_bag_res.get("urls").unwrap().as_dictionary().unwrap();
++
++        let start_provisioning_url = urls
++            .get("midStartProvisioning")
++            .unwrap()
++            .as_string()
++            .unwrap();
++        let finish_provisioning_url = urls
++            .get("midFinishProvisioning")
++            .unwrap()
++            .as_string()
++            .unwrap();
++
++        let mut body = plist::Dictionary::new();
++        body.insert(
++            "Header".to_string(),
++            plist::Value::Dictionary(plist::Dictionary::new()),
++        );
++        body.insert(
++            "Request".to_string(),
++            plist::Value::Dictionary(plist::Dictionary::new()),
++        );
++
++        let mut sp_request = Vec::new();
++        plist::Value::Dictionary(body).to_writer_xml(&mut sp_request)?;
++
++        debug!("First provisioning request...");
++        let response = client
++            .post(start_provisioning_url)
++            .body(sp_request)
++            .send()
++            .await?
++            .plist()
++            .await?;
++
++        let response = response.get_response()?;
++
++        let spim = response
++            .get("spim")
++            .unwrap()
++            .as_string()
++            .unwrap()
++            .to_owned();
++
++        let spim = base64_engine.decode(spim)?;
++        let first_step = self.start_provisioning(DS_ID, spim.as_slice())?;
++
++        let mut body = Dictionary::new();
++        let mut request = Dictionary::new();
++        request.insert(
++            "cpim".to_owned(),
++            Value::String(base64_engine.encode(first_step.cpim)),
++        );
++        body.insert("Header".to_owned(), Value::Dictionary(Dictionary::new()));
++        body.insert("Request".to_owned(), Value::Dictionary(request));
++
++        let mut fp_request = Vec::new();
++        Value::Dictionary(body).to_writer_xml(&mut fp_request)?;
++
++        debug!("Second provisioning request...");
++        let response = client
++            .post(finish_provisioning_url)
++            .body(fp_request)
++            .send()
++            .await?
++            .plist()
++            .await?;
++
++        let response = response.get_response()?;
++
++        let ptm = base64_engine.decode(response.get("ptm").unwrap().as_string().unwrap())?;
++        let tk = base64_engine.decode(response.get("tk").unwrap().as_string().unwrap())?;
++
++        self.end_provisioning(first_step.session, ptm.as_slice(), tk.as_slice())?;
++        debug!("Done.");
++
++        Ok(())
++    }
++}
++
++impl From<ADIError> for crate::AnisetteError {
++    fn from(e: ADIError) -> Self {
++        crate::AnisetteError::Anyhow(anyhow::anyhow!(e.to_string()))
++    }
++}
++
++pub struct ADIProxyAnisetteProvider<ProxyType: ADIProxy + 'static> {
++    adi_proxy: ProxyType,
++}
++
++impl<ProxyType: ADIProxy + 'static> ADIProxyAnisetteProvider<ProxyType> {
++    /// If you use this method, you are expected to set the identifier yourself.
++    pub fn without_identifier(adi_proxy: ProxyType) -> Result<ADIProxyAnisetteProvider<ProxyType>, ADIError> {
++        Ok(ADIProxyAnisetteProvider { adi_proxy })
++    }
++
++    pub fn new(
++        mut adi_proxy: ProxyType,
++        configuration_path: PathBuf,
++    ) -> Result<ADIProxyAnisetteProvider<ProxyType>, ADIError> {
++        let identifier_file_path = configuration_path.join("identifier");
++        let mut identifier_file = std::fs::OpenOptions::new()
++            .create(true)
++            .read(true)
++            .write(true)
++            .open(identifier_file_path)?;
++        let mut identifier = [0u8; IDENTIFIER_LENGTH];
++        if identifier_file.metadata()?.len() == IDENTIFIER_LENGTH as u64 {
++            identifier_file.read_exact(&mut identifier)?;
++        } else {
++            rand::thread_rng().fill_bytes(&mut identifier);
++            identifier_file.write_all(&identifier)?;
++        }
++
++        let mut local_user_uuid_hasher = Sha256::new();
++        local_user_uuid_hasher.update(identifier);
++
++        adi_proxy.set_device_identifier(
++            uuid::Uuid::from_bytes(identifier)
++                .to_string()
++                .to_uppercase(),
++        )?; // UUID, uppercase
++        adi_proxy
++            .set_local_user_uuid(hex::encode(local_user_uuid_hasher.finalize()).to_uppercase()); // 64 uppercase character hex
++
++        Ok(ADIProxyAnisetteProvider { adi_proxy })
++    }
++
++    pub fn adi_proxy(&mut self) -> &mut ProxyType {
++        &mut self.adi_proxy
++    }
++}
++
++#[cfg_attr(feature = "async", async_trait::async_trait)]
++impl<ProxyType: ADIProxy + 'static> AnisetteHeadersProvider
++    for ADIProxyAnisetteProvider<ProxyType>
++{
++    #[cfg_attr(not(feature = "async"), remove_async_await::remove_async_await)]
++    async fn get_anisette_headers(
++        &mut self,
++        skip_provisioning: bool,
++    ) -> Result<HashMap<String, String>, AnisetteError> {
++        let adi_proxy = &mut self.adi_proxy as &mut dyn ADIProxy;
++
++        if !adi_proxy.is_machine_provisioned(DS_ID) && !skip_provisioning {
++            adi_proxy.provision_device().await?;
++        }
++
++        let machine_data = adi_proxy.request_otp(DS_ID)?;
++
++        let mut headers = HashMap::new();
++        headers.insert(
++            "X-Apple-I-MD".to_string(),
++            base64_engine.encode(machine_data.otp),
++        );
++        headers.insert(
++            "X-Apple-I-MD-M".to_string(),
++            base64_engine.encode(machine_data.mid),
++        );
++        headers.insert("X-Apple-I-MD-RINFO".to_string(), "17106176".to_string());
++        headers.insert(
++            "X-Apple-I-MD-LU".to_string(),
++            adi_proxy.get_local_user_uuid(),
++        );
++        headers.insert(
++            "X-Apple-I-SRL-NO".to_string(),
++            adi_proxy.get_serial_number(),
++        );
++        // Deliberately NOT sending X-Mme-Client-Info here: this provider's hardcoded value
++        // disagrees with the MacOSConfig the rest of the stack presents, and Apple answers that
++        // mismatch with an UNAUTHORIZED "add a trusted phone number".
++        headers.insert(
++            "X-Mme-Device-Id".to_string(),
++            adi_proxy.get_device_identifier(),
++        );
++
++        Ok(headers)
++    }
++}
+diff --git a/omnisette/src/anisette_headers_provider.rs b/omnisette/src/anisette_headers_provider.rs
+new file mode 100644
+index 0000000..903203e
+--- /dev/null
++++ b/omnisette/src/anisette_headers_provider.rs
+@@ -0,0 +1,31 @@
++
++use std::collections::HashMap;
++
++use crate::AnisetteError;
++
++#[cfg_attr(feature = "async", async_trait::async_trait)]
++pub trait AnisetteHeadersProvider: Send + Sync {
++    #[cfg_attr(not(feature = "async"), remove_async_await::remove_async_await)]
++    async fn get_anisette_headers(
++        &mut self,
++        skip_provisioning: bool,
++    ) -> Result<HashMap<String, String>, AnisetteError>;
++
++    #[cfg_attr(not(feature = "async"), remove_async_await::remove_async_await)]
++    async fn get_authentication_headers(&mut self) -> Result<HashMap<String, String>, AnisetteError> {
++        let headers = self.get_anisette_headers(false).await?;
++        Ok(self.normalize_headers(headers))
++    }
++
++    /// Normalizes headers to ensure that all the required headers are given.
++    fn normalize_headers(
++        &mut self,
++        mut headers: HashMap<String, String>,
++    ) -> HashMap<String, String> {
++        if let Some(client_info) = headers.remove("X-MMe-Client-Info") {
++            headers.insert("X-Mme-Client-Info".to_string(), client_info);
++        }
++
++        headers
++    }
++}
+diff --git a/omnisette/src/lib.rs b/omnisette/src/lib.rs
+index 131b7d5..7c15ba2 100644
+--- a/omnisette/src/lib.rs
++++ b/omnisette/src/lib.rs
+@@ -29,6 +29,13 @@ pub mod remote_anisette_v3;
+ #[cfg(target_os = "macos")]
+ pub mod aos_kit;
+ 
++#[cfg(feature = "local-anisette")]
++pub mod adi_proxy;
++#[cfg(feature = "local-anisette")]
++pub mod anisette_headers_provider;
++#[cfg(feature = "local-anisette")]
++pub mod store_services_core;
++
+ #[allow(dead_code)]
+ pub struct AnisetteHeaders;
+ 
+@@ -126,6 +133,62 @@ pub fn default_provider(info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClie
+     Arc::new(Mutex::new(AnisetteClient::new(AOSKitAnisetteProvider::new().expect("Failed to load anisette provider?"))))
+ }
+ 
++#[cfg(all(not(target_os = "macos"), feature = "local-anisette"))]
++mod local_anisette {
++    use super::*;
++    use crate::adi_proxy::ADIProxyAnisetteProvider;
++    use crate::anisette_headers_provider::AnisetteHeadersProvider;
++    use crate::store_services_core::StoreServicesCoreADIProxy;
++
++    /// Anisette from Apple's own ADI library, loaded and run on this device — no anisette server
++    /// in the path. `lib_path` is the directory holding `lib/<abi>/libstoreservicescore.so`
++    /// (the caller extracts those from assets); provisioning state is kept alongside it.
++    ///
++    /// Construction is deferred to the first header request: loading the library and provisioning
++    /// are expensive and can fail, and an already-registered client never needs either.
++    pub struct SSCAnisetteProvider {
++        lib_path: PathBuf,
++        inner: Option<ADIProxyAnisetteProvider<StoreServicesCoreADIProxy<'static>>>,
++    }
++
++    // The loaded library is confined to this struct and only ever touched behind the
++    // AnisetteClient's Mutex, so moving it between threads is safe.
++    unsafe impl Send for SSCAnisetteProvider {}
++
++    impl SSCAnisetteProvider {
++        pub fn new(lib_path: PathBuf) -> Self {
++            SSCAnisetteProvider { lib_path, inner: None }
++        }
++
++        fn provider(
++            &mut self,
++        ) -> Result<&mut ADIProxyAnisetteProvider<StoreServicesCoreADIProxy<'static>>, AnisetteError>
++        {
++            if self.inner.is_none() {
++                let proxy = StoreServicesCoreADIProxy::new(&self.lib_path)?;
++                self.inner = Some(ADIProxyAnisetteProvider::new(proxy, self.lib_path.clone())?);
++            }
++            Ok(self.inner.as_mut().expect("just built"))
++        }
++    }
++
++    impl AnisetteProvider for SSCAnisetteProvider {
++        async fn get_anisette_headers(&mut self) -> Result<HashMap<String, String>, AnisetteError> {
++            self.provider()?.get_authentication_headers().await
++        }
++    }
++}
++
++#[cfg(all(not(target_os = "macos"), feature = "local-anisette"))]
++pub use local_anisette::SSCAnisetteProvider;
++
++#[cfg(all(not(target_os = "macos"), feature = "local-anisette"))]
++pub type DefaultAnisetteProvider = SSCAnisetteProvider;
++#[cfg(all(not(target_os = "macos"), feature = "local-anisette"))]
++pub fn default_provider(_info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClient<DefaultAnisetteProvider> {
++    Arc::new(Mutex::new(AnisetteClient::new(SSCAnisetteProvider::new(path))))
++}
++
+ pub type ArcAnisetteClient<T> = Arc<Mutex<AnisetteClient<T>>>;
+ 
+ 
+diff --git a/omnisette/src/store_services_core.rs b/omnisette/src/store_services_core.rs
+new file mode 100644
+index 0000000..5782c03
+--- /dev/null
++++ b/omnisette/src/store_services_core.rs
+@@ -0,0 +1,452 @@
++#[cfg(target_os = "macos")]
++mod posix_macos;
++#[cfg(target_family = "windows")]
++mod posix_windows;
++
++use crate::adi_proxy::{
++    ADIError, ADIProxy, ConfigurableADIProxy, RequestOTPData, StartProvisioningData,
++    SynchronizeData,
++};
++use crate::AnisetteError;
++
++use android_loader::android_library::AndroidLibrary;
++use android_loader::sysv64_type;
++use android_loader::{hook_manager, sysv64};
++use std::collections::HashMap;
++use std::ffi::{c_char, CString};
++use std::path::PathBuf;
++
++pub struct StoreServicesCoreADIProxy<'lt> {
++    #[allow(dead_code)]
++    store_services_core: AndroidLibrary<'lt>,
++
++    local_user_uuid: String,
++    device_identifier: String,
++
++    adi_set_android_id: sysv64_type!(fn(id: *const u8, length: u32) -> i32),
++    adi_set_provisioning_path: sysv64_type!(fn(path: *const u8) -> i32),
++
++    adi_provisioning_erase: sysv64_type!(fn(ds_id: i64) -> i32),
++    adi_synchronize: sysv64_type!(
++        fn(
++            ds_id: i64,
++            sim: *const u8,
++            sim_length: u32,
++            out_mid: *mut *const u8,
++            out_mid_length: *mut u32,
++            out_srm: *mut *const u8,
++            out_srm_length: *mut u32,
++        ) -> i32
++    ),
++    adi_provisioning_destroy: sysv64_type!(fn(session: u32) -> i32),
++    adi_provisioning_end: sysv64_type!(
++        fn(session: u32, ptm: *const u8, ptm_length: u32, tk: *const u8, tk_length: u32) -> i32
++    ),
++    adi_provisioning_start: sysv64_type!(
++        fn(
++            ds_id: i64,
++            spim: *const u8,
++            spim_length: u32,
++            out_cpim: *mut *const u8,
++            out_cpim_length: *mut u32,
++            out_session: *mut u32,
++        ) -> i32
++    ),
++    adi_get_login_code: sysv64_type!(fn(ds_id: i64) -> i32),
++    adi_dispose: sysv64_type!(fn(ptr: *const u8) -> i32),
++    adi_otp_request: sysv64_type!(
++        fn(
++            ds_id: i64,
++            out_mid: *mut *const u8,
++            out_mid_size: *mut u32,
++            out_otp: *mut *const u8,
++            out_otp_size: *mut u32,
++        ) -> i32
++    ),
++}
++
++impl StoreServicesCoreADIProxy<'_> {
++    pub fn new<'lt>(library_path: &PathBuf) -> Result<StoreServicesCoreADIProxy<'lt>, AnisetteError> {
++        Self::with_custom_provisioning_path(library_path, library_path)
++    }
++
++    pub fn with_custom_provisioning_path<'lt>(library_path: &PathBuf, provisioning_path: &PathBuf) -> Result<StoreServicesCoreADIProxy<'lt>, AnisetteError> {
++        // Should be safe if the library is correct.
++        unsafe {
++            LoaderHelpers::setup_hooks();
++
++            if !library_path.exists() {
++                std::fs::create_dir(library_path)?;
++                return Err(AnisetteError::MissingLibraries.into());
++            }
++
++            let library_path = library_path.canonicalize()?;
++
++            #[cfg(target_arch = "x86_64")]
++            const ARCH: &str = "x86_64";
++            #[cfg(target_arch = "x86")]
++            const ARCH: &str = "x86";
++            #[cfg(target_arch = "arm")]
++            const ARCH: &str = "armeabi-v7a";
++            #[cfg(target_arch = "aarch64")]
++            const ARCH: &str = "arm64-v8a";
++
++            let native_library_path = library_path.join("lib").join(ARCH);
++
++            let path = native_library_path.join("libstoreservicescore.so");
++            let path = path.to_str().ok_or(AnisetteError::Misc)?;
++            let store_services_core = AndroidLibrary::load(path)?;
++
++            let adi_load_library_with_path: sysv64_type!(fn(path: *const u8) -> i32) =
++                std::mem::transmute(
++                    store_services_core
++                        .get_symbol("kq56gsgHG6")
++                        .ok_or(AnisetteError::InvalidLibraryFormat)?,
++                );
++
++            let path = CString::new(
++                native_library_path
++                    .to_str()
++                    .ok_or(AnisetteError::Misc)?,
++            )
++            .unwrap();
++            assert_eq!((adi_load_library_with_path)(path.as_ptr() as *const u8), 0);
++
++            let adi_set_android_id = store_services_core
++                .get_symbol("Sph98paBcz")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_set_provisioning_path = store_services_core
++                .get_symbol("nf92ngaK92")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++
++            let adi_provisioning_erase = store_services_core
++                .get_symbol("p435tmhbla")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_synchronize = store_services_core
++                .get_symbol("tn46gtiuhw")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_provisioning_destroy = store_services_core
++                .get_symbol("fy34trz2st")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_provisioning_end = store_services_core
++                .get_symbol("uv5t6nhkui")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_provisioning_start = store_services_core
++                .get_symbol("rsegvyrt87")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_get_login_code = store_services_core
++                .get_symbol("aslgmuibau")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_dispose = store_services_core
++                .get_symbol("jk24uiwqrg")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++            let adi_otp_request = store_services_core
++                .get_symbol("qi864985u0")
++                .ok_or(AnisetteError::InvalidLibraryFormat)?;
++
++            let mut proxy = StoreServicesCoreADIProxy {
++                store_services_core,
++
++                local_user_uuid: String::new(),
++                device_identifier: String::new(),
++
++                adi_set_android_id: std::mem::transmute(adi_set_android_id),
++                adi_set_provisioning_path: std::mem::transmute(adi_set_provisioning_path),
++
++                adi_provisioning_erase: std::mem::transmute(adi_provisioning_erase),
++                adi_synchronize: std::mem::transmute(adi_synchronize),
++                adi_provisioning_destroy: std::mem::transmute(adi_provisioning_destroy),
++                adi_provisioning_end: std::mem::transmute(adi_provisioning_end),
++                adi_provisioning_start: std::mem::transmute(adi_provisioning_start),
++                adi_get_login_code: std::mem::transmute(adi_get_login_code),
++                adi_dispose: std::mem::transmute(adi_dispose),
++                adi_otp_request: std::mem::transmute(adi_otp_request),
++            };
++
++            proxy.set_provisioning_path(
++                provisioning_path.to_str().ok_or(AnisetteError::Misc)?,
++            )?;
++
++            Ok(proxy)
++        }
++    }
++}
++
++impl ADIProxy for StoreServicesCoreADIProxy<'_> {
++    fn erase_provisioning(&mut self, ds_id: i64) -> Result<(), ADIError> {
++        match (self.adi_provisioning_erase)(ds_id) {
++            0 => Ok(()),
++            err => Err(ADIError::resolve(err)),
++        }
++    }
++
++    fn synchronize(&mut self, ds_id: i64, sim: &[u8]) -> Result<SynchronizeData, ADIError> {
++        unsafe {
++            let sim_size = sim.len() as u32;
++            let sim_ptr = sim.as_ptr();
++
++            let mut mid_size: u32 = 0;
++            let mut mid_ptr: *const u8 = std::ptr::null();
++            let mut srm_size: u32 = 0;
++            let mut srm_ptr: *const u8 = std::ptr::null();
++
++            match (self.adi_synchronize)(
++                ds_id,
++                sim_ptr,
++                sim_size,
++                &mut mid_ptr,
++                &mut mid_size,
++                &mut srm_ptr,
++                &mut srm_size,
++            ) {
++                0 => {
++                    let mut mid = vec![0; mid_size as usize];
++                    let mut srm = vec![0; srm_size as usize];
++
++                    mid.copy_from_slice(std::slice::from_raw_parts(mid_ptr, mid_size as usize));
++                    srm.copy_from_slice(std::slice::from_raw_parts(srm_ptr, srm_size as usize));
++
++                    (self.adi_dispose)(mid_ptr);
++                    (self.adi_dispose)(srm_ptr);
++
++                    Ok(SynchronizeData { mid, srm })
++                }
++                err => Err(ADIError::resolve(err)),
++            }
++        }
++    }
++
++    fn destroy_provisioning_session(&mut self, session: u32) -> Result<(), ADIError> {
++        match (self.adi_provisioning_destroy)(session) {
++            0 => Ok(()),
++            err => Err(ADIError::resolve(err)),
++        }
++    }
++
++    fn end_provisioning(&mut self, session: u32, ptm: &[u8], tk: &[u8]) -> Result<(), ADIError> {
++        let ptm_size = ptm.len() as u32;
++        let ptm_ptr = ptm.as_ptr();
++
++        let tk_size = tk.len() as u32;
++        let tk_ptr = tk.as_ptr();
++
++        match (self.adi_provisioning_end)(session, ptm_ptr, ptm_size, tk_ptr, tk_size) {
++            0 => Ok(()),
++            err => Err(ADIError::resolve(err)),
++        }
++    }
++
++    fn start_provisioning(
++        &mut self,
++        ds_id: i64,
++        spim: &[u8],
++    ) -> Result<StartProvisioningData, ADIError> {
++        unsafe {
++            let spim_size = spim.len() as u32;
++            let spim_ptr = spim.as_ptr();
++
++            let mut cpim_size: u32 = 0;
++            let mut cpim_ptr: *const u8 = std::ptr::null();
++
++            let mut session: u32 = 0;
++
++            match (self.adi_provisioning_start)(
++                ds_id,
++                spim_ptr,
++                spim_size,
++                &mut cpim_ptr,
++                &mut cpim_size,
++                &mut session,
++            ) {
++                0 => {
++                    let mut cpim = vec![0; cpim_size as usize];
++
++                    cpim.copy_from_slice(std::slice::from_raw_parts(cpim_ptr, cpim_size as usize));
++
++                    (self.adi_dispose)(cpim_ptr);
++
++                    Ok(StartProvisioningData { cpim, session })
++                }
++                err => Err(ADIError::resolve(err)),
++            }
++        }
++    }
++
++    fn is_machine_provisioned(&self, ds_id: i64) -> bool {
++        (self.adi_get_login_code)(ds_id) == 0
++    }
++
++    fn request_otp(&self, ds_id: i64) -> Result<RequestOTPData, ADIError> {
++        unsafe {
++            let mut mid_size: u32 = 0;
++            let mut mid_ptr: *const u8 = std::ptr::null();
++            let mut otp_size: u32 = 0;
++            let mut otp_ptr: *const u8 = std::ptr::null();
++
++            match (self.adi_otp_request)(
++                ds_id,
++                &mut mid_ptr,
++                &mut mid_size,
++                &mut otp_ptr,
++                &mut otp_size,
++            ) {
++                0 => {
++                    let mut mid = vec![0; mid_size as usize];
++                    let mut otp = vec![0; otp_size as usize];
++
++                    mid.copy_from_slice(std::slice::from_raw_parts(mid_ptr, mid_size as usize));
++                    otp.copy_from_slice(std::slice::from_raw_parts(otp_ptr, otp_size as usize));
++
++                    (self.adi_dispose)(mid_ptr);
++                    (self.adi_dispose)(otp_ptr);
++
++                    Ok(RequestOTPData { mid, otp })
++                }
++                err => Err(ADIError::resolve(err)),
++            }
++        }
++    }
++
++    fn set_local_user_uuid(&mut self, local_user_uuid: String) {
++        self.local_user_uuid = local_user_uuid;
++    }
++
++    fn set_device_identifier(&mut self, device_identifier: String) -> Result<(), ADIError> {
++        self.set_identifier(&device_identifier[0..16])?;
++        self.device_identifier = device_identifier;
++        Ok(())
++    }
++
++    fn get_local_user_uuid(&self) -> String {
++        self.local_user_uuid.clone()
++    }
++
++    fn get_device_identifier(&self) -> String {
++        self.device_identifier.clone()
++    }
++
++    fn get_serial_number(&self) -> String {
++        "0".to_string()
++    }
++}
++
++impl ConfigurableADIProxy for StoreServicesCoreADIProxy<'_> {
++    fn set_identifier(&mut self, identifier: &str) -> Result<(), ADIError> {
++        match (self.adi_set_android_id)(identifier.as_ptr(), identifier.len() as u32) {
++            0 => Ok(()),
++            err => Err(ADIError::resolve(err)),
++        }
++    }
++
++    fn set_provisioning_path(&mut self, path: &str) -> Result<(), ADIError> {
++        let path = CString::new(path).unwrap();
++        match (self.adi_set_provisioning_path)(path.as_ptr() as *const u8) {
++            0 => Ok(()),
++            err => Err(ADIError::resolve(err)),
++        }
++    }
++}
++
++struct LoaderHelpers;
++
++use rand::Rng;
++
++#[cfg(all(target_family = "unix", not(target_os = "macos")))]
++use libc::{
++    chmod, close, free, fstat, ftruncate, gettimeofday, lstat, malloc, mkdir, open, read, strncpy,
++    umask, write,
++};
++#[cfg(target_os = "macos")]
++use posix_macos::*;
++
++static mut ERRNO: i32 = 0;
++
++#[allow(unreachable_code)]
++#[sysv64]
++unsafe fn __errno_location() -> *mut i32 {
++    ERRNO = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
++    &mut ERRNO
++}
++
++#[sysv64]
++fn arc4random() -> u32 {
++    rand::thread_rng().gen()
++}
++
++#[sysv64]
++unsafe fn __system_property_get(_name: *const c_char, value: *mut c_char) -> i32 {
++    *value = '0' as c_char;
++    return 1;
++}
++
++#[cfg(target_family = "windows")]
++use posix_windows::*;
++
++impl LoaderHelpers {
++    pub fn setup_hooks() {
++        let mut hooks = HashMap::new();
++        hooks.insert("arc4random".to_owned(), arc4random as usize);
++        hooks.insert("chmod".to_owned(), chmod as usize);
++        hooks.insert(
++            "__system_property_get".to_owned(),
++            __system_property_get as usize,
++        );
++        hooks.insert("__errno".to_owned(), __errno_location as usize);
++        hooks.insert("close".to_owned(), close as usize);
++        hooks.insert("free".to_owned(), free as usize);
++        hooks.insert("fstat".to_owned(), fstat as usize);
++        hooks.insert("ftruncate".to_owned(), ftruncate as usize);
++        hooks.insert("gettimeofday".to_owned(), gettimeofday as usize);
++        hooks.insert("lstat".to_owned(), lstat as usize);
++        hooks.insert("malloc".to_owned(), malloc as usize);
++        hooks.insert("mkdir".to_owned(), mkdir as usize);
++        hooks.insert("open".to_owned(), open as usize);
++        hooks.insert("read".to_owned(), read as usize);
++        hooks.insert("strncpy".to_owned(), strncpy as usize);
++        hooks.insert("umask".to_owned(), umask as usize);
++        hooks.insert("write".to_owned(), write as usize);
++
++        hook_manager::add_hooks(hooks);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use crate::{AnisetteConfiguration, AnisetteHeaders};
++    use log::info;
++    use std::path::PathBuf;
++    use crate::AnisetteError;
++
++    #[cfg(not(feature = "async"))]
++    #[test]
++    fn fetch_anisette_ssc() -> Result<(), AnisetteError> {
++        crate::tests::init_logger();
++
++        let mut provider = AnisetteHeaders::get_ssc_anisette_headers_provider(
++            AnisetteConfiguration::new()
++                .set_configuration_path(PathBuf::new().join("anisette_test")),
++        )?;
++        info!(
++            "Headers: {:?}",
++            provider.provider.get_authentication_headers()?
++        );
++        Ok(())
++    }
++
++    #[cfg(feature = "async")]
++    #[tokio::test]
++    async fn fetch_anisette_ssc_async() -> Result<(), AnisetteError> {
++
++        crate::tests::init_logger();
++
++        let mut provider = AnisetteHeaders::get_ssc_anisette_headers_provider(
++            AnisetteConfiguration::new()
++                .set_configuration_path(PathBuf::new().join("anisette_test")),
++        )?;
++        info!(
++            "Headers: {:?}",
++            provider.provider.get_authentication_headers().await?
++        );
++        Ok(())
++    }
++}

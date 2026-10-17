@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SYNTHETIC TEST FIXTURE: every identifier here is fake. Not a real Mac. -->
+<plist version="1.0">
+<dict>
+	<key>inner</key>
+	<dict>
+		<key>product_name</key>
+		<string>Macmini7,1</string>
+		<key>io_mac_address</key>
+		<data>
+		AgBeECAw
+		</data>
+		<key>platform_serial_number</key>
+		<string>C02FAKE00001</string>
+		<key>platform_uuid</key>
+		<string>FA4E0000-0000-4000-8000-000000000001</string>
+		<key>root_disk_uuid</key>
+		<string>FA4E0000-0000-4000-8000-000000000002</string>
+		<key>board_id</key>
+		<string>Mac-FAKEFAKEFAKEFAKE</string>
+		<key>os_build_num</key>
+		<string>22F66</string>
+		<key>platform_serial_number_enc</key>
+		<data>
+		RkFLRS1zZXJpYWwtZW5jLWJsb2Itbm90LXJlYWw=
+		</data>
+		<key>platform_uuid_enc</key>
+		<data>
+		RkFLRS11dWlkLWVuYy1ibG9iLW5vdC1yZWFs
+		</data>
+		<key>root_disk_uuid_enc</key>
+		<data>
+		RkFLRS1yb290LWRpc2stZW5jLWJsb2Itbm90LXJlYWw=
+		</data>
+		<key>rom_enc</key>
+		<data>
+		RkFLRS1yb20tZW5jLWJsb2Itbm90LXJlYWw=
+		</data>
+		<key>mlb</key>
+		<string>C02FAKEMLB000001</string>
+	</dict>
+	<key>version</key>
+	<string>13.4.1</string>
+	<key>protocol_version</key>
+	<integer>1640</integer>
+	<key>device_id</key>
+	<string>FA4E0000-0000-4000-8000-000000000001</string>
+	<key>icloud_ua</key>
+	<string>com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0</string>
+	<key>aoskit_version</key>
+	<string>com.apple.AOSKit/282 (com.apple.accountsd/113)</string>
+</dict>
+</plist>

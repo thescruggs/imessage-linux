@@ -1,0 +1,8 @@
+BEGIN:VCARD
+VERSION:3.0
+UID:fixture-acme
+FN:Acme Rockets
+N:;;;;
+ORG:Acme Rockets
+EMAIL;TYPE=INTERNET:support@acme.example
+END:VCARD

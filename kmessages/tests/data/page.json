@@ -1,0 +1,8 @@
+{"messages": [
+  {"id": "M1", "chat_id": "mailto:bob@example.com", "sender": {"uri": "mailto:bob@example.com"}, "sent_at": 1700000000000,
+   "text": "first", "parts": [{"type": "text", "text": "first"}], "subject": null, "reply_to": null, "is_from_me": false,
+   "delivery": "delivered", "edited": false, "unsent": false, "reactions": [], "effect": null, "verified": false},
+  {"id": "M2", "chat_id": "mailto:bob@example.com", "sender": {"uri": "mailto:me@example.com"}, "sent_at": 1700000060000,
+   "text": "second", "parts": [{"type": "text", "text": "second"}], "subject": "Re", "reply_to": "M1", "is_from_me": true,
+   "delivery": "failed", "edited": true, "unsent": false, "reactions": [], "effect": null, "verified": true}
+], "next_cursor": "1700000000000-42"}

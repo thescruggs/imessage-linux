@@ -1,0 +1,8 @@
+{
+  "id": "group:5B0E2C1A-3F4D-4E21-9A55-0C7E1B2D3F40",
+  "participants": [{"uri": "mailto:bob@example.com"}, {"uri": "tel:+15551234567"}],
+  "display_name": "Team",
+  "is_group": true,
+  "last_message_at": 1700000123456,
+  "unread_count": 2
+}

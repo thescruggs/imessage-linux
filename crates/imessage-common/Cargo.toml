@@ -1,0 +1,17 @@
+[package]
+name = "imessage-common"
+description = "Shared types for imessaged / imsg (Mac hardware identity config, validation)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+plist.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# Drift guard: the fixture must also parse as open-absinthe's HardwareConfig.
+open-absinthe.workspace = true

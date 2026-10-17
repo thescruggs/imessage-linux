@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/imessage-common",
+    "crates/imessaged",
+    "crates/imsg",
+    # NAC emulator (drop-in replacement for the closed `open-absinthe`).
+    "crates/open-absinthe",
+]
+# rustpush and its nested crates are separate workspaces; built via
+# `cargo build --manifest-path third_party/rustpush/Cargo.toml`.
+exclude = ["third_party"]
+
+[workspace.package]
+version = "0.1.10"
+edition = "2024"
+license = "SSPL-1.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+imessage-common = { path = "crates/imessage-common" }
+open-absinthe = { path = "crates/open-absinthe" }
+serde = { version = "1", features = ["derive"] }
+plist = "1.7"
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+
+# rustpush (path dep of crates/imessaged) declares
+# `[patch.crates-io] quinn = { path = "./third_party/quinn/quinn" }`, but cargo
+# only honours [patch] in the ROOT manifest. h3-quinn depends on crates.io
+# `quinn`; without this patch it would pull a second, unpatched quinn and the
+# h3-quinn <-> rustpush types would not line up.
+[patch.crates-io]
+quinn = { path = "third_party/rustpush/third_party/quinn/quinn" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,41 @@
+# Build output
+/target/
+**/target/
+
+# Secrets: Mac hardware identity, Apple ID session, anisette state.
+# NEVER commit these.
+hwconfig.plist
+config.plist
+gsa.plist
+/anisette*/
+*.secret
+
+# Daemon state directories (when run with a local --state-dir)
+/state/
+/.state/
+/imessaged-state/
+
+# Apple binary downloaded at setup time (not redistributable)
+IMDAppleServices
+
+# Editors / tools
+.claude/
+*.swp
+.idea/
+.vscode/
+
+# Downloaded Apple files live in ${XDG_DATA_HOME:-~/.local/share}/imessage-linux,
+# never in the repo; guard against stray copies anyway.
+cert-1.0.plist
+*.part.*
+# Output of tools/mac-hwinfo.sh (device credential)
+hwconfig.plist.tmp.*
+
+# KDE app build trees (build/, build-release/, build-*/ …)
+/kmessages/build*/
+
+# Release artifacts, and makepkg output when run inside packaging/arch
+/dist/
+/packaging/arch/*/
+/packaging/arch/*.pkg.tar.*
+/packaging/arch/*.log

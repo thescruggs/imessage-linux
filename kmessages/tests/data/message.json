@@ -1,0 +1,26 @@
+{
+  "id": "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+  "chat_id": "mailto:bob@example.com",
+  "sender": {"uri": "mailto:bob@example.com"},
+  "sent_at": 1700000123456,
+  "text": "look at this",
+  "parts": [
+    {"type": "text", "text": "look at this"},
+    {"type": "attachment", "attachment_id": "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0:1",
+     "mime": "image/jpeg", "filename": "IMG_0001.jpeg", "size": 183422},
+    {"type": "mention", "handle": "mailto:carol@example.com", "text": "Carol"},
+    {"type": "unsupported", "description": "app message"}
+  ],
+  "subject": null,
+  "reply_to": null,
+  "is_from_me": false,
+  "delivery": "delivered",
+  "edited": false,
+  "unsent": false,
+  "reactions": [
+    {"kind": "love", "sender": {"uri": "mailto:me@example.com"}, "added": true},
+    {"kind": {"emoji": "🔥"}, "sender": {"uri": "mailto:carol@example.com"}, "added": true}
+  ],
+  "effect": null,
+  "verified": true
+}

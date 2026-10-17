@@ -1,0 +1,166 @@
+# Maintainer: The imessage-linux developers
+#
+# Builds imessaged (daemon), imsg (CLI) and kmessages (KDE app) from the
+# v${pkgver} tag. Apple's IMDAppleServices is NOT part of the package: after
+# installing, each user downloads it once with
+#   /usr/share/imessage-linux/tools/bootstrap.sh
+# (see imessage-linux.install and README "Install on Arch").
+#
+# To build from a local checkout before the tag is on GitHub, use
+# packaging/arch/build-local.sh, which rewrites the sources below to
+# git+file:// URLs in a scratch copy of this file.
+#
+# `makepkg --nocheck` skips check() (a second release build plus the test
+# suite, a few minutes).
+
+pkgname=imessage-linux
+pkgver=0.1.10
+pkgrel=1
+pkgdesc='Native iMessage client for Linux: daemon, CLI and KDE app (needs your own Mac once)'
+arch=('x86_64')
+url='https://github.com/thescruggs/imessage-linux'
+license=('SSPL-1.0')
+depends=(
+  'curl'  # bootstrap.sh downloads Apple's files with it
+  'dbus'
+  'glibc'
+  'kconfig'
+  'kcoreaddons'
+  'kdbusaddons'
+  'ki18n'
+  'kiconthemes'
+  'kirigami'
+  'kirigami-addons'
+  'knotifications'
+  'kpeople'
+  'kstatusnotifieritem'
+  'libatomic'
+  'libgcc'
+  'libstdc++'
+  'openssl'
+  'qqc2-desktop-style'
+  'qt6-base'
+  'qt6-declarative'
+  'systemd'
+  'zlib'
+)
+makedepends=(
+  'cargo'
+  'clang'
+  'cmake'
+  'extra-cmake-modules'
+  'git'
+  'ninja'
+  'pkgconf'
+)
+checkdepends=('python')
+optdepends=(
+  'kimageformats: HEIC chat backgrounds and photos in kmessages'
+  'openssh: anisette from your Mac, contacts and history import'
+)
+options=('!lto')  # C/C++ LTO objects from the bundled QEMU (unicorn) do not link with rustc
+install=imessage-linux.install
+# Submodules (git submodule status --recursive), wired from local clones in
+# prepare(). rustpush's own `open-absinthe` submodule (a closed stub) is
+# never used: crates/open-absinthe replaces it.
+source=(
+  "imessage-linux::git+https://github.com/thescruggs/imessage-linux.git#tag=v${pkgver}"
+  'rustpush::git+https://github.com/OpenBubbles/rustpush.git'
+  'apple-private-apis::git+https://github.com/OpenBubbles/apple-private-apis.git'
+  'clearadi-stub::git+https://github.com/OpenBubbles/clearadi-stub.git'
+  'rtc::git+https://github.com/OpenBubbles/rtc.git'
+  'rustls::git+https://github.com/OpenBubbles/rustls.git'
+  'rustls-platform-verifier::git+https://github.com/OpenBubbles/rustls-platform-verifier.git'
+  'quinn::git+https://github.com/OpenBubbles/quinn.git'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+# _wire <repo dir> <submodule path> <source name>: check out a submodule at
+# its pinned commit from the local clone makepkg made of it. The url is
+# keyed by the submodule's name, which is not always its path.
+_wire() {
+  local name
+  name=$(git -C "$1" config -f .gitmodules --get-regexp '^submodule\..*\.path$' |
+    awk -v p="$2" '$2 == p { sub(/^submodule\./, "", $1); sub(/\.path$/, "", $1); print $1 }')
+  [[ -n $name ]] || { echo "no submodule at $2 in $1" >&2; return 1; }
+  git -C "$1" submodule init -- "$2"
+  git -C "$1" config "submodule.$name.url" "$srcdir/$3"
+  git -C "$1" -c protocol.file.allow=always submodule update -- "$2"
+}
+
+# cargo without makepkg's C/C++ flags: the C code bundled in crates builds
+# with its own flags, and aws-lc-sys's jitterentropy refuses to compile
+# with optimization (makepkg's -O2/-O3 would come last and win).
+# OPENSSL_NO_VENDOR: link the system libssl instead of the copy a
+# dependency's `vendored` feature would build in.
+_cargo() {
+  env -u CFLAGS -u CXXFLAGS RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target OPENSSL_NO_VENDOR=1 \
+    cargo "$@"
+}
+
+prepare() {
+  local top="$srcdir/imessage-linux"
+  local rp="$top/third_party/rustpush"
+  _wire "$top" third_party/rustpush rustpush
+  _wire "$rp" third_party/apple-private-apis apple-private-apis
+  _wire "$rp/third_party/apple-private-apis" clearadi clearadi-stub
+  _wire "$rp" third_party/rtc rtc
+  _wire "$rp" third_party/rustls rustls
+  _wire "$rp" third_party/rustls-platform-verifier rustls-platform-verifier
+  _wire "$rp" third_party/quinn quinn
+
+  # patches/ onto the submodules (the submodules are already in place, so
+  # this only applies the patches; nothing is downloaded)
+  cd "$top"
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always \
+    tools/bootstrap.sh --no-download
+
+  _cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/imessage-linux"
+  _cargo build --frozen --release -p imessaged -p imsg
+
+  cmake -B "$srcdir/build-kmessages" -S kmessages -G Ninja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_TESTING=OFF \
+    -Wno-dev
+  cmake --build "$srcdir/build-kmessages"
+}
+
+check() {
+  cd "$srcdir/imessage-linux"
+  # Tests needing Apple's binary or the network skip themselves; D-Bus
+  # tests need dbus-daemon (else they print SKIP).
+  _cargo test --frozen --release -p imessage-common -p open-absinthe -p imessaged -p imsg
+}
+
+package() {
+  cd "$srcdir/imessage-linux"
+  install -Dm755 -t "$pkgdir/usr/bin" target/release/imessaged target/release/imsg
+
+  # systemd user unit: the checkout's unit runs ~/.cargo/bin/imessaged
+  sed 's|^ExecStart=%h/\.cargo/bin/imessaged |ExecStart=/usr/bin/imessaged |' \
+    packaging/systemd/imessaged.service > "$srcdir/imessaged.service"
+  grep -q '^ExecStart=/usr/bin/imessaged ' "$srcdir/imessaged.service"
+  install -Dm644 "$srcdir/imessaged.service" "$pkgdir/usr/lib/systemd/user/imessaged.service"
+  install -Dm644 packaging/dbus/org.imessage.Daemon1.service \
+    "$pkgdir/usr/share/dbus-1/services/org.imessage.Daemon1.service"
+
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build-kmessages"
+
+  # Setup tools: the Apple download (bootstrap.sh, download-only outside a
+  # checkout) and the scripts that run against your Mac.
+  local tools="$pkgdir/usr/share/imessage-linux/tools"
+  install -Dm755 -t "$tools" tools/bootstrap.sh tools/mac-hwinfo.sh \
+    tools/mac-anisette-install.sh tools/mac-contacts-export.sh
+  install -Dm644 -t "$tools" tools/mac-messages-export.py
+  install -Dm644 -t "$tools/mac-anisette" tools/mac-anisette/*
+
+  install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md CHANGELOG.md docs/*.md
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 third_party/rustpush/LICENSE.exceptions \
+    "$pkgdir/usr/share/licenses/$pkgname/rustpush-LICENSE.exceptions"
+}

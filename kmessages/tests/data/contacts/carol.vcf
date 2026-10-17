@@ -1,0 +1,8 @@
+BEGIN:VCARD
+VERSION:3.0
+UID:fixture-carol
+FN:Carol Jones
+N:Jones;Carol;;;
+EMAIL;TYPE=INTERNET:carol@example.com
+TEL;TYPE=HOME:15550103003
+END:VCARD

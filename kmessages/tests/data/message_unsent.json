@@ -1,0 +1,3 @@
+{"id": "AA", "chat_id": "mailto:bob@example.com", "sender": {"uri": "mailto:me@example.com"}, "sent_at": 1700000000000,
+ "text": null, "parts": [], "subject": null, "reply_to": "BB", "is_from_me": true, "delivery": "read",
+ "edited": false, "unsent": true, "reactions": [], "effect": "com.apple.messages.effect.CKConfettiEffect"}

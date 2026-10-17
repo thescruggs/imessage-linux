@@ -1,0 +1,57 @@
+[package]
+name = "imessaged"
+description = "iMessage daemon for Linux (talks to Apple directly; D-Bus API)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+imessage-common.workspace = true
+tokio.workspace = true
+clap.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+chrono = "0.4"
+serde.workspace = true
+# `stream` (event-level reading) is behind this feature: background.rs reads
+# one key of a peer-supplied binary plist with a bounded event count instead
+# of building a whole `Value`. Cargo.lock pins the version it compiles with.
+plist = { workspace = true, features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
+# Protocol engine. Default features keep `macos-validation-data` (our
+# crates/open-absinthe NAC emulator); an anisette feature is mandatory upstream.
+rustpush = { path = "../../third_party/rustpush", features = ["remote-anisette-v3"] }
+# Same crates rustpush links (same paths => same crate instances). Needed
+# directly: `keystore` holds the private keys behind APSState/IDSUser and must
+# be initialised + persisted by us; `omnisette` lets us pick the anisette URL.
+keystore = { path = "../../third_party/rustpush/keystore" }
+icloud_auth = { path = "../../third_party/rustpush/third_party/apple-private-apis/icloud-auth", default-features = false, features = ["remote-anisette-v3"] }
+omnisette = { path = "../../third_party/rustpush/third_party/apple-private-apis/omnisette", features = ["remote-anisette-v3"] }
+async-trait = "0.1"
+libc = "0.2"
+# Validating peer-supplied background references before rustpush sees them
+# (same versions rustpush already links).
+base64 = "0.21"
+url = "2"
+aes-gcm = "0.10"
+rand = "0.8"
+sha2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
+# Message store (SQLite bundled: no system libsqlite3 needed).
+rusqlite = { version = "0.37", features = ["bundled"] }
+# D-Bus API. zbus 5 (not 4): secret-service already links zbus 5, so this
+# adds no second D-Bus stack.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+futures-util = { version = "0.3", default-features = false }
+serde_json.workspace = true
+

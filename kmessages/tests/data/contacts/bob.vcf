@@ -1,0 +1,8 @@
+BEGIN:VCARD
+VERSION:3.0
+UID:fixture-bob
+FN:Bob Smith
+N:Smith;Bob;;;
+EMAIL;TYPE=INTERNET:Bob.Smith@Example.COM
+TEL;TYPE=CELL:(555) 010-2002
+END:VCARD

@@ -1,0 +1,29 @@
+_steps() {
+  cat <<'MSG'
+==> imessage-linux: first-run steps (as your user, not root):
+    1. Download Apple's IMDAppleServices + cert (never shipped in the package):
+         /usr/share/imessage-linux/tools/bootstrap.sh
+    2. On your Mac: bash mac-hwinfo.sh (copy /usr/share/imessage-linux/tools/
+       mac-hwinfo.sh over), bring hwconfig.plist back, then
+         imsg hwconfig import hwconfig.plist
+    3. Anisette from the Mac over ssh:
+         /usr/share/imessage-linux/tools/mac-anisette-install.sh you@mac.local
+       and put the printed anisette_command into
+       ~/.local/state/imessaged/config.toml
+    4. systemctl --user daemon-reload
+       systemctl --user enable --now imessaged
+       imsg doctor && imsg login --apple-id you@icloud.com
+    A unit in ~/.config/systemd/user/imessaged.service (from a source
+    install) overrides the packaged one: remove it to use /usr/bin/imessaged.
+    Details: /usr/share/doc/imessage-linux/README.md
+MSG
+}
+
+post_install() {
+  _steps
+}
+
+post_upgrade() {
+  echo "==> imessage-linux: restart the daemon to use the new version:"
+  echo "    systemctl --user daemon-reload && systemctl --user restart imessaged"
+}

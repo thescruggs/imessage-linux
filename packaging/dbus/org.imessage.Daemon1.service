@@ -1,0 +1,9 @@
+# D-Bus session service activation: the first call to org.imessage.Daemon1
+# starts imessaged through systemd (no second instance is ever spawned).
+#
+#   install -Dm644 packaging/dbus/org.imessage.Daemon1.service \
+#       ~/.local/share/dbus-1/services/org.imessage.Daemon1.service
+[D-BUS Service]
+Name=org.imessage.Daemon1
+Exec=/bin/false
+SystemdService=imessaged.service

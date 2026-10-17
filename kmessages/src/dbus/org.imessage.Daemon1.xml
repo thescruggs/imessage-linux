@@ -1,0 +1,36 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<!-- org.imessage.Daemon1 as documented in docs/DBUS.md (object /org/imessage/Daemon1).
+     Structured payloads are JSON strings of crates/imessage-common/src/model.rs. -->
+<node>
+  <interface name="org.imessage.Daemon1">
+    <method name="Login"><arg name="apple_id" type="s" direction="in"/><arg name="password" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="SubmitTwoFactor"><arg name="code" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="Logout"/>
+    <method name="GetStatus"><arg type="s" direction="out"/></method>
+    <method name="ListChats"><arg name="limit" type="u" direction="in"/><arg name="offset" type="u" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="GetChat"><arg name="chat_id" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="ListMessages"><arg name="chat_id" type="s" direction="in"/><arg name="before_cursor" type="s" direction="in"/><arg name="limit" type="u" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="Search"><arg name="query" type="s" direction="in"/><arg name="limit" type="u" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="SendText"><arg name="chat_id_or_empty" type="s" direction="in"/><arg name="participants_json" type="s" direction="in"/><arg name="text" type="s" direction="in"/><arg name="reply_to" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="SendFile"><arg name="chat_id_or_empty" type="s" direction="in"/><arg name="participants_json" type="s" direction="in"/><arg name="path" type="s" direction="in"/><arg name="mime" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="React"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/><arg name="kind" type="s" direction="in"/><arg name="remove" type="b" direction="in"/></method>
+    <method name="Edit"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/><arg name="text" type="s" direction="in"/></method>
+    <method name="Unsend"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/></method>
+    <method name="SetTyping"><arg name="chat_id" type="s" direction="in"/><arg name="typing" type="b" direction="in"/></method>
+    <method name="MarkRead"><arg name="chat_id" type="s" direction="in"/><arg name="up_to_message_id" type="s" direction="in"/></method>
+    <method name="LookupHandles"><arg name="handles_json" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="DownloadAttachment"><arg name="attachment_id" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="ImportChatBackground"><arg name="chat_id" type="s" direction="in"/><arg name="path" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="Version"><arg type="s" direction="out"/></method>
+    <property name="ConnectionState" type="s" access="read"/>
+    <property name="Registered" type="b" access="read"/>
+    <signal name="MessageReceived"><arg name="chat_id" type="s"/><arg name="message_json" type="s"/></signal>
+    <signal name="MessageUpdated"><arg name="chat_id" type="s"/><arg name="message_json" type="s"/></signal>
+    <signal name="ChatUpdated"><arg name="chat_json" type="s"/></signal>
+    <signal name="Typing"><arg name="chat_id" type="s"/><arg name="handle" type="s"/><arg name="typing" type="b"/></signal>
+    <signal name="ConnectionStateChanged"><arg name="state" type="s"/></signal>
+    <signal name="TwoFactorRequired"/>
+    <signal name="BackgroundError"><arg name="message" type="s"/></signal>
+  </interface>
+</node>

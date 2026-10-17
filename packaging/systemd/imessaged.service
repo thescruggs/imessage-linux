@@ -1,0 +1,43 @@
+# systemd *user* unit for imessaged.
+#
+#   install -Dm644 packaging/systemd/imessaged.service ~/.config/systemd/user/imessaged.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now imessaged
+#
+# State lives in %S/imessaged (= $XDG_STATE_HOME/imessaged, normally
+# ~/.local/state/imessaged), which is also the daemon's default --state-dir.
+
+[Unit]
+Description=iMessage daemon (imessaged)
+After=dbus.socket
+Requires=dbus.socket
+
+[Service]
+# Type=simple (the D-Bus activation file below still works: dbus-daemon
+# waits for the name to appear). Type=dbus + BusName=org.imessage.Daemon1
+# would also be correct.
+Type=simple
+# `cargo install --path crates/imessaged` puts the binary here. For a
+# distribution package use /usr/bin/imessaged instead.
+ExecStart=%h/.cargo/bin/imessaged --state-dir %S/imessaged
+Restart=on-failure
+RestartSec=5
+
+StateDirectory=imessaged
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening. No MemoryDenyWriteExecute: the NAC emulator (unicorn) JITs. The home directory is read-only (SendFile reads files from it);
+# only the state directory is writable.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/imessaged
+PrivateTmp=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

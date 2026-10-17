@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0",
+  "connection": {"state": "connected"},
+  "registered": true,
+  "registration": {"handles": [{"uri": "mailto:me@example.com"}, {"uri": "mailto:me@icloud.com"}], "registered_at": 1700000000, "expires_at": 1702592000,
+                   "sender": {"uri": "mailto:me@icloud.com"}, "other_handles": ["tel:+12055550100", "mailto:me@work.example"]},
+  "unread": 3
+}

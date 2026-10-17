@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>org.imessage.kmessages</id>
+  <launchable type="desktop-id">org.imessage.kmessages.desktop</launchable>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>SSPL-1.0</project_license>
+  <name>Messages</name>
+  <summary>iMessage client for KDE Plasma</summary>
+  <developer id="org.imessage">
+    <name>The imessage-linux developers</name>
+  </developer>
+  <url type="homepage">https://github.com/thescruggs/imessage-linux</url>
+  <description>
+    <p>
+      A Kirigami client for the imessaged background service: conversations,
+      tapbacks, replies, edits, attachments, typing indicators and
+      notifications with inline reply.
+    </p>
+  </description>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <provides>
+    <binary>kmessages</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.10" date="2026-10-17">
+      <description>
+        <p>First public release: live iMessage on Linux with a Mac-native anisette helper, contact names and photos, chat backgrounds (receive-only) and a one-time history import from the Mac.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-10-11"/>
+  </releases>
+</component>

@@ -1,0 +1,24 @@
+[Global]
+IconName=dialog-messages
+DesktopEntry=org.imessage.kmessages
+Name=Messages
+Comment=iMessage client
+
+[Event/newMessage]
+Name=New message
+Comment=A new iMessage arrived
+Action=Popup
+Sound=message-new-instant
+ShowInHistory=true
+
+[Event/connectionProblem]
+Name=Needs attention
+Comment=Signing in, a verification code or the connection to iMessage needs you
+Action=Popup
+ShowInHistory=true
+
+[Event/sendFailed]
+Name=Reply not sent
+Comment=A reply from a notification could not be sent
+Action=Popup
+ShowInHistory=true
