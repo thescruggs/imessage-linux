@@ -69,7 +69,8 @@ fails during an interactive `Login`, the call fails at once with
 | `Logout` | — | — | Forget the account locally (IDS users, identity, saved credentials); state becomes `needs_login`. Message history is kept. Does not deregister from Apple. |
 | `GetStatus` | — | `s` | [Status](#status) JSON |
 | `ListChats` | `limit u`, `offset u` | `s` | JSON array of [Chat](#chat), newest activity first. `limit` 0 = 50, max 500. |
-| `GetChat` | `chat_id s` | `s` | [Chat](#chat) JSON; `NotFound` if unknown |
+| `GetChat` | `chat_id s` | `s` | [Chat](#chat) JSON; `NotFound` if unknown. Meant for "the user opened this chat": it also starts background refreshes (a background or group photo whose download failed, participants' shared profiles older than 24 h / never fetched / whose photo file is gone); their results arrive as `ChatUpdated` / `HandleProfileUpdated`. |
+| `GetHandleProfile` | `handle s` | `s` | The name and photo `handle` shared with us: [HandleProfile](#handleprofile) JSON, or `null` (nothing shared, not fetched yet, or stopped). `InvalidHandle` for a bad handle. |
 | `ListMessages` | `chat_id s`, `before_cursor s`, `limit u` | `s` | [MessagePage](#messagepage) JSON. `before_cursor` `""` = newest page; pass the previous page's `next_cursor` to page back. |
 | `Search` | `query s`, `limit u` | `s` | JSON array of [Message](#message), newest first. Case-insensitive (ASCII) substring match on text and subject; `%`/`_` are literal; unsent messages excluded. |
 | `SendText` | `chat_id_or_empty s`, `participants_json s`, `text s`, `reply_to s` | `s` | [SentMessage](#sentmessage) JSON. Either a chat id, or `""` plus a JSON array of handles (`["bob@example.com"]`; 2+ handles = a new or existing group; our own handles are not counted as recipients). A single one of our own handles is a note to self: sent from that handle, delivered to our other devices. `reply_to` = message id or `""`. The new row is stored and announced with `MessageReceived` (`is_from_me: true`) before the call returns. |
@@ -104,6 +105,7 @@ fails during an interactive `Login`, the call fails at once with
 | `ConnectionStateChanged` | `state s` | Same value as the `ConnectionState` property. |
 | `TwoFactorRequired` | — | A login (interactive or the automatic re-login after IDS error 6005) needs a code: call `SubmitTwoFactor`. |
 | `BackgroundError` | `message s` | Background problems not tied to a method call (registration rejected, state save failed, task restarted, events dropped — resync). Method failures are D-Bus errors instead (below). |
+| `HandleProfileUpdated` | `handle s`, `profile_json s` | A contact's shared name / photo was fetched or changed ([HandleProfile](#handleprofile)), or `null`: they stopped sharing. Followed by `ChatUpdated` for every chat with that participant (their `profile` in it changed). |
 
 Ordering: engine event → SQLite → signal, one event at a time, so a client
 that reacts to a signal by calling `ListMessages`/`GetChat` always sees the
@@ -142,9 +144,17 @@ change. If the daemon's own event queue overflows it emits
   "registered": true,
   "registration": {"handles": [{"uri": "mailto:me@example.com"}], "registered_at": 1700000000, "expires_at": 1702592000,
                    "sender": {"uri": "mailto:me@example.com"}, "other_handles": ["tel:+15551234567"]},
-  "unread": 3
+  "unread": 3,
+  "profiles": {"state": "ready"}
 }
 ```
+
+`profiles` says whether contacts' shared names and photos can be fetched
+(iCloud / CloudKit access): `{"state": "ready"}`, `"pending"` (not tried
+yet), `"needs_login"` (Apple wants a fresh sign-in: `imsg login` once;
+messaging is unaffected) or `"unavailable"`, the last two with a
+`"detail"`; older daemons omit it. See docs/DAEMON.md, "Shared names and
+photos".
 
 `connection` is `{"state": "<name>"}` or, for errors,
 `{"state": "error", "detail": "registration failing, retrying: …"}`.
@@ -165,7 +175,11 @@ store is unavailable.
 ```json
 {
   "id": "group:5B0E2C1A-3F4D-4E21-9A55-0C7E1B2D3F40",
-  "participants": [{"uri": "mailto:bob@example.com"}, {"uri": "tel:+15551234567"}],
+  "participants": [{"uri": "mailto:bob@example.com",
+                    "profile": {"name": "Bobby", "first": "Bob", "last": "Smith",
+                                "photo": "/home/me/.local/state/imessaged/profiles/mailto_bob@example.com/Zm9v….jpg",
+                                "updated_at": 1700000050000}},
+                   {"uri": "tel:+15551234567"}],
   "display_name": "Team",
   "is_group": true,
   "last_message_at": 1700000123456,
@@ -177,9 +191,20 @@ store is unavailable.
     "version": 1,
     "set_by": "mailto:bob@example.com",
     "set_at": 1700000100000
-  }
+  },
+  "icon_path": "/home/me/.local/state/imessaged/chat_icons/group_5B0E…/6F1A….jpg"
 }
 ```
+
+`icon_path` is the group's photo (Messages "Change Name and Photo" on a
+group), absent / `null` for none or until it is downloaded. A change
+arrives as `ChatUpdated` without it (stored), then with it (downloaded);
+removal clears it.
+
+Each participant may carry `profile`: the name and photo they shared with
+us ([HandleProfile](#handleprofile)); absent when they share nothing (or
+it was not fetched yet). Clients should prefer the user's own address
+book and fall back to it.
 
 `background` is the chat's transcript background (Messages "Backgrounds",
 iOS/macOS 26, shared by everyone in the chat), or `null`/absent for none.
@@ -236,6 +261,20 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
 * `text` concatenates the text and mention parts; `null` if none.
 * An unsent message keeps its id/sender/time with `text: null`,
   `parts: []`, `unsent: true`.
+
+### HandleProfile
+
+```json
+{"name": "Bobby", "first": "Bob", "last": "Smith",
+ "photo": "/home/me/.local/state/imessaged/profiles/mailto_bob@example.com/Zm9v….jpg",
+ "updated_at": 1700000050000}
+```
+
+What a contact shared (Messages "Share Name and Photo"). Every field may be
+`null`: `name` is the display name they chose (else show `first last`),
+`photo` an absolute path to a JPEG / PNG / HEIC (file 0600), `updated_at`
+the fetch time in ms. A new record replaces the photo file (the old path
+stops existing).
 
 ### MessagePage
 

@@ -26,8 +26,13 @@ It logs in, registers and sends/receives iMessages on a real Apple ID:
   import from the Mac.
 * `kmessages` KDE app ([docs/KMESSAGES.md](docs/KMESSAGES.md)) with
   contact names and photos, notifications and transcript backgrounds.
+* Contacts' **shared names and photos** (Messages "Share Name and
+  Photo", fetched from iCloud) and **group photos**, without a Mac: shown
+  in the app wherever your address book has no name or photo, and by
+  `imsg chat` / `imsg profile`.
 
 Still missing: sending transcript backgrounds (they are received only),
+publishing your own shared name and photo,
 group admin operations, and SMS (needs an iPhone relay; not planned).
 On Arch / CachyOS, see "Install on Arch" below for a package.
 

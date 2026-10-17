@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+* **Shared names and photos** (Messages "Share Name and Photo"): when a
+  contact shares theirs, the daemon fetches the name and photo from
+  iCloud (CloudKit) and keeps them in the message store; the photo lands
+  under `profiles/` in the state directory. Opening a chat refreshes
+  profiles older than a day. Login now also asks Apple for the iCloud
+  (MobileMe) tokens CloudKit needs; a session saved by an older version
+  gets them silently once at startup with the saved credentials. If
+  Apple wants a fresh sign-in for that, `imsg status` / `imsg doctor`
+  say so: run `imsg login` once. Receive only: your own name and photo
+  are not published yet.
+* **Group photos**: a group's photo is downloaded and shown as its
+  avatar.
+* D-Bus: participants in Chat JSON carry `profile`, groups `icon_path`;
+  new `GetHandleProfile` method and `HandleProfileUpdated` signal;
+  `GetStatus` reports `profiles`. Message store schema 4.
+* `imsg profile <handle>`; shared names in `imsg chats` / `imsg chat`;
+  `imsg doctor` checks shared-profile access.
+* kmessages: shared names and photos for handles the address book does
+  not know (chat list, transcript, notifications), "Shared name" on the
+  details page, group photos as group avatars.
+
 ## 0.1.10 (2026-10-17)
 
 First public release. iMessage on Linux with your own Apple ID: a

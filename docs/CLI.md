@@ -112,7 +112,13 @@ also mine      +15551234567
 registered at  2026-10-11 09:00 +02:00
 renews at      2026-11-10 09:00 +01:00
 unread         3
+profiles       ready
 ```
+
+`profiles` (newer daemons only): whether contacts' shared names and
+photos can be fetched: `ready`, `not tried yet`, `unavailable (…)`, or
+"needs `imsg login`" when Apple wants a fresh sign-in for iCloud (run it
+once; messaging keeps working meanwhile).
 
 `sends as` is the handle new conversations start from (a reply in a known
 chat goes out from the handle of yours that chat names, e.g. the address
@@ -201,6 +207,26 @@ and sends a read receipt.
 Whether each handle is reachable on iMessage. `--json`: the
 `LookupHandles` array.
 
+### `profile HANDLE`
+
+The name and photo `HANDLE` shared with you (Messages "Share Name and
+Photo"), as the daemon fetched it:
+
+```console
+$ imsg profile bob@example.com
+handle   mailto:bob@example.com
+name     Bobby
+first    Bob
+last     Smith
+photo    /home/me/.local/state/imessaged/profiles/mailto_bob@example.com/Zm9v….jpg
+updated  2026-10-17 15:02 -05:00
+```
+
+`HANDLE has no shared name or photo` when there is none (not shared, not
+fetched yet, or they stopped). `--json`: the `GetHandleProfile` JSON
+(`HandleProfile` or `null`). Without an address book, `imsg` also uses
+shared names in chat names (`imsg chats`, message senders).
+
 ### `search QUERY [-n/--limit N]`
 
 Case-insensitive substring search over message text and subject, newest
@@ -208,8 +234,10 @@ first, with the chat id shown on each message.
 
 ### `chat CHAT`
 
-One chat's details: id, name, participants, last activity, unread count
-and its transcript background (id, version, who set it, the image file).
+One chat's details: id, name, participants (with the name each shared,
+`mailto:bob@example.com (Bobby)`), last activity, unread count, its
+transcript background (id, version, who set it, the image file), the
+group photo's file and the participants' shared photos.
 
 ### `chat-background CHAT --import FILE`
 
@@ -231,7 +259,8 @@ daemon's state directory). `--json`: the path as a JSON string.
 
 Streams daemon events until Ctrl-C: new messages, updates (delivery,
 reactions, edits, unsends), chat changes, typing, connection state,
-two-factor requests and background errors. `--chat` keeps only events for
+two-factor requests, background errors and shared-profile changes
+(`HandleProfileUpdated`; not shown with `--chat`). `--chat` keeps only events for
 one chat (account-wide events are always shown).
 
 `--json` prints one JSON object per line, with the daemon's payload
@@ -356,6 +385,7 @@ Checks, each `ok` / `WARN` / `FAIL`:
 | `daemon` | `imessaged` answers on the bus (this may D-Bus-activate it) |
 | `connection` | connection state (`connected` = ok, `error` = FAIL) |
 | `registration` | registered iMessage handles and the next renewal |
+| `profiles` | shared names and photos (`GetStatus.profiles`): `ready` = ok, anything else WARN; `needs_login` says to run `imsg login` once |
 
 Exit code 1 if any check FAILs. `--json`: `{"checks":[{"check","level","detail"}…],"ok":bool}`.
 
@@ -386,6 +416,7 @@ With `--json`, commands that return data print the daemon's JSON
 | `search` | `[Message]` |
 | `send`, `send-file` | `SentMessage` |
 | `lookup` | `[{"handle","reachable"}]` |
+| `profile` | `HandleProfile` or `null` |
 | `download` | path as a JSON string |
 | `watch` | one event object per line (above) |
 | `doctor`, `version`, `import-mac` | `imsg`'s own objects (above) |

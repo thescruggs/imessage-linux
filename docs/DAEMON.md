@@ -32,6 +32,8 @@ mode 0700.
 | `messages.db` (+ `-wal`, `-shm`) | daemon (SQLite) | **no**, except attachment locators | chats, participants, messages, reactions, attachment metadata. Mode 0600. Attachment download locators (they contain the per-file decryption key) are sealed with the state key in the `IMSE` format below. Message text is plaintext: protect the state dir (0700) / use disk encryption. |
 | `attachments/<id>/<filename>` | daemon | no (0600, dirs 0700) | downloaded attachments (`DownloadAttachment`) and copies of attachments sent with `SendFile` |
 | `backgrounds/<chat id>/<background id>[.heic\|.png\|.jpg]` | daemon | no (0600, dirs 0700) | chat transcript backgrounds: the payload as Apple sent it (or as imported) and the picture extracted from it (`src/background.rs`). The MMCS locator (with the file key) is sealed in `messages.db` like attachment locators. |
+| `profiles/<handle>/<record key>.<ext>` | daemon | no (0600, dirs 0700) | photos contacts shared with us ("Share Name and Photo"; `/`, `+`, `=` of the base64 record key become `_`, `-`, `~`; extension sniffed: `jpg`, `png`, `heic`, `gif`, `webp`, else `img`). See [Shared names and photos](#shared-names-and-photos-cloudkit). |
+| `chat_icons/<chat id>/<id>.<ext>` | daemon | no (0600, dirs 0700) | group photos (`id` = the message that changed it; extension sniffed). |
 
 ### `SavedState` (inside `state.enc`)
 
@@ -42,6 +44,7 @@ mode 0700.
 | `identity` | `Option<IDSNGMIdentity>` | this device's message-encryption keys (inline) |
 | `account` | `PersistAccountData` as plist | Apple ID username, SRP password hash, GSA tokens, dsid. Enables silent re-login. **The hash is password-equivalent for Apple GSA**: it is an unsalted `sha256(password)`, and GSA's SRP takes exactly that as its input, so whoever holds it can log in as you (2FA still applies on new sessions). It lives only inside the sealed `state.enc`; with the `file` key provider anyone who can read the state directory (and thus `state.key`) has it. Omitted entirely when `store_credentials = false`. |
 | `keystore` | `keystore::software::SoftwareKeystoreState` as plist | private keys referenced by alias from `push` and `users` (rustpush keeps them in a process-global keystore that we initialise and persist) |
+| `cloudkit_tokens` | `TokenProviderState` as plist | the MobileMe (iCloud) delegate: `cloudKitToken`, `mmeAuthToken`, … and when they were fetched. CloudKit needs them for contacts' shared names and photos. Auth tokens, not password-equivalent, but sealed like the rest. Omitted with `store_credentials = false` (and removed at logout). |
 | `registration` | `model::RegistrationState` | summary for clients |
 
 Saved after login, after registration, whenever rustpush reports new state
@@ -82,6 +85,8 @@ database with a version newer than the binary knows is refused.
 | `messages` | `seq` (autoincrement, cursor tie-break), `id` (unique GUID), `chat_id`, `sender`, `sent_at`, `text`, `parts` (JSON array of `MessagePart`), `subject`, `reply_to`, `is_from_me`, `delivery`, `error`, `edited`, `edited_at`, `unsent`, `verified`, `effect`, `is_read` |
 | `attachments` | `id` (PK `<msg>:<part>`), `message_id` (FK, cascade), `mime`, `filename`, `size`, `local_path`, `locator` (sealed BLOB) |
 | `reactions` | `(message_id, sender)` PK, `kind` (JSON `ReactionKind`), `added`, `at`; one per sender, removals kept as tombstones; no FK (may precede the message) |
+| `handle_profiles` (schema 4) | `handle` (PK), `record_key` (CloudKit record; `NULL` = not shared / stopped), `decryption_key` (sealed BLOB), `poster` (sealed contact-poster tags, kept but not fetched), `name` / `first` / `last`, `photo_path`, `shared_at` (`at` of the newest share or stop), `fetched_at` / `fetched_key` (last successful fetch and of which record), `last_seen_at` |
+| `chats.icon_*` (schema 4) | group photo: `icon_id`, `icon_locator` (sealed MMCS locator), `icon_size`, `icon_path` (downloaded file), `icon_at` (`at` of the newest change, removals included) |
 
 How each `EngineEvent` lands:
 
@@ -95,6 +100,8 @@ How each `EngineEvent` lands:
 | `Unsent` | whole message emptied (`parts: []`, attachments + reactions deleted, downloaded files under `attachments/` removed); same sender rule and early hold as `Edited` (a late original is stored already unsent, without attachment rows); a redelivered unsent message never recreates attachment rows | `MessageUpdated`, `ChatUpdated` |
 | `ChatRenamed` / `ParticipantsChanged` | applied if `at` ≥ the stored one | `ChatUpdated` |
 | `ChatBackground` | `chat_backgrounds` row (schema 2-3): background id, payload version, sealed MMCS locator, `set_by`/`set_at`; a set or removal older than the stored change (or the last removal, `chats.background_removed_at`) is ignored, a redelivery of the same id is a no-op; a set announcing more than 32 MiB (`MAX_BACKGROUND_BYTES`) is ignored with a warning, and one with an unusable reference (key / signature not base64, key under 2 bytes, no object id, not an https URL) is dropped in `convert`; replaced or removed backgrounds' files are deleted. A new background is then downloaded eagerly by the hub (`Hub::spawn_background_fetch`; one replaced while the previous download runs is fetched right after, up to 3 in a row) to `backgrounds/<chat>/<id>`, and the picture inside it extracted next to it; a failed download is logged and retried on `GetChat` | `ChatUpdated` (stored), `ChatUpdated` again (downloaded, `path` set) |
+| `ProfileShared` | handled by the hub (`hub/profiles.rs`), not `apply_event`: `handle_profiles` row; a share older than `shared_at` is ignored; a new or different record is fetched in the background, the same record only if it was never fetched (and no fetch failed in the last hour); a stop (`share: None`) clears name / photo / key (the row stays as a tombstone so a late older share cannot bring it back) and deletes the photo | `HandleProfileUpdated` + `ChatUpdated` per chat with that participant (after the fetch, or at once for a stop) |
+| `ChatIcon` | `chats.icon_*`; older than `icon_at` ignored, a redelivery of the same id a no-op, more than 32 MiB (`MAX_ICON_BYTES`) ignored, the replaced / removed file deleted. A new one is downloaded at once by the hub (`Hub::spawn_icon_fetch`, the capped attachment download); a failed download is retried on `GetChat` | `ChatUpdated` (stored), `ChatUpdated` (downloaded, `icon_path` set) |
 | `Typing` | in memory; cleared after 60 s or by a message from that sender | `Typing` |
 | `ConnectionChanged` / `RegistrationChanged` / `TwoFactorRequired` / `Error` | not stored | `ConnectionStateChanged` + `PropertiesChanged` / `Registered` / `TwoFactorRequired` / `BackgroundError` |
 
@@ -345,8 +352,12 @@ APNs must be connected before the GSA login (30 s; otherwise
 `Transient("APNs not connected after 30s")`), because the GSA client info
 carries the push token. The anisette client is rebuilt whenever the push
 token changes.
-5. `login_apple_delegates(&account, None, config, [LoginDelegate::IDS])` →
-   `authenticate_apple(delegate)` → `IDSUser`.
+5. `login_apple_delegates(&account, None, config, [LoginDelegate::IDS,
+   LoginDelegate::MobileMe])` → `authenticate_apple(ids delegate)` →
+   `IDSUser`; the MobileMe delegate's tokens become `cloudkit_tokens` (shared
+   names and photos, below). If Apple refuses MobileMe the call is repeated
+   with IDS alone (logged; profiles are then unavailable). The silent
+   re-login takes the same path.
 6. `register(config, aps_state, [MADRID_SERVICE], users, identity)`
    (identity = saved `IDSNGMIdentity` or a new one). Phone (`tel:`) handles
    are dropped by our rustpush patch: Mac-class validation data registers
@@ -384,8 +395,14 @@ On restart with saved users the daemon skips 1–6 and goes straight to
   group rename, participant changes, send errors (`MessageSent{Failed}`),
   transcript backgrounds (`SetTranscriptBackground`, c=138 →
   `ChatBackground`; non-secret fields logged at debug, never key or
-  signature). Everything else (profile sharing, SMS relay, recycle bin, …)
-  is dropped, with its `c` value logged at debug.
+  signature), contacts' shared names and photos (a message's or
+  reaction's `embedded_profile`, `ShareProfile` c=131, `UpdateProfile`
+  c=180 → `ProfileShared`; only from others, never logged) and group
+  photos (`IconChange` c=190 → `ChatIcon`, groups only, a reference
+  without object / https URL / key dropped). Everything else
+  (`UpdateProfileSharing` and `RecoverProfile`, which our own devices
+  exchange about *our* sharing settings, SMS relay, recycle bin, …) is
+  dropped, with its `c` value logged at debug.
 
 Chat ids: 1:1 = other party's URI (`mailto:bob@x.com`); group =
 `group:<GUID>` (rustpush `sender_guid`, Apple's `gid`); group without GUID =
@@ -420,7 +437,73 @@ the sender). The stored chat lists that handle as its participant. A
 target with several of our handles and nobody else is rejected
 (`InvalidInput`); groups need at least one other participant.
 
-### Supervision
+### Shared names and photos (CloudKit)
+
+Messages' "Share Name and Photo": a contact's share names a record in
+Apple's public CloudKit container `com.apple.messages.profiles` plus a key
+that decrypts it. It rides along on messages and tapbacks
+(`embedded_profile`) or arrives on its own (`ShareProfile`, or
+`UpdateProfile`; `UpdateProfile` without a profile, or an empty share,
+means the contact stopped sharing). rustpush's
+`ProfilesClient::get_record` fetches and opens the record (name `dn` /
+`fn` / `ln` and the photo; the contact poster is not fetched: the poster
+tags are left out of the request on purpose).
+
+**CloudKit access** (`engine/rustpush_engine/profiles.rs`). CloudKit wants
+the MobileMe delegate tokens and the account's dsid (`PersistAccountData`,
+= `DsPrsId`). The engine builds a `CloudKitClient` from `cloudkit_tokens`
+and an `AppleAccount` made from the saved session; rustpush's
+`TokenProvider` renews the tokens itself (weekly, or after a 401) with the
+account's PET token, which `AppleAccount` renews silently with the saved
+SRP hash. The status is `GetStatus.profiles`:
+
+* `ready`: works;
+* `pending`: not tried yet;
+* `needs_login`: Apple wants a fresh sign-in (no PET token obtainable
+  without a 2FA code, or the delegate was refused). Logged once as a
+  warning ("shared names and photos need a fresh login … Run `imsg login`
+  once"); nothing retries until a login. Messaging is unaffected;
+* `unavailable` (`detail` says why): network / anisette failures are
+  retried after 15 min, other failures (a CloudKit panic, odd answers)
+  after an hour, `store_credentials = false` never (CloudKit needs the
+  saved session).
+
+**Sessions from before this.** A `state.enc` written by an older daemon
+has no `cloudkit_tokens`. Once per daemon start, after the connection is
+`connected` (so the anisette source answered APNs/IDS bring-up; if it
+never connects within 10 min the attempt is skipped), the engine asks
+Apple for them with the saved credentials, exactly like the silent
+re-login (no user interaction; if Apple wants 2FA the state becomes
+`needs_login`). The first fetch does the same if the warm-up did not run.
+After that `imsg login` is the only way to get tokens back once Apple
+refuses them.
+
+rustpush's CloudKit code `expect`s and `panic!`s on unexpected answers (a
+deleted record panics with "No record found?"); every CloudKit call runs
+in its own task, so a panic is just a failed fetch.
+
+**Anisette.** Every CloudKit request carries anisette headers (omnisette
+caches them for 60 s), so with `anisette_command` a fetch runs the ssh
+command when the cache is cold: with the Mac asleep a fetch fails
+(`Transient`) and is tried again after the hour below, or when the chat is
+opened after that.
+
+**Fetch policy** (`hub/profiles.rs`): a new or changed record is fetched
+right away in the background, at most two at a time
+(`PROFILE_FETCH_CONCURRENCY`), deduplicated per handle; a failed fetch is
+not repeated for an hour unless the record changes. `GetChat` (the app
+opening a conversation) refetches every participant whose profile is
+older than 24 h (`PROFILE_MAX_AGE`), was never fetched, or whose photo
+file is gone. Photos over 8 MiB (`MAX_PROFILE_PHOTO_BYTES`) are dropped
+(the name is kept). The photo is written 0600 to
+`profiles/<handle>/<record key>.<ext>`; a replaced one is deleted. Our log
+lines name the handle and say whether a name / photo came, never the name,
+the record key or the decryption key.
+
+**Our own name and photo** are not published (`ProfilesClient::set_record`
+exists in rustpush; sending it to contacts is not implemented).
+
+## Supervision
 
 The receive loop and the APS/IDS state monitors run under
 `engine::supervise::supervise`. rustpush's handle path has
@@ -537,6 +620,8 @@ pub trait Engine: Send + Sync {
     async fn mark_read(&self, chat: &ChatTarget, up_to: &MessageId) -> EngineResult<()>;
     async fn lookup_handles(&self, handles: Vec<String>) -> EngineResult<Vec<(String, bool)>>;
     async fn download_attachment(&self, locator: &str, dest: &Path, max_bytes: u64) -> EngineResult<()>;
+    async fn fetch_profile(&self, share: &ShareRef) -> EngineResult<FetchedProfile>;
+    async fn profiles_status(&self) -> ProfilesStatus;
     async fn upsert_chat(&self, chat: &Chat);
     fn events(&self) -> broadcast::Receiver<EngineEvent>;
     async fn shutdown(&self);
@@ -574,11 +659,16 @@ pub trait Engine: Send + Sync {
   directory, mode 0600, rename). The size in a message is the sender's
   claim: a download announcing or receiving more than `max_bytes`
   (`MAX_ATTACHMENT_BYTES` = 1 GiB for attachments, `MAX_BACKGROUND_BYTES`
-  = 32 MiB for transcript backgrounds) fails with `InvalidInput`, and at
+  = 32 MiB for transcript backgrounds and group photos) fails with `InvalidInput`, and at
   most 4 MiB is pre-allocated. `MockEngine` writes
   `MockEngine::ATTACHMENT_PAYLOAD`.
+* `fetch_profile(share)` fetches a shared profile (`ShareRef` = record key
+  + decryption key, redacted from `Debug`); `Unsupported` while
+  `profiles_status()` is not `ready` and cannot become so without the
+  user.
 * `MockEngine` (`engine::mock`, always compiled): records `MockCall`s
-  (without passwords/codes/locators), `inject(event)`,
+  (without passwords/codes/locators/profile keys), `inject(event)`,
+  `set_profile(record, FetchedProfile)`, `set_profiles_status`,
   `set_require_two_factor`, `set_reachable`, `fail_next`,
   `set_connection_state`. Same chat-id scheme as the real engine: new
   participant sets get a deterministic `group:00000000-0000-4000-9000-<n>`
@@ -605,6 +695,7 @@ pub trait Engine: Send + Sync {
 * One tapback per sender per message (Apple's classic model).
 * `Search` is `LIKE`-based (ASCII case folding only); no FTS index yet.
 * `Logout` is local only (no IDS deregistration).
-* Stickers, app balloons, FaceTime, SMS relay, profile sharing: ignored.
+* Stickers, app balloons, FaceTime, SMS relay: ignored. Shared names and
+  photos are received only; our own are not published.
 * Only one `RustpushEngine` per process (rustpush's keystore is global).
 * Nothing here has talked to Apple yet; first live run is Phase 5.
