@@ -22,6 +22,9 @@ QQC2.Control {
     property alias text: input.text
     property alias placeholderText: input.placeholderText
     property bool allowAttachments: true
+    /// Sending as a text message (SMS via the iPhone): "Text Message"
+    /// placeholder, green send button, no typing indicator.
+    property bool sms: false
     property bool restoring: false
     /// File URLs (strings) waiting to be sent with the next message.
     property var attachments: []
@@ -249,7 +252,7 @@ QQC2.Control {
                 QQC2.TextArea {
                     id: input
                     objectName: "composerInput"
-                    placeholderText: i18n("iMessage")
+                    placeholderText: root.sms ? i18n("Text Message") : i18n("iMessage")
                     wrapMode: TextEdit.Wrap
                     Accessible.name: i18n("Message")
                     leftPadding: Kirigami.Units.largeSpacing
@@ -278,7 +281,7 @@ QQC2.Control {
                         }
                     }
                     onTextChanged: {
-                        if (root.editingId.length > 0 || root.restoring) {
+                        if (root.editingId.length > 0 || root.restoring || root.sms) {
                             return;
                         }
                         if (text.length > 0) {
@@ -315,8 +318,9 @@ QQC2.Control {
 
             QQC2.ToolButton {
                 icon.name: root.editingId.length > 0 ? "dialog-ok-apply" : "document-send"
-                text: root.editingId.length > 0 ? i18n("Save") : i18n("Send")
+                text: root.editingId.length > 0 ? i18n("Save") : (root.sms ? i18n("Send as Text Message") : i18n("Send"))
                 display: QQC2.AbstractButton.IconOnly
+                icon.color: root.sms && enabled ? "#34c759" : "transparent"
                 enabled: input.text.trim().length > 0 || (root.attachments.length > 0 && root.editingId.length === 0)
                 Layout.alignment: Qt.AlignBottom
                 onClicked: root.send()

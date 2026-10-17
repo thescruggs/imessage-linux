@@ -183,6 +183,7 @@ Kirigami.Page {
             id: composer
             objectName: "conversationComposer"
             Layout.fillWidth: true
+            sms: App.messages.smsMode
             enabled: App.daemon.connectionState === "connected" || App.daemon.connectionState === "registering"
             onSendRequested: (text, replyTo) => App.messages.sendText(text, replyTo)
             onEditRequested: (messageId, text) => App.messages.edit(messageId, text)

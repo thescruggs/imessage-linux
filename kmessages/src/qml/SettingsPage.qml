@@ -99,6 +99,87 @@ FormCard.FormCardPage {
     }
 
     FormCard.FormHeader {
+        title: i18n("Text Message Forwarding")
+        visible: smsCard.visible
+    }
+    FormCard.FormCard {
+        id: smsCard
+        objectName: "smsForwardingCard"
+        // Older daemons do not report it.
+        visible: App.daemon.smsState.length > 0
+        property bool busy: false
+        property string error: ""
+
+        FormCard.FormTextDelegate {
+            objectName: "smsForwardingStatus"
+            text: i18n("SMS and RCS through your iPhone")
+            description: {
+                const via = App.daemon.smsNumber.replace(/^tel:/, "");
+                switch (App.daemon.smsState) {
+                case "active":
+                    return i18n("On: text messages to and from %1 come through your iPhone.", via);
+                case "requested":
+                    return i18n("Requested. Waiting for your iPhone to turn this computer on.");
+                case "error":
+                    return i18n("Error: %1", App.daemon.smsDetail);
+                }
+                return via.length > 0 ? i18n("Off") : i18n("Off. Put your iPhone's number in the daemon's config.toml (other_handles or sms_relay_number) first.");
+            }
+        }
+        FormCard.FormDelegateSeparator {
+            visible: smsHelp.visible
+        }
+        FormCard.FormTextDelegate {
+            id: smsHelp
+            objectName: "smsForwardingHelp"
+            visible: App.daemon.smsState === "requested" || App.daemon.smsState === "off" || App.daemon.smsState === "error"
+            text: i18n("On your iPhone")
+            description: i18n("Open Settings > Messages > Text Message Forwarding and turn this computer on. Texts to and from people without iMessage then show here in green.")
+        }
+        FormCard.FormDelegateSeparator {
+            visible: smsCard.error.length > 0
+        }
+        FormCard.FormTextDelegate {
+            visible: smsCard.error.length > 0
+            text: i18n("Could not reach your iPhone")
+            description: smsCard.error
+        }
+        FormCard.FormDelegateSeparator {}
+        FormCard.FormButtonDelegate {
+            objectName: "smsEnableButton"
+            visible: App.daemon.smsState !== "active"
+            enabled: !smsCard.busy && App.daemon.registered && App.daemon.smsNumber.length > 0
+            icon.name: "phone"
+            text: App.daemon.smsState === "requested" ? i18n("Ask Again") : i18n("Enable")
+            description: i18n("Asks your iPhone to relay text messages to this computer.")
+            onClicked: {
+                smsCard.busy = true;
+                smsCard.error = "";
+                App.daemon.enableSmsForwarding(true);
+            }
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "smsDisableButton"
+            visible: App.daemon.smsState === "active" || App.daemon.smsState === "requested"
+            enabled: !smsCard.busy
+            icon.name: "process-stop"
+            text: i18n("Disable")
+            onClicked: {
+                smsCard.busy = true;
+                smsCard.error = "";
+                App.daemon.enableSmsForwarding(false);
+            }
+        }
+        Connections {
+            target: App.daemon
+            function onSmsForwardingFinished(ok: bool, errorMessage: string) {
+                smsCard.busy = false;
+                smsCard.error = ok ? "" : errorMessage;
+            }
+        }
+    }
+
+    FormCard.FormHeader {
         title: i18n("General")
     }
     FormCard.FormCard {

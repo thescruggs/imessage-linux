@@ -19,6 +19,10 @@ class HandleLookupModel : public QAbstractListModel
     Q_PROPERTY(bool checking READ isChecking NOTIFY changed)
     Q_PROPERTY(bool canSend READ canSend NOTIFY changed)
     Q_PROPERTY(QString problem READ problem NOTIFY changed)
+    /// The message will go out as a text message (SMS via the iPhone): Text
+    /// Message Forwarding is active and a recipient is a phone number that is
+    /// not on iMessage.
+    Q_PROPERTY(bool smsMode READ smsMode NOTIFY changed)
 
 public:
     enum State { Checking, Reachable, Unreachable, Invalid, Error };
@@ -42,6 +46,7 @@ public:
     QStringList handles() const;
     bool isChecking() const;
     bool canSend() const;
+    bool smsMode() const;
     /// Human-readable reason sending is blocked (empty if none).
     QString problem() const;
 
@@ -62,6 +67,8 @@ private:
         QString message;
     };
     void lookup(const QString &handle);
+    /// An unreachable phone number can still get a text message.
+    bool textable(const QString &handle) const;
     void setState(const QString &handle, State state, const QString &message = QString());
 
     QPointer<DaemonClient> m_client;

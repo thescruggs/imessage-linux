@@ -32,6 +32,11 @@ class MessageListModel : public QAbstractListModel
     Q_PROPERTY(bool someoneTyping READ someoneTyping NOTIFY typingChanged)
     Q_PROPERTY(QString typingText READ typingText NOTIFY typingChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
+    /// Sending here goes out as a text message (SMS via the iPhone): Text
+    /// Message Forwarding is active, the chat is with phone numbers, and one
+    /// of them is not on iMessage (or, until that is known, the newest
+    /// message was a text). Green composer, no typing indicators.
+    Q_PROPERTY(bool smsMode READ smsMode NOTIFY smsModeChanged)
 
 public:
     enum Roles {
@@ -69,6 +74,7 @@ public:
         SubjectRole,
         EffectRole,
         UnsupportedRole,
+        IsSmsRole, ///< a text message relayed by the iPhone (green bubble, no tapbacks / edit)
     };
     Q_ENUM(Roles)
 
@@ -91,6 +97,10 @@ public:
     bool someoneTyping() const { return !m_typing.isEmpty(); }
     QString typingText() const;
     QString lastError() const { return m_lastError; }
+    bool smsMode() const;
+    /// The phone numbers this chat is with (1:1 `tel:` or a `group-p:` of
+    /// numbers, our own left out); empty for anything else.
+    QStringList phoneRecipients() const;
     const QList<Message> &messages() const { return m_messages; }
     /// Wait before the one retry of a DownloadAttachment that timed out (default 30 s).
     void setDownloadRetryDelay(int ms) { m_downloadRetryMs = ms; }
@@ -126,6 +136,7 @@ Q_SIGNALS:
     void pageSizeChanged();
     void typingChanged();
     void lastErrorChanged();
+    void smsModeChanged();
     void attachmentReady(const QString &attachmentId, const QString &path);
     /// A new message was added at the bottom (row 0).
     void newestMessageAdded(bool fromMe);
@@ -141,6 +152,8 @@ private:
     void setLoading(bool loading);
     void setLastError(const QString &error);
     void recomputeLastOwn();
+    /// LookupHandles for phoneRecipients() when SMS forwarding is active.
+    void checkReachability();
     /// Emit dataChanged for rows [from, to] (clamped).
     void touchRows(int from, int to);
     /// Emit dataChanged(AttachmentsRole) for the rows holding `attachmentId`.
@@ -175,6 +188,8 @@ private:
     QSet<QString> m_typing;
     QStringList m_ownHandles; ///< last seen DaemonClient::ownHandles()
     QString m_lastError;
+    int m_reachable = -1; ///< phoneRecipients() all on iMessage: 1, not all: 0, unknown: -1
+    bool m_lastSmsActive = false;
     QHash<QString, QString> m_paths; ///< attachment id → local path
     QSet<QString> m_downloading;
     QHash<QString, QString> m_downloadErrors;

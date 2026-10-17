@@ -17,6 +17,9 @@ HandleLookupModel::HandleLookupModel(DaemonClient *client, QObject *parent)
     : QAbstractListModel(parent)
     , m_client(client)
 {
+    if (client) {
+        connect(client, &DaemonClient::statusChanged, this, &HandleLookupModel::changed);
+    }
     if (auto *contacts = ContactResolver::instance()) {
         connect(contacts, &ContactResolver::contactsChanged, this, [this] {
             if (!m_entries.isEmpty()) {
@@ -91,10 +94,22 @@ bool HandleLookupModel::isChecking() const
     });
 }
 
+bool HandleLookupModel::textable(const QString &handle) const
+{
+    return m_client && m_client->isSmsActive() && handle.startsWith("tel:"_L1);
+}
+
 bool HandleLookupModel::canSend() const
 {
-    return !m_entries.isEmpty() && std::all_of(m_entries.cbegin(), m_entries.cend(), [](const Entry &e) {
-        return e.state == Reachable;
+    return !m_entries.isEmpty() && std::all_of(m_entries.cbegin(), m_entries.cend(), [this](const Entry &e) {
+        return e.state == Reachable || (e.state == Unreachable && textable(e.handle));
+    });
+}
+
+bool HandleLookupModel::smsMode() const
+{
+    return canSend() && std::any_of(m_entries.cbegin(), m_entries.cend(), [](const Entry &e) {
+        return e.state == Unreachable;
     });
 }
 
@@ -105,6 +120,9 @@ QString HandleLookupModel::problem() const
         case Invalid:
             return i18n("“%1” is not an email address or phone number.", e.input);
         case Unreachable:
+            if (textable(e.handle)) {
+                break; // goes out as a text message
+            }
             return i18n("%1 is not registered with iMessage.", Handle{e.handle, {}}.displayName());
         case Error:
             return i18n("Could not check %1: %2", e.input, e.message);

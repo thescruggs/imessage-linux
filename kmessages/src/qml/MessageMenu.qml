@@ -14,12 +14,13 @@ QQC2.Menu {
     signal replyRequested
     signal editRequested
 
-    readonly property bool canModify: message.isFromMe === true && message.unsent !== true
+    // Text messages (SMS) cannot be edited or unsent, and take no tapbacks.
+    readonly property bool canModify: message.isFromMe === true && message.unsent !== true && message.isSms !== true
 
     QQC2.MenuItem {
         text: i18n("Tapback…")
         icon.name: "love"
-        enabled: root.message.unsent !== true
+        enabled: root.message.unsent !== true && root.message.isSms !== true
         onTriggered: root.reactRequested(root.anchorItem)
     }
     QQC2.MenuItem {

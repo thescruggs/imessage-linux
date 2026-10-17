@@ -19,6 +19,7 @@ Item {
     required property bool isEmojiOnly
     required property string senderName
     required property bool isFromMe
+    required property bool isSms
     required property string time
     required property bool showSeparator
     required property string separatorLabel
@@ -44,7 +45,8 @@ Item {
     signal menuRequested(Item anchor)
     signal tapbackRequested(Item anchor)
 
-    readonly property color sentColor: "#1982fc"
+    // iMessage blue, text-message (SMS / RCS) green, as Messages.app.
+    readonly property color sentColor: isSms ? "#34c759" : "#1982fc"
     // Over a chat background: a stronger tint, and no carved tail (its
     // carving block is painted in the plain background colour).
     readonly property bool overBackground: App.currentChatBackground !== ""
@@ -288,7 +290,7 @@ Item {
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
                         onLongPressed: root.menuRequested(bubble)
-                        onDoubleTapped: root.tapbackRequested(bubble)
+                        onDoubleTapped: if (!root.isSms) root.tapbackRequested(bubble)
                     }
 
                     QQC2.ToolTip.visible: bubbleHover.hovered && !textLabel.hoveredLink

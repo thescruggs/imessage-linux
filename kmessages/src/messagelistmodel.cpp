@@ -13,6 +13,8 @@
 #include <QRegularExpression>
 #include <QTimer>
 
+#include <algorithm>
+
 using namespace Qt::StringLiterals;
 
 namespace km
@@ -34,6 +36,15 @@ MessageListModel::MessageListModel(DaemonClient *client, ChatListModel *chats, Q
     connect(client, &DaemonClient::typingChanged, this, &MessageListModel::onTyping);
     connect(client, &DaemonClient::resyncRequested, this, &MessageListModel::reload);
     m_ownHandles = client->ownHandles();
+    m_lastSmsActive = client->isSmsActive();
+    connect(this, &MessageListModel::countChanged, this, &MessageListModel::smsModeChanged);
+    connect(client, &DaemonClient::statusChanged, this, [this] {
+        if (m_client && m_client->isSmsActive() != m_lastSmsActive) {
+            m_lastSmsActive = m_client->isSmsActive();
+            checkReachability();
+            Q_EMIT smsModeChanged();
+        }
+    });
     connect(client, &DaemonClient::statusChanged, this, [this] {
         // Own handles decide "my reaction"; refresh only when they change.
         if (!m_client || m_client->ownHandles() == m_ownHandles) {
@@ -98,6 +109,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {SubjectRole, "subject"},
         {EffectRole, "effect"},
         {UnsupportedRole, "unsupported"},
+        {IsSmsRole, "isSms"},
     };
 }
 
@@ -429,8 +441,65 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return m.effect;
     case UnsupportedRole:
         return m.unsupported();
+    case IsSmsRole:
+        return m.isSms();
     }
     return {};
+}
+
+QStringList MessageListModel::phoneRecipients() const
+{
+    QStringList raw;
+    if (m_chatId.startsWith("tel:"_L1)) {
+        raw << m_chatId;
+    } else if (m_chatId.startsWith("group-p:"_L1)) {
+        raw = m_chatId.mid(8).split(u',', Qt::SkipEmptyParts);
+    } else {
+        return {};
+    }
+    QStringList out;
+    for (const auto &h : std::as_const(raw)) {
+        if (m_client && (m_client->isOwnHandle(h) || m_client->isOtherOwnHandle(h) || DaemonClient::sameHandle(h, m_client->smsNumber()))) {
+            continue;
+        }
+        if (!h.startsWith("tel:"_L1)) {
+            return {};
+        }
+        out << h;
+    }
+    return out;
+}
+
+bool MessageListModel::smsMode() const
+{
+    if (!m_client || !m_client->isSmsActive() || phoneRecipients().isEmpty()) {
+        return false;
+    }
+    if (m_reachable >= 0) {
+        return m_reachable == 0;
+    }
+    return !m_messages.isEmpty() && m_messages.first().isSms();
+}
+
+void MessageListModel::checkReachability()
+{
+    m_reachable = -1;
+    const QStringList numbers = phoneRecipients();
+    if (!m_client || !m_client->isSmsActive() || numbers.isEmpty()) {
+        return;
+    }
+    QPointer<MessageListModel> self(this);
+    const QString chat = m_chatId;
+    m_client->lookupHandles(numbers, [self, chat](const QList<HandleReachability> &result) {
+        if (!self || self->m_chatId != chat) {
+            return;
+        }
+        const bool all = !result.isEmpty() && std::all_of(result.cbegin(), result.cend(), [](const HandleReachability &r) {
+            return r.reachable;
+        });
+        self->m_reachable = all ? 1 : 0;
+        Q_EMIT self->smsModeChanged();
+    });
 }
 
 void MessageListModel::setChatId(const QString &chatId)
@@ -444,6 +513,8 @@ void MessageListModel::setChatId(const QString &chatId)
         Q_EMIT typingChanged();
     }
     Q_EMIT chatIdChanged();
+    checkReachability();
+    Q_EMIT smsModeChanged();
     reload();
 }
 
@@ -753,8 +824,8 @@ void MessageListModel::adoptOutgoingPaths(const QString &chatId, const Message &
 void MessageListModel::react(const QString &messageId, const QString &kind)
 {
     const int row = rowOf(messageId);
-    if (!m_client || row < 0) {
-        return;
+    if (!m_client || row < 0 || m_messages.at(row).isSms()) {
+        return; // no tapbacks on text messages
     }
     if (!m_client->isStatusKnown()) {
         // Our handles are not known yet, so "is this tapback already mine"
@@ -795,7 +866,8 @@ void MessageListModel::unsend(const QString &messageId)
 
 void MessageListModel::setTyping(bool typing)
 {
-    if (m_client && !m_chatId.isEmpty()) {
+    // Text messages have no typing indicators.
+    if (m_client && !m_chatId.isEmpty() && !smsMode()) {
         m_client->setTyping(m_chatId, typing);
     }
 }

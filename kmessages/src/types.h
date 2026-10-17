@@ -123,7 +123,10 @@ struct Message {
     QList<Reaction> reactions;
     QString effect;
     bool verified = true;
+    /// `imessage`, or `sms` for a text message relayed by the user's iPhone.
+    QString service = QStringLiteral("imessage");
 
+    bool isSms() const { return service == QLatin1String("sms"); }
     QList<Attachment> attachments() const;
     /// Descriptions of parts we cannot render.
     QStringList unsupported() const;
@@ -149,6 +152,10 @@ struct Status {
     int unread = -1; ///< -1 = store unavailable (null)
     QString profilesState; ///< `profiles.state` (ready / pending / needs_login / unavailable), empty = older daemon
     QString profilesDetail;
+    QString smsState; ///< `sms.state` (off / requested / active / error), empty = older daemon
+    QString smsNumber; ///< `sms.number`: the iPhone number that relays texts
+    QString smsDetail;
+    qint64 smsSince = 0; ///< ms
 };
 
 struct SentMessage {
@@ -156,6 +163,7 @@ struct SentMessage {
     QString chatId;
     qint64 sentAt = 0;
     Handle sender;
+    QString service = QStringLiteral("imessage");
 };
 
 struct HandleReachability {
@@ -196,6 +204,9 @@ std::optional<Message> parseMessage(const QString &json, QString *error = nullpt
 std::optional<QList<Message>> parseMessageList(const QString &json, QString *error = nullptr);
 std::optional<MessagePage> parseMessagePage(const QString &json, QString *error = nullptr);
 std::optional<Status> parseStatus(const QString &json, QString *error = nullptr);
+/// `sms` object of a status (also `SmsForwardingChanged` / `EnableSmsForwarding`): fills the sms* fields of `s`.
+void applySms(const QJsonObject &sms, Status *s);
+bool parseSmsForwarding(const QString &json, Status *s, QString *error = nullptr);
 std::optional<SentMessage> parseSentMessage(const QString &json, QString *error = nullptr);
 std::optional<QList<HandleReachability>> parseLookup(const QString &json, QString *error = nullptr);
 /// A HandleProfile object, or std::nullopt for `null` / nothing to show.

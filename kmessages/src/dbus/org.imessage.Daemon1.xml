@@ -14,6 +14,10 @@
     <method name="Search"><arg name="query" type="s" direction="in"/><arg name="limit" type="u" direction="in"/><arg type="s" direction="out"/></method>
     <method name="SendText"><arg name="chat_id_or_empty" type="s" direction="in"/><arg name="participants_json" type="s" direction="in"/><arg name="text" type="s" direction="in"/><arg name="reply_to" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="SendFile"><arg name="chat_id_or_empty" type="s" direction="in"/><arg name="participants_json" type="s" direction="in"/><arg name="path" type="s" direction="in"/><arg name="mime" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="SendTextAs"><arg name="chat_id_or_empty" type="s" direction="in"/><arg name="participants_json" type="s" direction="in"/><arg name="text" type="s" direction="in"/><arg name="reply_to" type="s" direction="in"/><arg name="service" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="SendFileAs"><arg name="chat_id_or_empty" type="s" direction="in"/><arg name="participants_json" type="s" direction="in"/><arg name="path" type="s" direction="in"/><arg name="mime" type="s" direction="in"/><arg name="service" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="EnableSmsForwarding"><arg name="enable" type="b" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="GetSmsForwarding"><arg type="s" direction="out"/></method>
     <method name="React"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/><arg name="kind" type="s" direction="in"/><arg name="remove" type="b" direction="in"/></method>
     <method name="Edit"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/><arg name="text" type="s" direction="in"/></method>
     <method name="Unsend"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/></method>
@@ -33,6 +37,7 @@
     <signal name="ConnectionStateChanged"><arg name="state" type="s"/></signal>
     <signal name="TwoFactorRequired"/>
     <signal name="BackgroundError"><arg name="message" type="s"/></signal>
+    <signal name="SmsForwardingChanged"><arg name="state_json" type="s"/></signal>
     <signal name="HandleProfileUpdated"><arg name="handle" type="s"/><arg name="profile_json" type="s"/></signal>
   </interface>
 </node>

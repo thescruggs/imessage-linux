@@ -16,7 +16,11 @@ Run it on a private bus, e.g.::
 Login behaviour (for the login dialog): password ``wrong`` fails with
 ``Error.Login``; an Apple ID containing ``2fa`` asks for a code; code
 ``000000`` is rejected with ``Error.BadTwoFactorCode``; anything else is ok.
-LookupHandles: addresses containing ``android`` are unreachable.
+LookupHandles: addresses containing ``android`` (and numbers added with
+``AddSmsChat``) are unreachable.
+Text Message Forwarding: ``EnableSmsForwarding`` goes to ``requested``;
+``SetSms`` sets any state; with it ``active``, SendText to an unreachable
+``tel:`` chat is stored with ``service: sms``.
 SendText: the text ``__fail__`` fails with ``Error.Transient``.
 """
 
@@ -108,7 +112,7 @@ class Store:
             self._seed(now_ms)
 
     def _msg(self, chat_id, sender, sent_at, text=None, from_me=False, delivery="delivered",
-             parts=None, reactions=None, verified=True, mid=None, reply_to=None, edited=False):
+             parts=None, reactions=None, verified=True, mid=None, reply_to=None, edited=False, service="imessage"):
         if parts is None:
             parts = [{"type": "text", "text": text}] if text is not None else []
         self.seq += 1
@@ -128,6 +132,7 @@ class Store:
             "reactions": reactions or [],
             "effect": None,
             "verified": verified,
+            "service": service,
             "_seq": self.seq,
         }
         self.messages.setdefault(chat_id, []).append(m)
@@ -243,6 +248,8 @@ class FakeDaemon(dbus.service.Object):
         self.download_no_reply = 0  # FailDownloadsWithNoReply  # SetUnreadablePrefixes: paths the "sandboxed" daemon cannot see
         self.pending_2fa = False
         self.profiles = {}  # SetProfile: handle -> HandleProfile dict
+        self.sms = {"state": "off", "number": "tel:+15555550100", "since": None}
+        self.unreachable = set()  # AddSmsChat numbers
         self.tmp = tempfile.mkdtemp(prefix="kmessages-fake-")
 
     # -- helpers ----------------------------------------------------------
@@ -273,7 +280,8 @@ class FakeDaemon(dbus.service.Object):
                                  "sender": {"uri": ME} if registered else None,
                                  "other_handles": list(self.other_handles)},
                 "unread": self.store.unread_total(),
-                "profiles": {"state": "ready"}}
+                "profiles": {"state": "ready"},
+                "sms": dict(self.sms)}
 
     def chat(self, cid):
         c = self.store.chats.get(cid)
@@ -395,14 +403,46 @@ class FakeDaemon(dbus.service.Object):
     @dbus.service.method(IFACE, in_signature="ssss", out_signature="s")
     def SendText(self, chat_id, participants_json, text, reply_to):
         self.log("SendText", chat_id, participants_json, text, reply_to)
+        return self.send_text(chat_id, participants_json, text, reply_to, "")
+
+    @dbus.service.method(IFACE, in_signature="sssss", out_signature="s")
+    def SendTextAs(self, chat_id, participants_json, text, reply_to, service):
+        self.log("SendTextAs", chat_id, participants_json, text, reply_to, service)
+        if service not in ("", "auto", "imessage", "sms"):
+            raise Error("InvalidInput", f"service: {service}")
+        return self.send_text(chat_id, participants_json, text, reply_to, service)
+
+    def send_text(self, chat_id, participants_json, text, reply_to, service):
         self.require_login()
         if text == "__fail__":
             raise Error("Transient", "fake send failure")
         cid = self.resolve_target(chat_id, participants_json)
+        if service in ("", "auto"):
+            service = "sms" if self.sms["state"] == "active" and cid in self.unreachable else "imessage"
+        if service == "sms" and self.sms["state"] not in ("active", "requested"):
+            raise Error("Unsupported", "Text Message Forwarding is not on")
         m = self.store._msg(cid, None, int(time.time() * 1000), text, from_me=True, delivery="sent",
-                            reply_to=reply_to or None)
+                            reply_to=(reply_to or None) if service == "imessage" else None, service=service)
         self.announce_new(m)
-        return dumps({"id": m["id"], "chat_id": cid, "sent_at": m["sent_at"], "sender": {"uri": ME}})
+        return dumps({"id": m["id"], "chat_id": cid, "sent_at": m["sent_at"], "sender": {"uri": ME}, "service": service})
+
+    @dbus.service.method(IFACE, in_signature="b", out_signature="s")
+    def EnableSmsForwarding(self, enable):
+        self.log("EnableSmsForwarding", bool(enable))
+        self.require_login()
+        if enable and self.sms["state"] != "active":
+            self.set_sms("requested", self.sms["number"])
+        elif not enable:
+            self.set_sms("off", self.sms["number"])
+        return dumps(self.sms)
+
+    @dbus.service.method(IFACE, in_signature="", out_signature="s")
+    def GetSmsForwarding(self):
+        return dumps(self.sms)
+
+    def set_sms(self, state, number):
+        self.sms = {"state": state, "number": number or None, "since": int(time.time() * 1000)}
+        self.SmsForwardingChanged(dumps(self.sms))
 
     @dbus.service.method(IFACE, in_signature="ssss", out_signature="s",
                          async_callbacks=("reply", "error"))
@@ -510,7 +550,7 @@ class FakeDaemon(dbus.service.Object):
             n = normalize(h)
             if n is None:
                 raise Error("InvalidHandle", f"invalid handle: {h}")
-            out.append({"handle": n, "reachable": "android" not in n})
+            out.append({"handle": n, "reachable": "android" not in n and n not in self.unreachable})
         return dumps(out)
 
     @dbus.service.method(IFACE, in_signature="s", out_signature="s")
@@ -604,6 +644,10 @@ class FakeDaemon(dbus.service.Object):
     def BackgroundError(self, message):
         pass
 
+    @dbus.service.signal(IFACE, signature="s")
+    def SmsForwardingChanged(self, state_json):
+        pass
+
     # -- org.imessage.FakeControl (tests only) ------------------------------------
     @dbus.service.method(CTRL, in_signature="sss", out_signature="s")
     def InjectMessage(self, chat_id, sender, text):
@@ -685,6 +729,34 @@ class FakeDaemon(dbus.service.Object):
         else:
             c.pop("icon_path", None)
         self.ChatUpdated(dumps(c))
+
+    @dbus.service.method(CTRL, in_signature="ss", out_signature="")
+    def SetSms(self, state, number):
+        """Text Message Forwarding state (as the iPhone confirming it would)."""
+        self.set_sms(state, number)
+
+    @dbus.service.method(CTRL, in_signature="ss", out_signature="s")
+    def AddSmsChat(self, number, name):
+        """A 1:1 text-message chat with `number` (not on iMessage): a few green
+        messages each way, the newest one ours. Returns the chat id."""
+        cid = normalize(number)
+        self.unreachable.add(cid)
+        participant = {"uri": cid}
+        if name:
+            participant["display"] = name
+        self.store.chats[cid] = {"id": cid, "participants": [participant], "display_name": None, "is_group": False,
+                                 "last_message_at": None, "unread_count": 0}
+        now = int(time.time() * 1000)
+        minute = 60_000
+        self.store._msg(cid, cid, now - 40 * minute, "Hey, it's Sam. New phone, who dis? 😄", service="sms")
+        self.store._msg(cid, None, now - 38 * minute, "Ha! Saving your number now", from_me=True, delivery="delivered",
+                        service="sms")
+        self.store._msg(cid, cid, now - 12 * minute, "Still on for lunch Thursday?", service="sms")
+        self.store._msg(cid, None, now - 11 * minute, "Yes, 12:30 at the usual place", from_me=True, delivery="sent",
+                        service="sms")
+        self.store.touch(cid)
+        self.ChatUpdated(dumps(self.store.chats[cid]))
+        return cid
 
     @dbus.service.method(CTRL, in_signature="ssb", out_signature="")
     def InjectTyping(self, chat_id, handle, typing):

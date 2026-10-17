@@ -631,6 +631,30 @@ private Q_SLOTS:
         }
     }
 
+    void smsChat()
+    {
+        m_fake.control(u"SetSms"_s, {u"active"_s, u"tel:+15555550100"_s});
+        QTRY_VERIFY_WITH_TIMEOUT(m_controller->daemon()->isSmsActive(), Timeout);
+        const QString sam = m_fake.control(u"AddSmsChat"_s, {u"+15555550142"_s, u"Sam Lee"_s}).arguments().value(0).toString();
+        QTRY_VERIFY_WITH_TIMEOUT(m_controller->chatList()->indexOf(sam) >= 0, Timeout);
+        invoke("openChat", sam);
+        auto *msgs = m_controller->messages();
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->isLoaded() && msgs->chatId() == sam && msgs->rowCount() == 4, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->smsMode(), Timeout);
+        QObject *composer = conversationComposer();
+        QVERIFY(composer);
+        QTRY_VERIFY_WITH_TIMEOUT(composer->property("sms").toBool(), Timeout);
+        QCOMPARE(composer->property("placeholderText").toString(), u"Text Message"_s);
+        shoot(u"sms-chat"_s);
+
+        invoke("showSettings");
+        shoot(u"settings-sms"_s);
+        invoke("closeOverlays");
+        m_fake.control(u"SetSms"_s, {u"off"_s, u"tel:+15555550100"_s});
+        QTRY_VERIFY_WITH_TIMEOUT(!msgs->smsMode(), Timeout);
+        QCOMPARE(composer->property("placeholderText").toString(), u"iMessage"_s);
+    }
+
     void needsLogin()
     {
         m_fake.stop();

@@ -744,6 +744,70 @@ private Q_SLOTS:
         QCOMPARE(model.rowCount(), 0);
     }
 
+    void smsForwarding()
+    {
+        auto client = connectedClient();
+        QCOMPARE(client->smsState(), u"off"_s);
+        QVERIFY(!client->isSmsActive());
+        QSignalSpy finished(client.get(), &DaemonClient::smsForwardingFinished);
+        client->enableSmsForwarding(true);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, Timeout);
+        QVERIFY(finished.first().at(0).toBool());
+        QCOMPARE(client->smsState(), u"requested"_s);
+        QCOMPARE(client->smsNumber(), u"tel:+15555550100"_s);
+        QCOMPARE(m_fake.callsOf(u"EnableSmsForwarding"_s).size(), 1);
+
+        // a green chat with a number that is not on iMessage
+        const QString sam = m_fake.control(u"AddSmsChat"_s, {u"+1 555 555 0142"_s, u"Sam"_s}).arguments().value(0).toString();
+        QCOMPARE(sam, u"tel:+15555550142"_s);
+        ChatListModel chats(client.get());
+        auto msgs = loadedMessages(client.get(), &chats, sam);
+        QCOMPARE(msgs->rowCount(), 4);
+        QVERIFY(roleOf(*msgs, 0, MessageListModel::IsSmsRole).toBool());
+        QVERIFY(msgs->phoneRecipients() == QStringList{sam});
+        QVERIFY(!msgs->smsMode()); // forwarding only requested
+        QSignalSpy mode(msgs.get(), &MessageListModel::smsModeChanged);
+        // the iPhone confirmed (signal only, like the daemon)
+        m_fake.control(u"SetSms"_s, {u"active"_s, u"tel:+15555550100"_s});
+        QTRY_VERIFY_WITH_TIMEOUT(client->isSmsActive(), Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->smsMode(), Timeout);
+        QVERIFY(mode.count() >= 1);
+        // no tapbacks, no typing indicator in a text-message chat
+        m_fake.control(u"ClearCalls"_s);
+        msgs->react(roleOf(*msgs, 0, MessageListModel::MessageIdRole).toString(), u"love"_s);
+        msgs->setTyping(true);
+        QTest::qWait(200);
+        QVERIFY(m_fake.callsOf(u"React"_s).isEmpty());
+        QVERIFY(m_fake.callsOf(u"SetTyping"_s).isEmpty());
+        // an email chat is never a text-message chat
+        auto bob = loadedMessages(client.get(), &chats, Bob);
+        QVERIFY(bob->phoneRecipients().isEmpty());
+        QVERIFY(!bob->smsMode());
+        QVERIFY(!roleOf(*bob, 0, MessageListModel::IsSmsRole).toBool());
+
+        // new message: an unreachable number can be texted now
+        HandleLookupModel lookup(client.get());
+        QVERIFY(lookup.add(u"+1 555 555 0142"_s));
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(lookup, 0, HandleLookupModel::StateNameRole).toString(), u"unreachable"_s, Timeout);
+        QVERIFY(lookup.canSend());
+        QVERIFY(lookup.smsMode());
+        QVERIFY(lookup.problem().isEmpty());
+        QVERIFY(lookup.add(u"android@example.com"_s)); // email: still not sendable
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(lookup, 1, HandleLookupModel::StateNameRole).toString(), u"unreachable"_s, Timeout);
+        QVERIFY(!lookup.canSend());
+        lookup.removeLast();
+
+        // sending in the green chat goes out as a text
+        msgs->sendText(u"see you there"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->rowCount() == 5, Timeout);
+        QVERIFY(roleOf(*msgs, 0, MessageListModel::IsSmsRole).toBool());
+
+        client->enableSmsForwarding(false);
+        QTRY_COMPARE_WITH_TIMEOUT(client->smsState(), u"off"_s, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(!msgs->smsMode(), Timeout);
+        QVERIFY(!lookup.canSend());
+    }
+
     void markRead()
     {
         auto client = connectedClient();

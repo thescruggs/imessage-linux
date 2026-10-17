@@ -46,6 +46,40 @@ private Q_SLOTS:
         QVERIFY(s->profilesDetail.isEmpty());
     }
 
+    void smsStatusAndService()
+    {
+        auto s = Json::parseStatus(fixture("status.json"));
+        QVERIFY(s);
+        QVERIFY(s->smsState.isEmpty()); // older daemon: no `sms`
+        auto a = Json::parseStatus(
+            uR"({"version":"1","connection":{"state":"connected"},"registered":true,"registration":{"handles":[]},"unread":0,
+                 "sms":{"state":"active","number":"tel:+15555550100","since":1700000000000}})"_s);
+        QVERIFY(a);
+        QCOMPARE(a->smsState, u"active"_s);
+        QCOMPARE(a->smsNumber, u"tel:+15555550100"_s);
+        QCOMPARE(a->smsSince, 1700000000000LL);
+        Status st;
+        QVERIFY(Json::parseSmsForwarding(uR"({"state":"error","detail":"no iPhone"})"_s, &st));
+        QCOMPARE(st.smsState, u"error"_s);
+        QCOMPARE(st.smsDetail, u"no iPhone"_s);
+        QVERIFY(Json::parseSmsForwarding(u"{}"_s, &st));
+        QCOMPARE(st.smsState, u"off"_s);
+        QVERIFY(!Json::parseSmsForwarding(u"nope"_s, &st));
+
+        auto m = Json::parseMessage(fixture("message.json"));
+        QVERIFY(m);
+        QCOMPARE(m->service, u"imessage"_s); // missing = iMessage
+        QVERIFY(!m->isSms());
+        auto t = Json::parseMessage(uR"({"id":"A","chat_id":"tel:+15555550142","sender":{"uri":"tel:+15555550142"},"sent_at":1,
+                                        "text":"hi","parts":[{"type":"text","text":"hi"}],"is_from_me":false,"delivery":"delivered",
+                                        "edited":false,"unsent":false,"reactions":[],"service":"sms"})"_s);
+        QVERIFY(t);
+        QVERIFY(t->isSms());
+        auto sent = Json::parseSentMessage(uR"({"id":"A","chat_id":"tel:+15555550142","sent_at":1,"service":"sms"})"_s);
+        QVERIFY(sent);
+        QCOMPARE(sent->service, u"sms"_s);
+    }
+
     void statusNeedsLoginAndError()
     {
         auto s = Json::parseStatus(fixture("status_needs_login.json"));

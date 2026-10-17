@@ -63,6 +63,7 @@ DaemonClient::DaemonClient(const QDBusConnection &bus, QObject *parent)
         {"TwoFactorRequired", SLOT(onTwoFactorRequired())},
         {"BackgroundError", SLOT(onBackgroundError(QString))},
         {"HandleProfileUpdated", SLOT(onHandleProfileUpdated(QString, QString))},
+        {"SmsForwardingChanged", SLOT(onSmsForwardingChanged(QString))},
     };
     for (const auto &s : signals_) {
         if (!m_bus.connect(Service, Path, Interface, QString::fromLatin1(s.name), this, s.slot)) {
@@ -465,6 +466,29 @@ void DaemonClient::setTyping(const QString &chatId, bool typing)
 void DaemonClient::markRead(const QString &chatId, const QString &upToMessageId)
 {
     callVoid(u"MarkRead"_s, {chatId, upToMessageId}, MediumTimeoutMs);
+}
+
+void DaemonClient::enableSmsForwarding(bool enable)
+{
+    call(u"EnableSmsForwarding"_s, {enable}, [this](const QDBusMessage &r) {
+        if (Json::parseSmsForwarding(firstString(r), &m_status)) {
+            Q_EMIT statusChanged();
+        }
+        Q_EMIT smsForwardingFinished(true, QString());
+    }, [this](const QString &, const QString &message) {
+        Q_EMIT smsForwardingFinished(false, message);
+        refreshStatus();
+    }, LongTimeoutMs);
+}
+
+void DaemonClient::onSmsForwardingChanged(const QString &json)
+{
+    QString error;
+    if (!Json::parseSmsForwarding(json, &m_status, &error)) {
+        qCWarning(KM_DBUS) << "bad SmsForwardingChanged payload:" << error;
+        return;
+    }
+    Q_EMIT statusChanged();
 }
 
 void DaemonClient::refreshStatus()

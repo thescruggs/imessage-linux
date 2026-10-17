@@ -33,6 +33,12 @@ class DaemonClient : public QObject
     /// Shared names and photos: `ready`, `pending`, `needs_login`, `unavailable` ("" = older daemon).
     Q_PROPERTY(QString profilesState READ profilesState NOTIFY statusChanged)
     Q_PROPERTY(QString profilesDetail READ profilesDetail NOTIFY statusChanged)
+    /// Text Message Forwarding (SMS relayed by the iPhone): `off`, `requested`, `active`, `error` ("" = older daemon).
+    Q_PROPERTY(QString smsState READ smsState NOTIFY statusChanged)
+    /// The iPhone number that relays texts (`tel:+…`), "" = not configured.
+    Q_PROPERTY(QString smsNumber READ smsNumber NOTIFY statusChanged)
+    Q_PROPERTY(QString smsDetail READ smsDetail NOTIFY statusChanged)
+    Q_PROPERTY(bool smsActive READ isSmsActive NOTIFY statusChanged)
     Q_PROPERTY(bool registered READ isRegistered NOTIFY statusChanged)
     Q_PROPERTY(QString version READ version NOTIFY statusChanged)
     Q_PROPERTY(QStringList ownHandles READ ownHandles NOTIFY statusChanged)
@@ -65,6 +71,10 @@ public:
     QString connectionDetail() const { return m_status.connectionDetail; }
     QString profilesState() const { return m_status.profilesState; }
     QString profilesDetail() const { return m_status.profilesDetail; }
+    QString smsState() const { return m_status.smsState; }
+    QString smsNumber() const { return m_status.smsNumber; }
+    QString smsDetail() const { return m_status.smsDetail; }
+    bool isSmsActive() const { return m_status.smsState == QLatin1String("active"); }
     bool isRegistered() const { return m_status.registered; }
     QString version() const { return m_status.version; }
     QStringList ownHandles() const { return m_status.handles; }
@@ -145,6 +155,8 @@ public:
     Q_INVOKABLE void setTyping(const QString &chatId, bool typing);
     Q_INVOKABLE void markRead(const QString &chatId, const QString &upToMessageId = QString());
     Q_INVOKABLE void refreshStatus();
+    /// Ask the iPhone to relay text messages here (or stop). Emits smsForwardingFinished.
+    Q_INVOKABLE void enableSmsForwarding(bool enable);
     /// Ask the bus to start the daemon (D-Bus activation) if it is not running.
     Q_INVOKABLE void ensureStarted();
 
@@ -176,6 +188,8 @@ Q_SIGNALS:
     void twoFactorFinished(const QString &result, const QString &errorName, const QString &errorMessage);
     /// chatId is the chat the message went to (new chats included).
     void sendFinished(bool ok, const QString &chatId, const QString &messageId, const QString &errorMessage);
+    /// EnableSmsForwarding answered; on failure errorMessage is set.
+    void smsForwardingFinished(bool ok, const QString &errorMessage);
     /// A fire-and-forget call (react, edit, unsend, markRead, …) failed.
     void operationFailed(const QString &operation, const QString &errorName, const QString &errorMessage);
 
@@ -189,6 +203,7 @@ private Q_SLOTS:
     void onTwoFactorRequired();
     void onBackgroundError(const QString &message);
     void onHandleProfileUpdated(const QString &handle, const QString &json);
+    void onSmsForwardingChanged(const QString &json);
 
 private:
     void call(const QString &method,

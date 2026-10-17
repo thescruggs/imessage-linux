@@ -557,6 +557,8 @@ std::optional<Message> message(const QJsonObject &o, QString *error)
     }
     m.effect = optString(o.value("effect"_L1));
     m.verified = o.value("verified"_L1).toBool(true); // serde default = true
+    const QString service = o.value("service"_L1).toString();
+    m.service = service.isEmpty() ? u"imessage"_s : service; // serde default = imessage
     return m;
 }
 
@@ -667,11 +669,33 @@ std::optional<Status> parseStatus(const QString &json, QString *error)
     const auto profiles = o->value("profiles"_L1).toObject();
     s.profilesState = optString(profiles.value("state"_L1));
     s.profilesDetail = optString(profiles.value("detail"_L1));
+    applySms(o->value("sms"_L1).toObject(), &s);
     s.registeredAt = optInt(reg.value("registered_at"_L1));
     s.expiresAt = optInt(reg.value("expires_at"_L1));
     const auto unread = o->value("unread"_L1);
     s.unread = unread.isDouble() ? unread.toInt() : -1;
     return s;
+}
+
+void applySms(const QJsonObject &sms, Status *s)
+{
+    s->smsState = optString(sms.value("state"_L1));
+    s->smsNumber = optString(sms.value("number"_L1));
+    s->smsDetail = optString(sms.value("detail"_L1));
+    s->smsSince = optInt(sms.value("since"_L1));
+}
+
+bool parseSmsForwarding(const QString &json, Status *s, QString *error)
+{
+    auto o = parseObject(json, error);
+    if (!o) {
+        return false;
+    }
+    applySms(*o, s);
+    if (s->smsState.isEmpty()) {
+        s->smsState = u"off"_s; // serde default
+    }
+    return true;
 }
 
 std::optional<SentMessage> parseSentMessage(const QString &json, QString *error)
@@ -684,6 +708,9 @@ std::optional<SentMessage> parseSentMessage(const QString &json, QString *error)
     s.id = o->value("id"_L1).toString();
     s.chatId = o->value("chat_id"_L1).toString();
     s.sentAt = optInt(o->value("sent_at"_L1));
+    if (const QString service = o->value("service"_L1).toString(); !service.isEmpty()) {
+        s.service = service;
+    }
     if (s.id.isEmpty() || s.chatId.isEmpty()) {
         setError(error, u"sent message without id/chat_id"_s);
         return std::nullopt;

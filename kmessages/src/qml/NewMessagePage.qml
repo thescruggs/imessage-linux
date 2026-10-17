@@ -208,7 +208,8 @@ Kirigami.Page {
                             }
                             QQC2.Label {
                                 visible: contact.reachability === "reachable" || contact.reachability === "unreachable"
-                                text: contact.reachability === "reachable" ? i18n("iMessage") : i18n("Not on iMessage")
+                                text: contact.reachability === "reachable" ? i18n("iMessage") : (App.daemon.smsActive && contact.uri.startsWith("tel:") ? i18n("Text Message") : i18n("Not on iMessage"))
+                                color: contact.reachability !== "reachable" && App.daemon.smsActive && contact.uri.startsWith("tel:") ? "#34c759" : Kirigami.Theme.textColor
                                 font: Kirigami.Theme.smallFont
                                 opacity: 0.7
                             }
@@ -284,7 +285,7 @@ Kirigami.Page {
                 width: parent.width - Kirigami.Units.gridUnit * 4
                 visible: text.length > 0
                 icon.name: "document-edit"
-                text: App.recipients.count === 0 ? i18n("Who do you want to message?") : (App.recipients.canSend ? i18n("Ready to send") : (App.recipients.checking ? i18n("Checking iMessage availability…") : ""))
+                text: App.recipients.count === 0 ? i18n("Who do you want to message?") : (App.recipients.canSend ? (App.recipients.smsMode ? i18n("Ready to send as a text message through your iPhone") : i18n("Ready to send")) : (App.recipients.checking ? i18n("Checking iMessage availability…") : ""))
                 explanation: App.recipients.count === 0 ? i18n("Type a name from your contacts, an email address or a phone number and press Enter. Add several people to start a group.") : ""
             }
         }
@@ -294,6 +295,7 @@ Kirigami.Page {
             Layout.fillWidth: true
             enabled: App.recipients.canSend && !page.sending && (App.daemon.connectionState === "connected" || App.daemon.connectionState === "registering")
             allowAttachments: false
+            sms: App.recipients.smsMode
             onSendRequested: (text, replyTo) => {
                 page.error = "";
                 page.sending = true;
