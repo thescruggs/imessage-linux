@@ -66,6 +66,7 @@ impl Store {
                 let mut paths = attachment_paths(tx, "SELECT a.local_path FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.chat_id = ?1", id.0.clone())?;
                 paths.extend(attachment_paths(tx, "SELECT local_path FROM chat_backgrounds WHERE chat_id = ?1", id.0.clone())?);
                 paths.extend(attachment_paths(tx, "SELECT image_path FROM chat_backgrounds WHERE chat_id = ?1", id.0.clone())?);
+                paths.extend(attachment_paths(tx, "SELECT icon_path FROM chats WHERE id = ?1", id.0.clone())?);
                 if !dry_run {
                     tx.execute("DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?1)", params![id.0])?;
                     // messages, attachments, participants, background: ON DELETE CASCADE
@@ -110,7 +111,8 @@ pub(super) fn delete_empty_groups_tx(tx: &Transaction<'_>) -> rusqlite::Result<u
            AND (display_name IS NULL OR TRIM(display_name) = '')
            AND NOT EXISTS (SELECT 1 FROM chat_participants p WHERE p.chat_id = chats.id)
            AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = chats.id)
-           AND NOT EXISTS (SELECT 1 FROM chat_backgrounds b WHERE b.chat_id = chats.id)",
+           AND NOT EXISTS (SELECT 1 FROM chat_backgrounds b WHERE b.chat_id = chats.id)
+           AND icon_id IS NULL AND icon_path IS NULL",
         [],
     )
 }

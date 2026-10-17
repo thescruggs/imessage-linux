@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use imessage_common::model::{
-    Attachment, AttachmentId, Chat, ChatId, ConnectionState, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction,
-    ReactionKind, RegistrationState,
+    Attachment, AttachmentId, Chat, ChatId, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessageId, MessagePart,
+    ProfilesStatus, Reaction, ReactionKind, RegistrationState,
 };
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
@@ -46,6 +46,9 @@ pub enum DaemonSignal {
     TwoFactorRequired,
     /// Background problem (D-Bus signal `BackgroundError`).
     BackgroundError(String),
+    /// A contact's shared name / photo changed (`None`: they stopped
+    /// sharing).
+    HandleProfileUpdated { handle: String, profile: Option<HandleProfile> },
 }
 
 /// What an operation failed with (mapped to D-Bus error names in `dbus.rs`).
@@ -82,6 +85,8 @@ pub struct Status {
     pub registration: RegistrationState,
     /// Total unread incoming messages (`null` if the store is unavailable).
     pub unread: Option<u32>,
+    /// Whether contacts' shared names and photos can be fetched.
+    pub profiles: ProfilesStatus,
 }
 
 /// `LookupHandles` result element.
@@ -208,6 +213,8 @@ pub struct Hub {
     downloads: Mutex<HashMap<AttachmentId, Arc<tokio::sync::Mutex<()>>>>,
     /// Chats whose background is being downloaded right now.
     background_fetches: Arc<Mutex<HashSet<ChatId>>>,
+    /// Shared-profile and group-photo downloads (`hub/profiles.rs`).
+    profile_fetches: profiles::ProfileFetches,
     store: Option<StoreHandle>,
     state_dir: PathBuf,
     signals: broadcast::Sender<DaemonSignal>,
@@ -225,6 +232,7 @@ impl Hub {
             engine,
             downloads: Mutex::new(HashMap::new()),
             background_fetches: Arc::new(Mutex::new(HashSet::new())),
+            profile_fetches: profiles::ProfileFetches::default(),
             store,
             state_dir,
             signals: broadcast::channel(1024).0,
@@ -292,11 +300,11 @@ impl Hub {
         }
     }
 
-    /// Only files inside `state_dir/attachments` and `state_dir/backgrounds`
-    /// are ours to delete (an outgoing attachment whose copy could not be
-    /// made still points at the user's own file).
+    /// Only files inside `state_dir/attachments`, `backgrounds`, `profiles`
+    /// and `chat_icons` are ours to delete (an outgoing attachment whose
+    /// copy could not be made still points at the user's own file).
     async fn remove_files(&self, files: Vec<String>) {
-        let roots = [self.attachments_dir(), self.backgrounds_dir()];
+        let roots = [self.attachments_dir(), self.backgrounds_dir(), self.profiles_dir(), self.chat_icons_dir()];
         let _ = tokio::task::spawn_blocking(move || {
             for f in files {
                 let p = Path::new(&f);
@@ -437,6 +445,7 @@ impl Hub {
             registered: registration.is_registered(),
             registration,
             unread,
+            profiles: self.engine.profiles_status().await,
         }
     }
 
@@ -446,7 +455,9 @@ impl Hub {
 
     /// A chat whose background has not been downloaded (or whose file went
     /// missing) gets another download attempt in the background; a
-    /// `ChatUpdated` follows when it lands.
+    /// `ChatUpdated` follows when it lands. The same goes for the group
+    /// photo, and participants' shared profiles older than a day (or never
+    /// fetched) are fetched again (`HandleProfileUpdated` when they land).
     pub async fn get_chat(self: &Arc<Self>, id: &str) -> OpResult<Chat> {
         let id = ChatId(id.to_string());
         let k = id.clone();
@@ -460,6 +471,7 @@ impl Hub {
                 self.spawn_background_fetch(chat.id.clone());
             }
         }
+        self.refresh_chat_extras(&chat).await;
         Ok(chat)
     }
 
@@ -664,6 +676,7 @@ impl Hub {
             last_message_at: Some(msg.sent_at),
             unread_count: 0,
             background: None,
+            icon_path: None,
         };
         let (stored, chat) = self
             .store()?
@@ -941,7 +954,9 @@ impl Hub {
 }
 
 mod import;
+mod profiles;
 pub use import::{MAX_IMPORT_MESSAGES, MAX_IMPORT_REACTIONS};
+pub use profiles::{CHAT_ICONS_DIR, PROFILE_FETCH_CONCURRENCY, PROFILE_MAX_AGE, PROFILES_DIR, image_ext};
 
 #[cfg(test)]
 mod tests {

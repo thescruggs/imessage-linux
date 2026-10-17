@@ -6,12 +6,12 @@ use imessage_common::model::{
     Reaction, ReactionKind, ReadReceipt, TypingEvent,
 };
 use rustpush::{
-    Attachment as RpAttachment, AttachmentType, ConversationData, IndexedMessagePart, Message as RpMessage, MessageInst,
+    Attachment as RpAttachment, AttachmentType, ConversationData, IndexedMessagePart, MMCSFile, Message as RpMessage, MessageInst,
     MessagePart as RpMessagePart, MessageParts, NormalMessage, ReactMessageType, Reaction as RpReaction,
-    SetTranscriptBackgroundMessage,
+    SetTranscriptBackgroundMessage, ShareProfileMessage, SharedPoster,
 };
 
-use super::{BackgroundRef, EngineEvent};
+use super::{BackgroundRef, EngineEvent, IconRef, PosterTags, ShareRef};
 
 fn is_mine(handle: &str, my_handles: &[String]) -> bool {
     let n = Handle::normalize(handle);
@@ -107,6 +107,7 @@ pub fn chat_for(conv: &ConversationData, sender: Option<&str>, my_handles: &[Str
         last_message_at,
         unread_count: 0,
         background: None,
+        icon_path: None,
     }
 }
 
@@ -256,6 +257,14 @@ pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted 
     let at = inst.sent_timestamp;
     let mut events = Vec::new();
 
+    // A contact's name and photo share rides along on messages and
+    // reactions; ours (from our other devices) is not interesting here.
+    let profile_from = (!sender_raw.is_empty() && !is_mine(sender_raw, my_handles)).then(|| sender.clone());
+    let shared = |p: Option<&ShareProfileMessage>| -> Option<EngineEvent> {
+        let handle = profile_from.clone()?;
+        Some(EngineEvent::ProfileShared { handle, share: p.and_then(share_ref), at })
+    };
+
     match &inst.message {
         RpMessage::Message(n) => {
             if let Some(conv) = &inst.conversation {
@@ -263,8 +272,28 @@ pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted 
                 let (message, attachments) = normal_to_message(inst, n, chat.id.clone(), my_handles);
                 events.push(EngineEvent::MessageReceived { message, chat, attachments });
             }
+            if let Some(p) = &n.embedded_profile {
+                events.extend(shared(Some(p)));
+            }
+        }
+        RpMessage::ShareProfile(p) => events.extend(shared(Some(p))),
+        // `profile: None` = the sender turned sharing off.
+        RpMessage::UpdateProfile(u) => events.extend(shared(u.profile.as_ref())),
+        RpMessage::IconChange(i) => {
+            if let Some(chat_id) = chat_id.filter(ChatId::is_group) {
+                match &i.file {
+                    None => events.push(EngineEvent::ChatIcon { chat_id, icon: None, by: sender, at }),
+                    Some(f) => match icon_ref(&id, f) {
+                        Some(icon) => events.push(EngineEvent::ChatIcon { chat_id, icon: Some(icon), by: sender, at }),
+                        None => log::debug!("ignoring unusable group photo reference in {}", inst.id),
+                    },
+                }
+            }
         }
         RpMessage::React(r) => {
+            if let Some(p) = &r.embedded_profile {
+                events.extend(shared(Some(p)));
+            }
             if let (Some(chat_id), ReactMessageType::React { reaction, enable }) = (chat_id, &r.reaction)
                 && let Some(kind) = reaction_kind(reaction)
             {
@@ -344,11 +373,60 @@ pub fn convert_incoming(inst: &MessageInst, my_handles: &[String]) -> Converted 
                 (None, _) => {}
             }
         }
-        // Everything else (profile sharing, SMS forwarding, recycle bin,
-        // icon changes, cache invalidation, ...) has no model equivalent yet.
+        // Everything else (our own devices' profile-sharing settings and
+        // recovery requests, SMS forwarding, recycle bin, cache
+        // invalidation, ...) has no model equivalent yet.
         other => log::debug!("ignoring inbound message type c={} ({})", other.get_c(), inst.id),
     }
     Converted { events }
+}
+
+/// A usable share reference, or `None` for an empty one (no record or no
+/// key: the sender stopped sharing).
+pub fn share_ref(p: &ShareProfileMessage) -> Option<ShareRef> {
+    if p.cloud_kit_record_key.trim().is_empty() || p.cloud_kit_decryption_record_key.is_empty() {
+        return None;
+    }
+    Some(ShareRef {
+        record_key: p.cloud_kit_record_key.clone(),
+        decryption_key: p.cloud_kit_decryption_record_key.clone(),
+        poster: p.poster.as_ref().map(|t| PosterTags {
+            low_res_wallpaper_tag: t.low_res_wallpaper_tag.clone(),
+            wallpaper_tag: t.wallpaper_tag.clone(),
+            message_tag: t.message_tag.clone(),
+        }),
+    })
+}
+
+/// [`ShareRef`] back to rustpush, for the fetch. The poster tags are left
+/// out on purpose: with them rustpush would also download the (large)
+/// contact poster, which we do not show.
+pub fn share_message(r: &ShareRef) -> ShareProfileMessage {
+    ShareProfileMessage { cloud_kit_decryption_record_key: r.decryption_key.clone(), cloud_kit_record_key: r.record_key.clone(), poster: None }
+}
+
+/// The poster tags as rustpush has them (only kept for completeness).
+pub fn poster_tags(t: &PosterTags) -> SharedPoster {
+    SharedPoster { low_res_wallpaper_tag: t.low_res_wallpaper_tag.clone(), wallpaper_tag: t.wallpaper_tag.clone(), message_tag: t.message_tag.clone() }
+}
+
+/// The download reference for a group photo, wrapped as an attachment like
+/// backgrounds; `None` if the MMCS reference cannot work (no object, not an
+/// https URL, no key).
+pub fn icon_ref(message_id: &MessageId, f: &MMCSFile) -> Option<IconRef> {
+    let url_ok = url::Url::parse(&f.url).is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty()));
+    if f.object.trim().is_empty() || !url_ok || f.key.is_empty() {
+        return None;
+    }
+    let att = RpAttachment {
+        a_type: AttachmentType::MMCS(f.clone()),
+        part: 0,
+        uti_type: String::new(),
+        mime: String::new(),
+        name: "GroupPhotoImage".into(),
+        iris: false,
+    };
+    Some(IconRef { icon_id: message_id.0.clone(), size: f.size as u64, locator: attachment_locator(&att) })
 }
 
 /// The download reference for a background `Set`; `None` for `Remove`.
@@ -860,5 +938,72 @@ mod tests {
         let rm = SetTranscriptBackgroundMessage::Remove { aid: 1, bid: 8, chat_id: None, remove: true };
         let ev = convert_incoming(&inst(BOB, Some(g), RpMessage::SetTranscriptBackground(rm)), &mine()).events;
         assert!(matches!(&ev[..], [EngineEvent::ChatBackground { background: None, .. }]));
+    }
+
+    fn share(key: &str) -> ShareProfileMessage {
+        ShareProfileMessage { cloud_kit_decryption_record_key: vec![7; 16], cloud_kit_record_key: key.into(), poster: None }
+    }
+
+    #[test]
+    fn shared_profiles() {
+        // embedded in a message: the message, then the share
+        let mut n = NormalMessage::new("hi".into(), MessageType::IMessage);
+        n.embedded_profile = Some(share("REC1"));
+        let ev = convert_incoming(&inst(BOB, Some(conv(&[BOB, ME], None, None)), RpMessage::Message(n.clone())), &mine()).events;
+        assert_eq!(ev.len(), 2);
+        let EngineEvent::ProfileShared { handle, share: Some(r), at } = &ev[1] else { panic!("{ev:?}") };
+        assert_eq!((handle, r.record_key.as_str(), r.decryption_key.len(), *at), (&Handle::new(BOB), "REC1", 16, 1_700_000_000_123));
+        assert!(!format!("{ev:?}").contains("REC1"), "record key not in Debug");
+        // ours (another of our devices): no share event
+        let ev = convert_incoming(&inst(ME, Some(conv(&[BOB, ME], None, None)), RpMessage::Message(n)), &mine()).events;
+        assert_eq!(ev.len(), 1);
+        // embedded in a reaction
+        let r = ReactMessage {
+            to_uuid: "cccccccc-0000-4000-8000-000000000000".into(),
+            to_part: Some(0),
+            reaction: ReactMessageType::React { reaction: RpReaction::Heart, enable: true },
+            to_text: String::new(),
+            embedded_profile: Some(share("REC2")),
+        };
+        let ev = convert_incoming(&inst(BOB, Some(conv(&[BOB, ME], None, None)), RpMessage::React(r)), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::ProfileShared { share: Some(s), .. }, EngineEvent::Reaction { .. }] if s.record_key == "REC2"));
+        // standalone share, update, and a stop
+        let ev = convert_incoming(&inst(BOB, None, RpMessage::ShareProfile(share("REC3"))), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::ProfileShared { share: Some(s), .. }] if s.record_key == "REC3"));
+        let up = |p| RpMessage::UpdateProfile(rustpush::UpdateProfileMessage { profile: p, share_contacts: false });
+        let ev = convert_incoming(&inst(BOB, None, up(Some(share("REC4")))), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::ProfileShared { share: Some(s), .. }] if s.record_key == "REC4"));
+        let ev = convert_incoming(&inst(BOB, None, up(None)), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::ProfileShared { share: None, .. }]));
+        // an empty share is a stop too
+        let ev = convert_incoming(&inst(BOB, None, RpMessage::ShareProfile(share(""))), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::ProfileShared { share: None, .. }]));
+        // round trip back to rustpush, without the poster
+        let mut p = share("REC5");
+        p.poster = Some(SharedPoster { low_res_wallpaper_tag: vec![1], wallpaper_tag: vec![2], message_tag: vec![3] });
+        let r = share_ref(&p).unwrap();
+        assert_eq!(r.poster.as_ref().map(|t| t.message_tag.clone()), Some(vec![3]));
+        let back = share_message(&r);
+        assert_eq!((back.cloud_kit_record_key.as_str(), back.poster.is_none()), ("REC5", true));
+    }
+
+    #[test]
+    fn group_icons() {
+        let g = conv(&[BOB, CAROL, ME], Some("g-icon"), None);
+        let file = MMCSFile { signature: vec![1], object: "obj".into(), url: "https://mmcs.example/i".into(), key: vec![9; 33], size: 4321 };
+        let set = |f: Option<MMCSFile>| RpMessage::IconChange(rustpush::IconChangeMessage { file: f, group_version: 1 });
+        let ev = convert_incoming(&inst(BOB, Some(g.clone()), set(Some(file.clone()))), &mine()).events;
+        let [EngineEvent::ChatIcon { chat_id, icon: Some(i), by, .. }] = &ev[..] else { panic!("{ev:?}") };
+        assert_eq!((chat_id, by), (&ChatId::group("g-icon"), &Handle::new(BOB)));
+        assert_eq!((i.icon_id.as_str(), i.size), ("1B2C3D4E-0000-4000-8000-000000000001", 4321));
+        assert!(!format!("{i:?}").contains("plist"), "locator redacted");
+        let AttachmentType::MMCS(m) = attachment_from_locator(&i.locator).unwrap().a_type else { panic!() };
+        assert_eq!(m.object, "obj");
+        let ev = convert_incoming(&inst(BOB, Some(g.clone()), set(None)), &mine()).events;
+        assert!(matches!(&ev[..], [EngineEvent::ChatIcon { icon: None, .. }]));
+        // unusable reference, or not a group: nothing
+        let bad = MMCSFile { url: "http://x/".into(), ..file.clone() };
+        assert!(convert_incoming(&inst(BOB, Some(g), set(Some(bad))), &mine()).events.is_empty());
+        assert!(convert_incoming(&inst(BOB, Some(conv(&[BOB, ME], None, None)), set(Some(file))), &mine()).events.is_empty());
     }
 }

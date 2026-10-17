@@ -133,7 +133,7 @@ fn incoming(id: &str, at: u64, text: &str) -> EngineEvent {
             effect: None,
             verified: true,
         },
-        chat: Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None },
+        chat: Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None },
         attachments: vec![],
     }
 }

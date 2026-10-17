@@ -5,7 +5,9 @@
 use std::fmt::Write as _;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
-use imessage_common::model::{Chat, ConnectionState, DeliveryState, Handle, Message, MessagePart, Reaction, ReactionKind};
+use imessage_common::model::{
+    Chat, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessagePart, ProfilesState, ProfilesStatus, Reaction, ReactionKind,
+};
 
 use crate::client::{Reachability, Status};
 
@@ -101,11 +103,48 @@ pub fn abs_time_secs(secs: u64) -> String {
 // Handles, chats
 // ---------------------------------------------------------------------------
 
-/// Short form of a handle: the display name if any, else the bare address.
+/// Short form of a handle: the display name if any, else the name the
+/// person shared with us, else the bare address.
 pub fn short_handle(h: &Handle) -> String {
     match &h.display {
         Some(d) if !d.trim().is_empty() => d.clone(),
-        _ => h.address().to_string(),
+        _ => h.profile.as_ref().and_then(HandleProfile::display_name).unwrap_or_else(|| h.address().to_string()),
+    }
+}
+
+/// `uri (Shared Name)` for a participant list.
+fn participant(h: &Handle) -> String {
+    match h.profile.as_ref().and_then(HandleProfile::display_name) {
+        Some(n) => format!("{} ({n})", h.uri),
+        None => h.uri.clone(),
+    }
+}
+
+/// `imsg profile`: what a contact shared (`None` = nothing).
+pub fn profile_details(handle: &str, p: Option<&HandleProfile>, st: Style) -> String {
+    let Some(p) = p else { return format!("{handle}: no shared name or photo\n") };
+    let rows: Vec<(&str, String)> = vec![
+        ("handle", handle.to_string()),
+        ("name", p.name.clone().unwrap_or_else(|| "-".into())),
+        ("first", p.first.clone().unwrap_or_else(|| "-".into())),
+        ("last", p.last.clone().unwrap_or_else(|| "-".into())),
+        ("photo", p.photo.clone().unwrap_or_else(|| "none".into())),
+        ("updated", if p.updated_at > 0 { abs_time_secs(p.updated_at / 1000) } else { "-".into() }),
+    ];
+    rows.iter().map(|(k, v)| format!("{}  {v}\n", st.bold(&pad(k, 7)))).collect()
+}
+
+/// The `profiles` status line (`ready`, `needs_login (…)`, …).
+pub fn profiles_text(p: &ProfilesStatus) -> String {
+    let name = match p.state {
+        ProfilesState::Ready => "ready",
+        ProfilesState::Pending => "not tried yet",
+        ProfilesState::NeedsLogin => "needs `imsg login`",
+        ProfilesState::Unavailable => "unavailable",
+    };
+    match &p.detail {
+        Some(d) => format!("{name} ({d})"),
+        None => name.to_string(),
     }
 }
 
@@ -183,7 +222,7 @@ pub fn chat_details(c: &Chat, st: Style, now: &DateTime<impl TimeZone<Offset: st
         ("id", c.id.0.clone()),
         ("name", chat_name(c)),
         ("group", if c.is_group { "yes".into() } else { "no".into() }),
-        ("participants", c.participants.iter().map(|h| h.uri.clone()).collect::<Vec<_>>().join(", ")),
+        ("participants", c.participants.iter().map(participant).collect::<Vec<_>>().join(", ")),
         ("last", c.last_message_at.map(|t| render_time(t, now)).unwrap_or_else(|| "-".into())),
         ("unread", c.unread_count.to_string()),
     ];
@@ -193,6 +232,14 @@ pub fn chat_details(c: &Chat, st: Style, now: &DateTime<impl TimeZone<Offset: st
             let by = b.set_by.as_ref().map(|h| format!(" by {}", short_handle(&Handle::new(h)))).unwrap_or_default();
             rows.push(("background", format!("{} (v{}){by}", b.id, b.version)));
             rows.push(("  file", b.path.clone().unwrap_or_else(|| "(not downloaded yet)".into())));
+        }
+    }
+    if let Some(p) = &c.icon_path {
+        rows.push(("group photo", p.clone()));
+    }
+    for h in &c.participants {
+        if let Some(photo) = h.profile.as_ref().and_then(|p| p.photo.as_ref()) {
+            rows.push(("photo", format!("{}: {photo}", h.address())));
         }
     }
     let mut out = String::new();
@@ -382,6 +429,10 @@ pub fn status_table(s: &Status, st: Style) -> String {
         rows.push(("renews at", abs_time_secs(t)));
     }
     rows.push(("unread", s.unread.map(|u| u.to_string()).unwrap_or_else(|| "? (store unavailable)".into())));
+    if let Some(p) = &s.profiles {
+        let t = profiles_text(p);
+        rows.push(("profiles", if p.state == ProfilesState::Ready { t } else { st.yellow(&t) }));
+    }
     if matches!(s.connection, ConnectionState::NeedsLogin) {
         rows.push(("hint", "run `imsg login`".into()));
     }
@@ -392,7 +443,7 @@ pub fn status_table(s: &Status, st: Style) -> String {
 pub fn lookup_table(rs: &[Reachability], st: Style) -> String {
     rs.iter()
         .map(|r| {
-            let h = Handle { uri: r.handle.clone(), display: None };
+            let h = Handle { uri: r.handle.clone(), display: None, profile: None };
             let mark = if r.reachable { st.green("iMessage") } else { st.yellow("not on iMessage") };
             format!("{}  {mark}\n", h.address())
         })
@@ -478,7 +529,7 @@ mod tests {
         m.is_from_me = true;
         m.verified = true;
         assert_eq!(sender(&m), "me");
-        let h = Handle { uri: "tel:+15551234567".into(), display: Some("Bob".into()) };
+        let h = Handle { uri: "tel:+15551234567".into(), display: Some("Bob".into()), profile: None };
         assert_eq!(short_handle(&h), "Bob");
         assert_eq!(short_handle(&Handle::new("+1 555 123 4567")), "+15551234567");
     }
@@ -517,6 +568,7 @@ mod tests {
             last_message_at: Some(ms(2026, 10, 14, 9, 5)),
             unread_count: 2,
             background: None,
+            icon_path: None,
         };
         assert_eq!(chat_name(&c), "bob@example.com, +15551234567");
         let named = Chat { display_name: Some("Team".into()), unread_count: 0, last_message_at: None, ..c.clone() };
@@ -528,6 +580,30 @@ mod tests {
         assert_eq!(lines[2], "group:G1  Team                           -");
         assert_eq!(chats_table(&[], Style::PLAIN, &now()), "no conversations\n");
         assert_eq!(truncate("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn shared_profiles_in_details() {
+        let mut bob = bob();
+        bob.profile = Some(HandleProfile { name: Some("Bobby".into()), photo: Some("/s/p/b.jpg".into()), updated_at: 1_700_000_000_000, ..Default::default() });
+        let c = Chat {
+            id: ChatId::group("G2"),
+            participants: vec![bob.clone(), Handle::new("+15551234567")],
+            display_name: None,
+            is_group: true,
+            last_message_at: None,
+            unread_count: 0,
+            background: None,
+            icon_path: Some("/s/i/g.jpg".into()),
+        };
+        assert_eq!(chat_name(&c), "Bobby, +15551234567");
+        let t = chat_details(&c, Style::PLAIN, &now());
+        assert!(t.contains("participants  mailto:bob@example.com (Bobby), tel:+15551234567"), "{t}");
+        assert!(t.contains("group photo   /s/i/g.jpg"), "{t}");
+        assert!(t.contains("photo         bob@example.com: /s/p/b.jpg"), "{t}");
+        let t = profile_details(&bob.uri, bob.profile.as_ref(), Style::PLAIN);
+        assert!(t.contains("name     Bobby") && t.contains("first    -") && t.contains("photo    /s/p/b.jpg"), "{t}");
+        assert_eq!(profile_details("tel:+1555", None, Style::PLAIN), "tel:+1555: no shared name or photo\n");
     }
 
     #[test]
@@ -545,8 +621,10 @@ mod tests {
             registered: false,
             registration: Default::default(),
             unread: Some(0),
+            profiles: Some(ProfilesStatus { state: ProfilesState::NeedsLogin, detail: Some("Apple wants a fresh sign-in for iCloud".into()) }),
         };
         let t = status_table(&s, Style::PLAIN);
+        assert!(t.contains("profiles    needs `imsg login` (Apple wants a fresh sign-in for iCloud)"), "{t}");
         assert!(t.contains("connection  needs_login"), "{t}");
         assert!(t.contains("hint        run `imsg login`"), "{t}");
         assert!(!t.contains("sends as"), "{t}");

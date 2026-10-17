@@ -182,6 +182,11 @@ impl Daemon1 {
         Ok(self.hub.download_attachment(attachment_id).await?)
     }
 
+    /// A contact's shared name and photo -> HandleProfile JSON, or `null`.
+    async fn get_handle_profile(&self, handle: &str) -> Result<String> {
+        Ok(to_json(&self.hub.get_handle_profile(handle).await?))
+    }
+
     /// Set a chat's background locally from a file (not sent to anyone).
     /// -> the updated Chat JSON.
     async fn import_chat_background(&self, chat_id: &str, path: &str) -> Result<String> {
@@ -239,6 +244,11 @@ impl Daemon1 {
     /// rejected, state save failed, engine events dropped -> resync).
     #[zbus(signal)]
     async fn background_error(emitter: &SignalEmitter<'_>, message: &str) -> zbus::Result<()>;
+
+    /// A contact's shared name / photo changed; `profile_json` is the
+    /// HandleProfile JSON or `null` (they stopped sharing).
+    #[zbus(signal)]
+    async fn handle_profile_updated(emitter: &SignalEmitter<'_>, handle: &str, profile_json: &str) -> zbus::Result<()>;
 }
 
 /// Emits [`DaemonSignal`]s on the bus.
@@ -263,6 +273,7 @@ impl Emitter {
             DaemonSignal::RegisteredChanged(_) => self.iface.get().await.registered_changed(e).await,
             DaemonSignal::TwoFactorRequired => Daemon1::two_factor_required(e).await,
             DaemonSignal::BackgroundError(m) => Daemon1::background_error(e, m).await,
+            DaemonSignal::HandleProfileUpdated { handle, profile } => Daemon1::handle_profile_updated(e, handle, &to_json(profile)).await,
         };
         if let Err(err) = r {
             log::debug!("D-Bus signal not sent: {err}");

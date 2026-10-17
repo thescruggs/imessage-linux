@@ -8,11 +8,14 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use imessage_common::model::{
-    Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, MessagePart, ReactionKind, ReadReceipt, RegistrationState,
+    Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, MessagePart, ProfilesState, ProfilesStatus, ReactionKind,
+    ReadReceipt, RegistrationState,
 };
 use tokio::sync::broadcast;
 
-use super::{ChatTarget, Engine, EngineError, EngineEvent, EngineResult, LoginOutcome, SentMessage, EVENT_CHANNEL_CAPACITY};
+use super::{
+    ChatTarget, Engine, EngineError, EngineEvent, EngineResult, FetchedProfile, LoginOutcome, SentMessage, ShareRef, EVENT_CHANNEL_CAPACITY,
+};
 
 /// Fixed send timestamp (ms) reported by the mock.
 pub const MOCK_SENT_AT: u64 = 1_700_000_000_000;
@@ -34,6 +37,8 @@ pub enum MockCall {
     LookupHandles(Vec<String>),
     /// The locator is secret (decryption key); only the destination is recorded.
     DownloadAttachment { dest: PathBuf },
+    /// The decryption key is secret; only the record is recorded.
+    FetchProfile { record_key: String },
     UpsertChat(ChatId),
     Shutdown,
 }
@@ -51,6 +56,8 @@ struct Inner {
     next_id: u64,
     next_group: u64,
     download_delay: std::time::Duration,
+    profiles: HashMap<String, FetchedProfile>,
+    profiles_status: ProfilesStatus,
 }
 
 pub struct MockEngine {
@@ -82,6 +89,8 @@ impl MockEngine {
                 next_id: 1,
                 next_group: 1,
                 download_delay: std::time::Duration::ZERO,
+                profiles: HashMap::new(),
+                profiles_status: ProfilesStatus { state: ProfilesState::Ready, detail: None },
             }),
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
         }
@@ -118,6 +127,16 @@ impl MockEngine {
     /// Make every `download_attachment` take this long (to test races).
     pub fn set_download_delay(&self, d: std::time::Duration) {
         self.lock().download_delay = d;
+    }
+    /// What [`Engine::fetch_profile`] returns for `record_key` (unknown
+    /// records fail with `Protocol`).
+    pub fn set_profile(&self, record_key: &str, profile: FetchedProfile) {
+        self.lock().profiles.insert(record_key.to_string(), profile);
+    }
+    /// `profiles_status`; anything but `Ready` makes `fetch_profile` fail
+    /// with `Unsupported`.
+    pub fn set_profiles_status(&self, s: ProfilesStatus) {
+        self.lock().profiles_status = s;
     }
     /// Make the next fallible call fail with `EngineError::Protocol(msg)`.
     pub fn fail_next(&self, msg: impl Into<String>) {
@@ -200,6 +219,7 @@ impl MockEngine {
                             last_message_at: None,
                             unread_count: 0,
                             background: None,
+                            icon_path: None,
                         };
                         g.chats.insert(id.clone(), chat);
                         Ok(id)
@@ -405,6 +425,23 @@ impl Engine for MockEngine {
         })
         .await
         .map_err(|e| EngineError::Protocol(e.to_string()))?
+    }
+
+    async fn fetch_profile(&self, share: &ShareRef) -> EngineResult<FetchedProfile> {
+        self.record(MockCall::FetchProfile { record_key: share.record_key.clone() })?;
+        let delay = self.lock().download_delay;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        let g = self.lock();
+        if g.profiles_status.state != ProfilesState::Ready {
+            return Err(EngineError::Unsupported("shared profiles are not available".into()));
+        }
+        g.profiles.get(&share.record_key).cloned().ok_or_else(|| EngineError::Protocol("no such profile record".into()))
+    }
+
+    async fn profiles_status(&self) -> ProfilesStatus {
+        self.lock().profiles_status.clone()
     }
 
     async fn upsert_chat(&self, chat: &Chat) {

@@ -26,11 +26,52 @@ use serde::{Deserialize, Serialize};
 /// lower-cased email, or `tel:` + the number with spaces/dashes/parentheses
 /// removed. `display` is an optional human name (contacts integration is a
 /// later phase; the daemon fills it with the bare address for now).
+/// `profile` is the name and photo the person shared with us (Apple's
+/// "Share Name and Photo"); the daemon fills it only for chat participants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Handle {
     pub uri: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<HandleProfile>,
+}
+
+/// A contact's self-shared name and photo (Messages "Share Name and
+/// Photo"), as the daemon fetched it from iCloud. Any field may be missing:
+/// people share a name without a photo, and a photo arrives after the name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub struct HandleProfile {
+    /// The display name the person chose (Apple's `dn`).
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub first: Option<String>,
+    #[serde(default)]
+    pub last: Option<String>,
+    /// Absolute path of the downloaded photo (JPEG, PNG or HEIC).
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// ms since epoch of the fetch that produced this.
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+impl HandleProfile {
+    /// The name to show: the display name, else "first last".
+    pub fn display_name(&self) -> Option<String> {
+        let dn = self.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        if let Some(n) = dn {
+            return Some(n.to_string());
+        }
+        let full = [self.first.as_deref(), self.last.as_deref()].into_iter().flatten().map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+        (!full.is_empty()).then_some(full)
+    }
+
+    /// Nothing to show (no name, no photo).
+    pub fn is_empty(&self) -> bool {
+        self.display_name().is_none() && self.photo.is_none()
+    }
 }
 
 impl Handle {
@@ -99,11 +140,11 @@ impl Handle {
 
     /// Validated constructor for user input.
     pub fn parse(raw: &str) -> Option<Handle> {
-        Handle::try_normalize(raw).map(|uri| Handle { uri, display: None })
+        Handle::try_normalize(raw).map(|uri| Handle { uri, display: None, profile: None })
     }
 
     pub fn new(raw: &str) -> Handle {
-        Handle { uri: Handle::normalize(raw), display: None }
+        Handle { uri: Handle::normalize(raw), display: None, profile: None }
     }
 
     pub fn is_email(&self) -> bool {
@@ -258,6 +299,10 @@ pub struct Chat {
     /// everyone in the chat), if one is set.
     #[serde(default)]
     pub background: Option<ChatBackground>,
+    /// Absolute path of the group's photo (Messages "Change Name and
+    /// Photo" on a group), once downloaded; `None` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<String>,
 }
 
 /// A chat's transcript background as the daemon has it.
@@ -476,6 +521,31 @@ pub enum ConnectionState {
     Error(String),
 }
 
+/// Whether the daemon can fetch contacts' shared names and photos (it
+/// needs iCloud / CloudKit access, which comes with the Apple ID login).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfilesState {
+    /// CloudKit access works.
+    Ready,
+    /// Not tried yet (or a try is running).
+    #[default]
+    Pending,
+    /// The saved session cannot get CloudKit access without the user
+    /// (Apple wants a fresh login / 2FA): run `imsg login` once.
+    NeedsLogin,
+    /// Not possible right now (no saved credentials, network or anisette
+    /// trouble); `detail` says why. Retried later where that makes sense.
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProfilesStatus {
+    pub state: ProfilesState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +621,20 @@ mod tests {
         let k = serde_json::to_string(&ReactionKind::Emoji("🔥".into())).unwrap();
         assert_eq!(serde_json::from_str::<ReactionKind>(&k).unwrap(), ReactionKind::Emoji("🔥".into()));
         assert_eq!(serde_json::to_string(&MessageId::new("ab")).unwrap(), r#""AB""#);
+        // no profile: the handle JSON is unchanged
+        assert_eq!(serde_json::to_string(&Handle::new("a@b.c")).unwrap(), r#"{"uri":"mailto:a@b.c"}"#);
+        let s = ProfilesStatus { state: ProfilesState::NeedsLogin, detail: None };
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"state":"needs_login"}"#);
+    }
+
+    #[test]
+    fn profile_display_name() {
+        let mut p = HandleProfile { first: Some("Ann".into()), last: Some("Lee".into()), ..Default::default() };
+        assert_eq!(p.display_name().as_deref(), Some("Ann Lee"));
+        p.name = Some("  Annie ".into());
+        assert_eq!(p.display_name().as_deref(), Some("Annie"));
+        assert!(!p.is_empty());
+        assert!(HandleProfile { name: Some(" ".into()), ..Default::default() }.is_empty());
     }
 
     #[test]

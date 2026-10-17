@@ -178,6 +178,11 @@ pub enum Command {
         #[arg(required = true)]
         handles: Vec<String>,
     },
+    /// Show the name and photo a contact shared with you ("Share Name and Photo").
+    Profile {
+        /// Email address or phone number.
+        handle: String,
+    },
     /// Search message text.
     Search {
         /// Text to search for (case-insensitive substring of message text and subject).

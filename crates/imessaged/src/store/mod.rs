@@ -43,6 +43,7 @@ const MIGRATIONS: &[(i64, &str)] =
         (1, include_str!("migrations/0001_init.sql")),
         (2, include_str!("migrations/0002_chat_backgrounds.sql")),
         (3, include_str!("migrations/0003_background_image.sql")),
+        (4, include_str!("migrations/0004_profiles_icons.sql")),
     ];
 
 /// Default / maximum page sizes for list calls.
@@ -773,6 +774,7 @@ impl Store {
             let mut paths = attachment_paths(tx, "SELECT a.local_path FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.chat_id = ?1", id.0.clone())?;
             paths.extend(attachment_paths(tx, "SELECT local_path FROM chat_backgrounds WHERE chat_id = ?1", id.0.clone())?);
             paths.extend(attachment_paths(tx, "SELECT image_path FROM chat_backgrounds WHERE chat_id = ?1", id.0.clone())?);
+            paths.extend(attachment_paths(tx, "SELECT icon_path FROM chats WHERE id = ?1", id.0.clone())?);
             tx.execute("DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?1)", params![id.0])?;
             tx.execute("DELETE FROM chats WHERE id = ?1", params![id.0])?;
             Ok(paths)
@@ -895,7 +897,13 @@ impl Store {
             EngineEvent::ChatBackground { chat_id, background, by, at } => {
                 out.extend(self.set_chat_background(chat_id, background.as_ref(), Some(by), *at)?);
             }
-            EngineEvent::Typing(_)
+            EngineEvent::ChatIcon { chat_id, icon, at, .. } => {
+                out.extend(self.set_chat_icon(chat_id, icon.as_ref(), *at)?);
+            }
+            // The hub records shares itself (Hub::on_profile_shared): the
+            // outcome decides about a fetch, which no StoreUpdate expresses.
+            EngineEvent::ProfileShared { .. }
+            | EngineEvent::Typing(_)
             | EngineEvent::ConnectionChanged(_)
             | EngineEvent::RegistrationChanged(_)
             | EngineEvent::TwoFactorRequired
@@ -1038,8 +1046,12 @@ fn get_chat_tx(tx: &Transaction<'_>, id: &ChatId) -> StoreResult<Option<Chat>> {
         let mut st = tx.prepare_cached(
             "SELECT p.handle, h.display FROM chat_participants p LEFT JOIN handles h ON h.uri = p.handle WHERE p.chat_id = ?1 ORDER BY p.position",
         )?;
-        st.query_map(params![id.0], |r| Ok(Handle { uri: r.get(0)?, display: r.get(1)? }))?.collect::<Result<Vec<_>, _>>()?
+        st.query_map(params![id.0], |r| Ok(Handle { uri: r.get(0)?, display: r.get(1)?, profile: None }))?.collect::<Result<Vec<_>, _>>()?
     };
+    let mut participants = participants;
+    for h in &mut participants {
+        h.profile = profiles::handle_profile_tx(tx, &h.uri)?;
+    }
     Ok(Some(Chat {
         id: id.clone(),
         participants,
@@ -1048,6 +1060,7 @@ fn get_chat_tx(tx: &Transaction<'_>, id: &ChatId) -> StoreResult<Option<Chat>> {
         last_message_at: last.map(|t| t as u64),
         unread_count: unread.clamp(0, u32::MAX as i64) as u32,
         background: chat_background_tx(tx, id)?,
+        icon_path: profiles::chat_icon_path_tx(tx, id)?,
     }))
 }
 
@@ -1106,7 +1119,7 @@ fn row_to_message(r: &Row<'_>) -> rusqlite::Result<(Message, String)> {
         Message {
             id: MessageId(r.get("id")?),
             chat_id: ChatId(r.get("chat_id")?),
-            sender: Handle { uri: r.get("sender")?, display: None },
+            sender: Handle { uri: r.get("sender")?, display: None, profile: None },
             sent_at: r.get::<_, i64>("sent_at")? as u64,
             text: r.get("text")?,
             parts: vec![],
@@ -1132,7 +1145,7 @@ fn load_message(tx: &Transaction<'_>, id: &MessageId) -> StoreResult<Option<Mess
     let reactions: Vec<(String, String)> = st.query_map(params![id.0], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
     for (kind, sender) in reactions {
         let kind: ReactionKind = serde_json::from_str(&kind).map_err(|e| StoreError::Corrupt(format!("reaction on {id}: {e}")))?;
-        m.reactions.push(Reaction { kind, sender: Handle { uri: sender, display: None }, added: true });
+        m.reactions.push(Reaction { kind, sender: Handle { uri: sender, display: None, profile: None }, added: true });
     }
     Ok(Some(m))
 }
@@ -1428,6 +1441,8 @@ impl StoreHandle {
 
 mod housekeeping;
 mod import;
+mod profiles;
+pub use profiles::{IconDownload, ShareOutcome};
 pub use housekeeping::{PurgeSummary, PurgedChat};
 pub use import::ImportOutcome;
 

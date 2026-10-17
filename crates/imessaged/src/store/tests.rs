@@ -25,6 +25,7 @@ fn direct_chat(other: &str) -> Chat {
         last_message_at: None,
         unread_count: 0,
         background: None,
+        icon_path: None,
     }
 }
 
@@ -197,7 +198,7 @@ fn every_event_type_is_persisted() {
         .unwrap();
     assert!(matches!(&up[0], StoreUpdate::ChatUpdated(c) if c.participants == vec![Handle::new(BOB), Handle::new(CAROL)]));
     // an old message carrying an old snapshot does not undo the rename / membership
-    let old_snapshot = Chat { id: g.clone(), participants: vec![Handle::new(BOB)], display_name: Some("Ancient".into()), is_group: true, last_message_at: Some(10), unread_count: 0, background: None };
+    let old_snapshot = Chat { id: g.clone(), participants: vec![Handle::new(BOB)], display_name: Some("Ancient".into()), is_group: true, last_message_at: Some(10), unread_count: 0, background: None, icon_path: None };
     s.apply_event(&received(msg("G0", &g, BOB, 10, "old"), old_snapshot)).unwrap();
     let gc = s.get_chat(&g).unwrap().unwrap();
     assert_eq!(gc.display_name.as_deref(), Some("Team"));
@@ -636,6 +637,7 @@ fn import_snapshot_does_not_clobber_live_participants() {
         last_message_at: Some(5_000),
         unread_count: 0,
         background: None,
+        icon_path: None,
     };
     s.upsert_chat(&live).unwrap();
     let names = |s: &Store| s.get_chat(&g).unwrap().unwrap().participants.into_iter().map(|h| h.uri).collect::<Vec<_>>();
@@ -684,6 +686,7 @@ fn group_chat(guid: &str, participants: &[&str], name: Option<&str>) -> Chat {
         last_message_at: None,
         unread_count: 0,
         background: None,
+        icon_path: None,
     }
 }
 
@@ -768,4 +771,96 @@ fn purge_invalid_chats() {
     assert!(json.get("paths").is_none());
     let again = s.purge_invalid_chats(false).unwrap();
     assert!(again.chats.is_empty() && again.handles == 0);
+}
+
+fn share(key: &str) -> crate::engine::ShareRef {
+    crate::engine::ShareRef { record_key: key.into(), decryption_key: b"SECRETKEY-123456".to_vec(), poster: None }
+}
+
+#[test]
+fn shared_profiles_record_fetch_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path());
+    s.upsert_chat(&direct_chat(BOB)).unwrap();
+    let bob = Handle::new(BOB);
+
+    assert_eq!(s.record_profile_share(&bob, Some(&share("R1")), 100).unwrap(), ShareOutcome::Changed);
+    // key sealed at rest, opens again
+    let raw: Vec<u8> = s.lock().conn.as_ref().unwrap().query_row("SELECT decryption_key FROM handle_profiles", [], |r| r.get(0)).unwrap();
+    assert!(!String::from_utf8_lossy(&raw).contains("SECRETKEY"));
+    assert_eq!(s.profile_share(BOB).unwrap().unwrap(), share("R1"));
+    // nothing to show yet
+    assert_eq!(s.handle_profile(BOB).unwrap(), None);
+    assert!(s.get_chat(&ChatId::direct(BOB)).unwrap().unwrap().participants[0].profile.is_none());
+    // the same record again, not fetched yet
+    assert_eq!(s.record_profile_share(&bob, Some(&share("R1")), 110).unwrap(), ShareOutcome::Unfetched);
+    assert_eq!(s.stale_profiles(&[BOB.to_string(), CAROL.to_string()], 0).unwrap(), vec![BOB.to_string()]);
+
+    // a fetch for an older record is refused
+    assert!(s.set_profile_fetched(BOB, "R0", ("Bob", "", ""), None, 5).unwrap().is_none());
+    let (p, replaced) = s.set_profile_fetched(BOB, "R1", ("Bobby", "Bob", "Smith"), Some("/p/R1.jpg"), 1_000).unwrap().unwrap();
+    let p = p.unwrap();
+    assert_eq!((p.name.as_deref(), p.first.as_deref(), p.last.as_deref(), p.photo.as_deref(), p.updated_at), (Some("Bobby"), Some("Bob"), Some("Smith"), Some("/p/R1.jpg"), 1_000));
+    assert!(replaced.is_empty());
+    let c = s.get_chat(&ChatId::direct(BOB)).unwrap().unwrap();
+    assert_eq!(c.participants[0].profile.as_ref(), Some(&p));
+    assert!(serde_json::to_string(&c).unwrap().contains(r#""profile":{"name":"Bobby""#));
+    assert_eq!(s.record_profile_share(&bob, Some(&share("R1")), 120).unwrap(), ShareOutcome::Nothing);
+    assert!(s.stale_profiles(&[BOB.to_string()], 500).unwrap().is_empty());
+    assert_eq!(s.stale_profiles(&[BOB.to_string()], 2_000).unwrap(), vec![BOB.to_string()], "older than a day");
+    assert_eq!(s.chats_with_participant(BOB).unwrap().len(), 1);
+
+    // a new record: the old name stays until the fetch, whose photo replaces the old one
+    assert_eq!(s.record_profile_share(&bob, Some(&share("R2")), 200).unwrap(), ShareOutcome::Changed);
+    assert_eq!(s.handle_profile(BOB).unwrap().unwrap().name.as_deref(), Some("Bobby"));
+    let (_, replaced) = s.set_profile_fetched(BOB, "R2", ("Bob S.", "", ""), Some("/p/R2.png"), 2_000).unwrap().unwrap();
+    assert_eq!(replaced, vec!["/p/R1.jpg".to_string()]);
+
+    // an older share does not win; a stop clears and hands back the photo
+    assert_eq!(s.record_profile_share(&bob, Some(&share("R1")), 150).unwrap(), ShareOutcome::Nothing);
+    assert_eq!(s.record_profile_share(&bob, None, 300).unwrap(), ShareOutcome::Cleared { files: vec!["/p/R2.png".into()], had_profile: true });
+    assert_eq!(s.handle_profile(BOB).unwrap(), None);
+    assert!(s.profile_share(BOB).unwrap().is_none());
+    // a late share from before the stop is ignored; a second stop has nothing to clear
+    assert_eq!(s.record_profile_share(&bob, Some(&share("R2")), 250).unwrap(), ShareOutcome::Nothing);
+    assert_eq!(s.record_profile_share(&bob, None, 310).unwrap(), ShareOutcome::Cleared { files: vec![], had_profile: false });
+    // a stop from someone who never shared leaves a tombstone
+    assert_eq!(s.record_profile_share(&Handle::new(CAROL), None, 50).unwrap(), ShareOutcome::Cleared { files: vec![], had_profile: false });
+    assert_eq!(s.record_profile_share(&Handle::new(CAROL), Some(&share("C1")), 40).unwrap(), ShareOutcome::Nothing);
+}
+
+#[test]
+fn group_icons_set_download_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path());
+    let g = ChatId::group("G-ICON");
+    let icon = |id: &str, size: u64| crate::engine::IconRef { icon_id: id.into(), size, locator: format!("SECRET-{id}") };
+    let ev = |i: Option<crate::engine::IconRef>, at| EngineEvent::ChatIcon { chat_id: g.clone(), icon: i, by: Handle::new(BOB), at };
+
+    let u = s.apply_event(&ev(Some(icon("I1", 10)), 100)).unwrap();
+    assert!(matches!(&u[..], [StoreUpdate::ChatUpdated(c)] if c.icon_path.is_none()));
+    assert!(s.apply_event(&ev(Some(icon("I1", 10)), 100)).unwrap().is_empty(), "redelivery");
+    let dl = s.chat_icon_locator(&g).unwrap().unwrap();
+    assert_eq!((dl.icon_id.as_str(), dl.locator.as_str(), dl.size), ("I1", "SECRET-I1", 10));
+    assert!(!format!("{dl:?}").contains("SECRET"));
+    assert!(s.set_icon_file(&g, "other", "/i/x").unwrap().is_none());
+    let c = s.set_icon_file(&g, "I1", "/i/I1.jpg").unwrap().unwrap();
+    assert_eq!(c.icon_path.as_deref(), Some("/i/I1.jpg"));
+    assert!(serde_json::to_string(&c).unwrap().contains(r#""icon_path":"/i/I1.jpg""#));
+    // too large / older: ignored
+    assert!(s.apply_event(&ev(Some(icon("BIG", crate::engine::MAX_ICON_BYTES + 1)), 200)).unwrap().is_empty());
+    assert!(s.apply_event(&ev(Some(icon("OLD", 10)), 50)).unwrap().is_empty());
+    // replaced: old file handed back
+    let u = s.apply_event(&ev(Some(icon("I2", 10)), 200)).unwrap();
+    assert!(matches!(&u[..], [StoreUpdate::ChatUpdated(c), StoreUpdate::FilesRemoved(f)] if c.icon_path.is_none() && f == &vec!["/i/I1.jpg".to_string()]));
+    s.set_icon_file(&g, "I2", "/i/I2.png").unwrap();
+    // removed
+    let u = s.apply_event(&ev(None, 300)).unwrap();
+    assert!(matches!(&u[..], [StoreUpdate::ChatUpdated(c), StoreUpdate::FilesRemoved(f)] if c.icon_path.is_none() && f == &vec!["/i/I2.png".to_string()]));
+    assert!(s.chat_icon_locator(&g).unwrap().is_none());
+    assert!(s.apply_event(&ev(None, 400)).unwrap().is_empty());
+    assert!(s.apply_event(&ev(Some(icon("I3", 10)), 350)).unwrap().is_empty(), "older than the removal");
+    // a group with only an icon is not "empty"
+    s.apply_event(&ev(Some(icon("I4", 10)), 500)).unwrap();
+    assert_eq!(s.delete_empty_groups().unwrap(), 0);
 }

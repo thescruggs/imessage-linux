@@ -228,9 +228,16 @@ async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
         EngineEvent::Error(e) => return hub.emit(DaemonSignal::BackgroundError(e.clone())).await,
         _ => {}
     }
+    if let EngineEvent::ProfileShared { handle, share, at } = ev {
+        return hub.on_profile_shared(handle, share, at).await;
+    }
     let Ok(store) = hub.store() else { return };
     let fetch_background = match &ev {
         EngineEvent::ChatBackground { chat_id, background: Some(_), .. } => Some(chat_id.clone()),
+        _ => None,
+    };
+    let fetch_icon = match &ev {
+        EngineEvent::ChatIcon { chat_id, icon: Some(_), .. } => Some(chat_id.clone()),
         _ => None,
     };
     match store.call(move |s| s.apply_event(&ev)).await {
@@ -238,9 +245,13 @@ async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
             // Only a background the store took (not a redelivery, an older
             // change or an oversized one) is worth a download.
             let fetch_background = fetch_background.filter(|_| !updates.is_empty());
+            let fetch_icon = fetch_icon.filter(|_| !updates.is_empty());
             hub.publish(updates).await;
             if let Some(chat_id) = fetch_background {
                 hub.spawn_background_fetch(chat_id);
+            }
+            if let Some(chat_id) = fetch_icon {
+                hub.spawn_icon_fetch(chat_id);
             }
         }
         Err(e) => {
@@ -280,6 +291,8 @@ fn event_name(ev: &EngineEvent) -> &'static str {
         EngineEvent::ChatRenamed { .. } => "chat_renamed",
         EngineEvent::ParticipantsChanged { .. } => "participants_changed",
         EngineEvent::ChatBackground { .. } => "chat_background",
+        EngineEvent::ProfileShared { .. } => "profile_shared",
+        EngineEvent::ChatIcon { .. } => "chat_icon",
         EngineEvent::ConnectionChanged(_) => "connection_changed",
         EngineEvent::RegistrationChanged(_) => "registration_changed",
         EngineEvent::TwoFactorRequired => "two_factor_required",

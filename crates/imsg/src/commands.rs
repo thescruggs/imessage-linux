@@ -131,6 +131,16 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             }
             Ok(exit::OK)
         }
+        Command::Profile { handle } => {
+            let h = imessage_common::model::Handle::parse(&handle).ok_or_else(|| CliError::usage(format!("{handle:?} is not an email address or phone number")))?;
+            let p = client.get_handle_profile(&h.uri).await?;
+            if ctx.json {
+                println!("{}", p.raw);
+            } else {
+                print!("{}", format::profile_details(&h.uri, p.value.as_ref(), ctx.style));
+            }
+            Ok(exit::OK)
+        }
         Command::Search { query, limit } => {
             let r = client.search(&query, limit).await?;
             if ctx.json {
@@ -459,6 +469,7 @@ async fn watch(client: &Client, ctx: &Ctx, chat: Option<&str>) -> anyhow::Result
     let mut conn = p.receive_connection_state_signal().await.map_err(client::map_zbus)?;
     let mut two_factor = p.receive_two_factor_required().await.map_err(client::map_zbus)?;
     let mut bg = p.receive_background_error().await.map_err(client::map_zbus)?;
+    let mut profiles = p.receive_handle_profile_updated().await.map_err(client::map_zbus)?;
     let state = client.connection_state().await?;
     let filter = match chat {
         Some(c) => Some(watch_filter(client, c).await?),
@@ -524,6 +535,21 @@ async fn watch(client: &Client, ctx: &Ctx, chat: Option<&str>) -> anyhow::Result
                 let a = s.args().map_err(client::map_zbus)?;
                 if ctx.json { Some(json_event("BackgroundError", &[("message", JsonField::Str(a.message.clone()))])) }
                 else { Some(format!("{} {}", st.red("daemon error:"), a.message)) }
+            }
+            Some(s) = profiles.next() => {
+                let a = s.args().map_err(client::map_zbus)?;
+                if filter.is_some() { None }
+                else if ctx.json {
+                    Some(json_event("HandleProfileUpdated", &[("handle", JsonField::Str(a.handle.clone())), ("profile", JsonField::Raw(a.profile_json.clone()))]))
+                } else {
+                    let p: Option<imessage_common::model::HandleProfile> = client::parse("profile", a.profile_json.clone())?.value;
+                    let h = imessage_common::model::Handle::new(&a.handle);
+                    Some(st.dim(&match p.as_ref().and_then(|p| p.display_name()) {
+                        Some(n) => format!("{} shares their name: {n}", h.address()),
+                        None if p.is_some() => format!("{} shares a photo", h.address()),
+                        None => format!("{} stopped sharing their name and photo", h.address()),
+                    }))
+                }
             }
             else => return Err(CliError::new(exit::NO_DAEMON, "signal streams ended (bus connection lost)").into()),
         };

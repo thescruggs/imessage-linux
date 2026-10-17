@@ -118,7 +118,7 @@ where
 }
 
 fn bob_chat(at: u64) -> Chat {
-    Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None }
+    Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None }
 }
 
 /// An incoming message from Bob, optionally with one attachment (part 1).
@@ -362,6 +362,44 @@ async fn chat_backgrounds() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!std::path::Path::new(&ipath).exists());
     assert!(!format!("{:?}", h.mock.calls()).contains("BG-KEY"));
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_profiles() {
+    use imessaged::engine::{FetchedProfile, ShareRef};
+    let Some(h) = Harness::logged_in().await else { return };
+    let p = &h.p;
+    let st: String = p.call("GetStatus", &()).await.unwrap();
+    assert_eq!(json(&st)["profiles"]["state"], "ready");
+    let mut profiles = p.receive_signal("HandleProfileUpdated").await.unwrap();
+    let mut received = p.receive_signal("MessageReceived").await.unwrap();
+    h.mock.inject(incoming("PR-1", 2_000_000_000_000, "hi", None));
+    next_signal(&mut received, |(_, m): &(String, String)| json(m)["id"] == "PR-1").await;
+    let none: String = p.call("GetHandleProfile", &(BOB,)).await.unwrap();
+    assert_eq!(none, "null");
+
+    h.mock.set_profile("REC", FetchedProfile { name: "Bobby".into(), first: "Bob".into(), last: String::new(), image: Some(b"\x89PNG\r\n\x1a\nxx".to_vec()) });
+    let share = ShareRef { record_key: "REC".into(), decryption_key: b"PROFILE-KEY".to_vec(), poster: None };
+    h.mock.inject(EngineEvent::ProfileShared { handle: Handle::new(BOB), share: Some(share), at: 2_000_000_000_001 });
+    let (who, pj): (String, String) = next_signal(&mut profiles, |_: &(String, String)| true).await;
+    assert_eq!(who, BOB);
+    let prof = json(&pj);
+    assert_eq!((prof["name"].as_str(), prof["first"].as_str(), prof["last"].as_str()), (Some("Bobby"), Some("Bob"), None));
+    let photo = prof["photo"].as_str().unwrap();
+    assert!(photo.starts_with(h.dir.path().join("profiles").to_str().unwrap()) && photo.ends_with(".png"), "{photo}");
+    let got: String = p.call("GetHandleProfile", &("bob@example.com",)).await.unwrap();
+    assert_eq!(json(&got), prof);
+    let chat: String = p.call("GetChat", &(BOB,)).await.unwrap();
+    assert_eq!(json(&chat)["participants"][0]["profile"], prof);
+    assert_eq!(json(&chat)["participants"][0]["uri"], BOB);
+    let e = p.call::<_, _, String>("GetHandleProfile", &("nobody",)).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.InvalidHandle");
+
+    h.mock.inject(EngineEvent::ProfileShared { handle: Handle::new(BOB), share: None, at: 2_000_000_000_002 });
+    let (_, pj): (String, String) = next_signal(&mut profiles, |_: &(String, String)| true).await;
+    assert_eq!(pj, "null");
+    assert!(!format!("{:?}", h.mock.calls()).contains("PROFILE-KEY"));
     h.shutdown().await;
 }
 

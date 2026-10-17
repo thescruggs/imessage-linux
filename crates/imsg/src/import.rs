@@ -368,6 +368,7 @@ fn chat_for(c: &ChatRec, me: &Me, dest: Option<&str>, our: Option<&str>) -> Chat
         last_message_at: None,
         unread_count: 0,
         background: None,
+        icon_path: None,
     }
 }
 
@@ -489,7 +490,7 @@ pub fn convert(records: Vec<Record>, stage: &Path, opts: &ConvertOptions) -> Con
         } else {
             m.handle.as_deref().filter(|h| !h.trim().is_empty()).map(peer_handle).or_else(|| (!chat.is_group).then(|| Handle::new(&chat.id.0)))
         }
-        .unwrap_or_else(|| Handle { uri: String::new(), display: None });
+        .unwrap_or_else(|| Handle { uri: String::new(), display: None, profile: None });
         if !Handle::is_valid_uri(&sender.uri) {
             out.stats.skipped_invalid += 1;
             continue;

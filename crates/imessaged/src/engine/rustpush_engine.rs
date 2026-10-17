@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use icloud_auth::{AppleAccount, LoginState, PersistAccountData, VerifyBody};
-use imessage_common::model::{Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, ReactionKind, RegistrationState};
+use imessage_common::model::{Chat, ChatId, ConnectionState, DeliveryState, Handle, MessageId, ProfilesStatus, ReactionKind, RegistrationState};
 use omnisette::remote_anisette_v3::RemoteAnisetteProviderV3;
 use omnisette::{AnisetteClient, ArcAnisetteClient};
 use rustpush::macos::MacOSConfig;
@@ -64,9 +64,11 @@ use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+mod profiles;
+
 use super::supervise::{self, Backoff};
 use super::{convert, SentMessage};
-use super::{ChatTarget, Engine, EngineError, EngineEvent, EngineResult, LoginOutcome, EVENT_CHANNEL_CAPACITY};
+use super::{ChatTarget, Engine, EngineError, EngineEvent, EngineResult, FetchedProfile, LoginOutcome, ShareRef, EVENT_CHANNEL_CAPACITY};
 use crate::config::DaemonConfig;
 use crate::keyring::StateKey;
 use crate::state::{SavedState, StateError, StateStore};
@@ -557,6 +559,10 @@ struct Inner {
     dedup: StdMutex<Dedup>,
     /// `true` once `shutdown()` started: stops supervisors and retry sleeps.
     shutdown: watch::Sender<bool>,
+    /// CloudKit client for shared profiles + its status (`profiles.rs`).
+    profiles: StdMutex<profiles::ProfilesSlot>,
+    /// Serializes building the CloudKit client.
+    profiles_init: Mutex<()>,
 }
 
 /// Cheap to clone; all clones share one engine.
@@ -668,6 +674,8 @@ impl RustpushEngine {
             silent_cycles: StdMutex::new((0, None)),
             dedup: StdMutex::new(Dedup::default()),
             shutdown: watch::channel(false).0,
+            profiles: StdMutex::new(profiles::ProfilesSlot::default()),
+            profiles_init: Mutex::new(()),
         });
         inner.update_status(|_| {});
 
@@ -686,6 +694,7 @@ impl RustpushEngine {
                 }
             });
             lock(&inner.tasks).push(t);
+            inner.spawn_profiles_warmup();
         }
         Ok(RustpushEngine { inner })
     }
@@ -778,6 +787,7 @@ impl Inner {
         };
         if !self.cfg.store_credentials {
             snap.account = None;
+            snap.cloudkit_tokens = None;
         }
         let store = self.store.clone();
         let written = self.written_seq.clone();
@@ -1171,7 +1181,17 @@ impl Inner {
             s.ids = Phase::Busy;
         });
         let result = async {
-            let delegates = login_apple_delegates(&account, None, config.as_ref(), &[LoginDelegate::IDS]).await.map_err(push_err)?;
+            // MobileMe (iCloud) next to IDS: its tokens let CloudKit fetch
+            // contacts' shared names and photos. Optional: if Apple refuses
+            // it, log in with IDS alone.
+            let delegates = match login_apple_delegates(&account, None, config.as_ref(), &[LoginDelegate::IDS, LoginDelegate::MobileMe]).await {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("iCloud (MobileMe) delegate refused ({}); shared names and photos will be unavailable", profiles::classify(&e).1);
+                    login_apple_delegates(&account, None, config.as_ref(), &[LoginDelegate::IDS]).await.map_err(push_err)?
+                }
+            };
+            self.reset_profiles(delegates.mobileme.as_ref().and_then(profiles::token_state_with));
             let ids = delegates.ids.ok_or_else(|| EngineError::Login("Apple returned no IDS delegate".into()))?;
             let user = authenticate_apple(ids, config.as_ref()).await.map_err(push_err)?;
 
@@ -1630,9 +1650,13 @@ impl Engine for RustpushEngine {
             if let Some(mut v) = s.account.take() {
                 scrub_plist(&mut v);
             }
+            if let Some(mut v) = s.cloudkit_tokens.take() {
+                scrub_plist(&mut v);
+            }
             s.registration = RegistrationState::default();
         }
         *lock(&inner.silent_cycles) = (0, None);
+        *lock(&inner.profiles) = profiles::ProfilesSlot::default();
         lock(&inner.chats).clear();
         inner.update_status(|s| {
             s.ids = Phase::Idle;
@@ -1782,6 +1806,14 @@ impl Engine for RustpushEngine {
         })
         .await
         .map_err(|e| EngineError::Protocol(e.to_string()))?
+    }
+
+    async fn fetch_profile(&self, share: &ShareRef) -> EngineResult<FetchedProfile> {
+        self.inner.fetch_profile(share).await
+    }
+
+    async fn profiles_status(&self) -> ProfilesStatus {
+        self.inner.profiles_status_now()
     }
 
     async fn upsert_chat(&self, chat: &Chat) {

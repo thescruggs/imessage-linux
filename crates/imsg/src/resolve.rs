@@ -185,6 +185,7 @@ mod tests {
             last_message_at: None,
             unread_count: 0,
             background: None,
+            icon_path: None,
         }
     }
 

@@ -11,7 +11,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use imessage_common::model::{
     Chat, ChatId, ConnectionState, DeliveryReceipt, DeliveryState, Handle, Message, MessageId, MessagePart,
-    ReactionKind, ReadReceipt, RegistrationState, TypingEvent,
+    ProfilesStatus, ReactionKind, ReadReceipt, RegistrationState, TypingEvent,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -36,6 +36,10 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 1 << 30;
 /// Largest transcript background we store or download (Apple's poster
 /// payloads are a few MB).
 pub const MAX_BACKGROUND_BYTES: u64 = 32 << 20;
+/// Largest group photo we download.
+pub const MAX_ICON_BYTES: u64 = 32 << 20;
+/// Largest shared contact photo we keep (Apple's are well under 1 MiB).
+pub const MAX_PROFILE_PHOTO_BYTES: u64 = 8 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -142,6 +146,69 @@ impl std::fmt::Debug for BackgroundRef {
     }
 }
 
+/// Where a contact's shared name and photo live: a CloudKit record in
+/// Apple's public `com.apple.messages.profiles` container and the key that
+/// decrypts it (rustpush `ShareProfileMessage`). The key is secret, so it
+/// is redacted from `Debug` and never logged.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRef {
+    pub record_key: String,
+    pub decryption_key: Vec<u8>,
+    /// The contact-poster tags when the share announces a poster (kept, not
+    /// fetched: we show the photo, not the poster).
+    pub poster: Option<PosterTags>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PosterTags {
+    pub low_res_wallpaper_tag: Vec<u8>,
+    pub wallpaper_tag: Vec<u8>,
+    pub message_tag: Vec<u8>,
+}
+
+impl std::fmt::Debug for ShareRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShareRef")
+            .field("record_key", &"<redacted>")
+            .field("decryption_key", &"<redacted>")
+            .field("poster", &self.poster.is_some())
+            .finish()
+    }
+}
+
+/// A shared profile as fetched from iCloud.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct FetchedProfile {
+    pub name: String,
+    pub first: String,
+    pub last: String,
+    /// The photo's bytes, if the person shares one.
+    pub image: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for FetchedProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Names are personal data: only say what is there.
+        f.debug_struct("FetchedProfile").field("image_bytes", &self.image.as_ref().map(Vec::len)).finish_non_exhaustive()
+    }
+}
+
+/// A group photo change as announced on the wire. `locator` is an
+/// attachment locator (contains the file key; redacted from `Debug`).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IconRef {
+    /// Our id for this change (the message id that carried it).
+    pub icon_id: String,
+    pub size: u64,
+    pub locator: String,
+}
+
+impl std::fmt::Debug for IconRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IconRef").field("icon_id", &self.icon_id).field("size", &self.size).field("locator", &"<redacted>").finish()
+    }
+}
+
 /// Everything the engine reports asynchronously.
 ///
 /// `at` fields are ms since epoch from the message that caused the event
@@ -190,6 +257,11 @@ pub enum EngineEvent {
     /// Someone (or another of our devices) set the chat's transcript
     /// background; `None` = removed.
     ChatBackground { chat_id: ChatId, background: Option<BackgroundRef>, by: Handle, at: u64 },
+    /// `handle` shared its name and photo with us (embedded in a message or
+    /// reaction, or a standalone share / update); `None` = it stopped.
+    ProfileShared { handle: Handle, share: Option<ShareRef>, at: u64 },
+    /// A group's photo changed; `None` = removed.
+    ChatIcon { chat_id: ChatId, icon: Option<IconRef>, by: Handle, at: u64 },
     ConnectionChanged(ConnectionState),
     RegistrationChanged(RegistrationState),
     TwoFactorRequired,
@@ -239,6 +311,14 @@ pub trait Engine: Send + Sync {
     /// [`EngineError::InvalidInput`] once more than `max_bytes` arrive (or
     /// are announced), never buffering more than that.
     async fn download_attachment(&self, locator: &str, dest: &Path, max_bytes: u64) -> EngineResult<()>;
+
+    /// Fetch a contact's shared name and photo from iCloud (CloudKit).
+    /// Fails with [`EngineError::Unsupported`] while CloudKit access is not
+    /// available (see [`Engine::profiles_status`]); never prompts the user.
+    async fn fetch_profile(&self, share: &ShareRef) -> EngineResult<FetchedProfile>;
+
+    /// Whether [`Engine::fetch_profile`] can work.
+    async fn profiles_status(&self) -> ProfilesStatus;
 
     /// Teach the engine about a chat (e.g. loaded from the store at startup)
     /// so `ChatTarget::Chat` can be resolved after a restart.

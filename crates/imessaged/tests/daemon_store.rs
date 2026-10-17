@@ -68,6 +68,7 @@ async fn events_reach_store_then_signals_and_groups_are_reseeded() {
         last_message_at: Some(10),
         unread_count: 0,
         background: None,
+        icon_path: None,
     };
 
     // first run: a group message arrives
@@ -135,7 +136,7 @@ async fn chat_not_found_reseeds_from_store() {
     let mock = Arc::new(MockEngine::new());
     let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), mock.clone()).with_store(store(dir.path())).start().await.unwrap();
     mock.login("me@example.com", "pw").await.unwrap();
-    let g = Chat { id: ChatId::group("BBBB-2"), participants: vec![Handle::new(BOB)], display_name: None, is_group: true, last_message_at: None, unread_count: 0, background: None };
+    let g = Chat { id: ChatId::group("BBBB-2"), participants: vec![Handle::new(BOB)], display_name: None, is_group: true, last_message_at: None, unread_count: 0, background: None, icon_path: None };
     let st = running.store().unwrap();
     let g2 = g.clone();
     st.call(move |s| s.upsert_chat(&g2)).await.unwrap();
@@ -158,7 +159,7 @@ async fn typing_is_cleared_by_a_message_from_the_same_sender() {
         .await
         .unwrap();
     let mut sig = running.signals();
-    let chat = Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None };
+    let chat = Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None, icon_path: None };
     mock.inject(EngineEvent::Typing(TypingEvent { chat_id: chat.id.clone(), sender: Handle::new(BOB), typing: true }));
     next_matching(&mut sig, |s| matches!(s, DaemonSignal::Typing { typing: true, .. })).await;
     assert_eq!(running.hub().typing_now().len(), 1);
@@ -179,7 +180,7 @@ async fn stranger_edit_unsend_and_read_are_ignored() {
     let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), mock.clone()).with_store(store(dir.path())).start().await.unwrap();
     mock.login("me@example.com", "pw").await.unwrap();
     let bob = ChatId::direct(BOB);
-    let chat = Chat { id: bob.clone(), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None };
+    let chat = Chat { id: bob.clone(), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None, icon_path: None };
     let mut sig = running.signals();
     let own = running.hub().send_text(ChatTarget::Chat(bob.clone()), "my words", None).await.unwrap().id;
     mock.inject(incoming("IN1", &chat, BOB, 2_000_000_000_000, "bob's words"));
@@ -254,7 +255,7 @@ async fn huge_background_is_not_fetched() {
     let mock = Arc::new(MockEngine::new());
     let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), mock.clone()).with_store(store(dir.path())).start().await.unwrap();
     mock.login("me@example.com", "pw").await.unwrap();
-    let chat = Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None };
+    let chat = Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None, icon_path: None };
     let mut sig = running.signals();
     mock.inject(incoming("H1", &chat, BOB, 2_000_000_000_000, "hi"));
     let huge = BackgroundRef { background_id: "HUGE".into(), payload_version: 1, seq: 1, size: 1 << 40, locator: "{\"v\":1,\"plist\":\"K\"}".into() };
@@ -278,7 +279,7 @@ async fn background_replaced_while_downloading_is_fetched() {
     let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), mock.clone()).with_store(store(dir.path())).start().await.unwrap();
     mock.login("me@example.com", "pw").await.unwrap();
     mock.set_download_delay(Duration::from_millis(300));
-    let chat = Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None };
+    let chat = Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: None, unread_count: 0, background: None, icon_path: None };
     let mut sig = running.signals();
     mock.inject(incoming("R1", &chat, BOB, 2_000_000_000_000, "hi"));
     let bg = |id: &str| BackgroundRef { background_id: id.into(), payload_version: 1, seq: 1, size: 10, locator: "{\"v\":1,\"plist\":\"K\"}".into() };

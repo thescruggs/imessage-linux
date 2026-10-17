@@ -171,6 +171,7 @@ pub trait Daemon1 {
     fn import_chat_background(&self, chat_id: &str, path: &str) -> zbus::Result<String>;
     fn import_messages(&self, batch_json: &str) -> zbus::Result<String>;
     fn purge_invalid_chats(&self, dry_run: bool) -> zbus::Result<String>;
+    fn get_handle_profile(&self, handle: &str) -> zbus::Result<String>;
     fn version(&self) -> zbus::Result<String>;
 
     #[zbus(property)]
@@ -194,6 +195,8 @@ pub trait Daemon1 {
     fn two_factor_required(&self) -> zbus::Result<()>;
     #[zbus(signal)]
     fn background_error(&self, message: String) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn handle_profile_updated(&self, handle: String, profile_json: String) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +211,9 @@ pub struct Status {
     pub registered: bool,
     pub registration: RegistrationState,
     pub unread: Option<u32>,
+    /// Older daemons do not report it.
+    #[serde(default)]
+    pub profiles: Option<imessage_common::model::ProfilesStatus>,
 }
 
 /// `ListMessages`.
@@ -367,6 +373,11 @@ impl Client {
                 return Ok(out);
             }
         }
+    }
+
+    /// A contact's shared name and photo (`None`: nothing shared).
+    pub async fn get_handle_profile(&self, handle: &str) -> Result<Json<Option<imessage_common::model::HandleProfile>>> {
+        parse("profile", self.proxy.get_handle_profile(handle).await.map_err(map_zbus)?)
     }
 
     /// `Ok(None)` for `NotFound`.

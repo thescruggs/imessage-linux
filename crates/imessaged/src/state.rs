@@ -60,6 +60,12 @@ pub struct SavedState {
     /// when IDS demands it (error 6005) unless Apple asks for 2FA again.
     #[serde(default)]
     pub account: Option<plist::Value>,
+    /// rustpush `TokenProviderState` as a plist value: the MobileMe delegate
+    /// tokens (`cloudKitToken`, `mmeAuthToken`, ...) CloudKit needs for
+    /// contacts' shared names and photos, and when they were fetched.
+    /// Dropped with `account` when `store_credentials = false`.
+    #[serde(default)]
+    pub cloudkit_tokens: Option<plist::Value>,
     /// keystore `SoftwareKeystoreState` as a plist value: the private keys
     /// for the APS and IDS certificates.
     #[serde(default)]

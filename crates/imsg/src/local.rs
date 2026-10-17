@@ -463,6 +463,18 @@ async fn daemon_checks(bus: &Bus) -> Vec<DoctorLine> {
                 line("registration", Level::Warn, "not registered (no iMessage handles)")
             };
             lines.push(reg);
+            if let Some(p) = &s.profiles {
+                use imessage_common::model::ProfilesState as P;
+                let level = match p.state {
+                    P::Ready => Level::Ok,
+                    P::Pending | P::NeedsLogin | P::Unavailable => Level::Warn,
+                };
+                let mut d = format!("shared names and photos: {}", format::profiles_text(p));
+                if p.state == P::NeedsLogin {
+                    d.push_str("; run `imsg login` once (password, and a 2FA code if Apple asks) to enable them");
+                }
+                lines.push(line("profiles", level, d));
+            }
         }
         Err(e) => lines.push(line("connection", Level::Fail, e.message)),
     }

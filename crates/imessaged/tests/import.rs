@@ -50,6 +50,7 @@ fn chat(id: &ChatId, participants: &[&str], name: Option<&str>) -> Chat {
         last_message_at: None,
         unread_count: 0,
         background: None,
+        icon_path: None,
     }
 }
 
@@ -280,10 +281,10 @@ async fn invalid_ids_and_handles_reject_the_batch() {
     reject(one(vec![chat(&raw, &[], None)], msg("V-1", &short, "tel:46339", 1, "x", false)), "46339(smsft)").await;
     reject(one(vec![], msg("V-2", &raw, "tel:46339", 1, "x", false)), "46339(smsft)").await;
     let mut tagged = chat(&short, &[], None);
-    tagged.participants = vec![Handle { uri: "+12125550199(smsfp)".into(), display: None }];
+    tagged.participants = vec![Handle { uri: "+12125550199(smsfp)".into(), display: None, profile: None }];
     reject(one(vec![tagged], msg("V-3", &short, "tel:46339", 1, "x", false)), "+12125550199(smsfp)").await;
     let mut m = msg("V-4", &short, "tel:46339", 1, "x", false);
-    m.sender = Handle { uri: "urn:biz:1234".into(), display: None };
+    m.sender = Handle { uri: "urn:biz:1234".into(), display: None, profile: None };
     reject(one(vec![], m), "urn:biz:1234").await;
     let mut b = one(vec![], msg("V-5", &short, "tel:46339", 1, "x", false));
     b.reactions.push(ImportReaction { message_id: MessageId::new("V-5"), reaction: Reaction { kind: ReactionKind::Like, sender: Handle::new("mom"), added: true }, at: 2 });
