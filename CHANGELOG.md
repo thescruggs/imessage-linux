@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.1.11 (2026-10-17)
+
+* **APNs liveness watchdog.** Rustpush acknowledges every push
+  notification on its own, so a message the receive loop never handles
+  is lost for good. Each inbound message now has a 120 s handling
+  budget (a stuck one is logged and skipped), and a watchdog forces an
+  APNs reconnect when the daemon is connected but has seen no traffic
+  for three keep-alive intervals. `receive loop running`, `APNs pong`
+  and `APNs notification` lines at debug make the loop visible.
+  `IMESSAGED_PROFILES_FORCE_REFRESH=1` re-fetches the iCloud tokens
+  on the next start (debugging aid).
+* `imsg import-mac HOST --backgrounds [--chat X]... [--create]` pulls
+  chat transcript backgrounds from a Mac's Messages cache into the
+  daemon (local only; the Mac's decryption keys are never read). Chats
+  the daemon does not have are skipped unless `--create` is given.
 
 * **Shared names and photos** (Messages "Share Name and Photo"): when a
   contact shares theirs, the daemon fetches the name and photo from

@@ -30,6 +30,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.11" date="2026-10-17">
+      <description>
+        <p>Shared names and photos from iCloud, group photos, chat backgrounds pulled from a Mac, and an APNs liveness watchdog.</p>
+      </description>
+    </release>
     <release version="0.1.10" date="2026-10-17">
       <description>
         <p>First public release: live iMessage on Linux with a Mac-native anisette helper, contact names and photos, chat backgrounds (receive-only) and a one-time history import from the Mac.</p>
