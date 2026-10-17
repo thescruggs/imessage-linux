@@ -46,6 +46,7 @@ mode 0700.
 | `keystore` | `keystore::software::SoftwareKeystoreState` as plist | private keys referenced by alias from `push` and `users` (rustpush keeps them in a process-global keystore that we initialise and persist) |
 | `cloudkit_tokens` | `TokenProviderState` as plist | the MobileMe (iCloud) delegate: `cloudKitToken`, `mmeAuthToken`, … and when they were fetched. CloudKit needs them for contacts' shared names and photos. Auth tokens, not password-equivalent, but sealed like the rest. Omitted with `store_credentials = false` (and removed at logout). |
 | `registration` | `model::RegistrationState` | summary for clients |
+| `sms` | `model::SmsForwarding` | Text Message Forwarding: `off` / `requested` / `active` / `error`, the relay number, when it changed (see [Text Message Forwarding](#text-message-forwarding-sms-relayed-by-the-iphone)); reset at logout |
 
 Saved after login, after registration, whenever rustpush reports new state
 (the `IMClient` keys-updated callback, keystore writes, every APNs
@@ -82,7 +83,7 @@ database with a version newer than the binary knows is refused.
 | `handles` | `uri` (PK), `display` |
 | `chats` | `id` (PK, model `ChatId`), `display_name`, `is_group`, `last_message_at`, `unread_count` (denormalized, recomputed on every change), `name_at` / `participants_at` (timestamp of the rename / membership change that set the current value) |
 | `chat_participants` | `(chat_id, handle)` PK, `position`; everyone except us |
-| `messages` | `seq` (autoincrement, cursor tie-break), `id` (unique GUID), `chat_id`, `sender`, `sent_at`, `text`, `parts` (JSON array of `MessagePart`), `subject`, `reply_to`, `is_from_me`, `delivery`, `error`, `edited`, `edited_at`, `unsent`, `verified`, `effect`, `is_read` |
+| `messages` | `seq` (autoincrement, cursor tie-break), `id` (unique GUID), `chat_id`, `sender`, `sent_at`, `text`, `parts` (JSON array of `MessagePart`), `subject`, `reply_to`, `is_from_me`, `delivery`, `error`, `edited`, `edited_at`, `unsent`, `verified`, `effect`, `is_read`, `service` (schema 5: `imessage` / `sms`, default `imessage`) |
 | `attachments` | `id` (PK `<msg>:<part>`), `message_id` (FK, cascade), `mime`, `filename`, `size`, `local_path`, `locator` (sealed BLOB) |
 | `reactions` | `(message_id, sender)` PK, `kind` (JSON `ReactionKind`), `added`, `at`; one per sender, removals kept as tombstones; no FK (may precede the message) |
 | `handle_profiles` (schema 4) | `handle` (PK), `record_key` (CloudKit record; `NULL` = not shared / stopped), `decryption_key` (sealed BLOB), `poster` (sealed contact-poster tags, kept but not fetched), `name` / `first` / `last`, `photo_path`, `shared_at` (`at` of the newest share or stop), `fetched_at` / `fetched_key` (last successful fetch and of which record), `last_seen_at` |
@@ -103,6 +104,7 @@ How each `EngineEvent` lands:
 | `ProfileShared` | handled by the hub (`hub/profiles.rs`), not `apply_event`: `handle_profiles` row; a share older than `shared_at` is ignored; a new or different record is fetched in the background, the same record only if it was never fetched (and no fetch failed in the last hour); a stop (`share: None`) clears name / photo / key (the row stays as a tombstone so a late older share cannot bring it back) and deletes the photo | `HandleProfileUpdated` + `ChatUpdated` per chat with that participant (after the fetch, or at once for a stop) |
 | `ChatIcon` | `chats.icon_*`; older than `icon_at` ignored, a redelivery of the same id a no-op, more than 32 MiB (`MAX_ICON_BYTES`) ignored, the replaced / removed file deleted. A new one is downloaded at once by the hub (`Hub::spawn_icon_fetch`, the capped attachment download); a failed download is retried on `GetChat` | `ChatUpdated` (stored), `ChatUpdated` (downloaded, `icon_path` set) |
 | `Typing` | in memory; cleared after 60 s or by a message from that sender | `Typing` |
+| `SmsForwardingChanged` | not stored (the engine keeps it in `state.enc`) | `SmsForwardingChanged` |
 | `ConnectionChanged` / `RegistrationChanged` / `TwoFactorRequired` / `Error` | not stored | `ConnectionStateChanged` + `PropertiesChanged` / `Registered` / `TwoFactorRequired` / `BackgroundError` |
 
 Unread = incoming, not unsent, not marked read. `ListMessages` pages are
@@ -256,6 +258,7 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `anisette_command` | `--anisette-command` / `IMESSAGED_ANISETTE_COMMAND` | unset (use `anisette_url`); see [Anisette source](#anisette-source) |
 | `sender_handle` | `--sender-handle` / `IMESSAGED_SENDER_HANDLE` | unset = the first registered email handle |
 | `other_handles` | `--other-handle` (repeatable) / `IMESSAGED_OTHER_HANDLES` (comma-separated) | `[]` |
+| `sms_relay_number` | `--sms-relay-number` / `IMESSAGED_SMS_RELAY_NUMBER` | unset = the first phone number in `other_handles`; the iPhone number text messages are relayed through (must be a phone number) |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
 
@@ -400,9 +403,12 @@ On restart with saved users the daemon skips 1–6 and goes straight to
   reaction's `embedded_profile`, `ShareProfile` c=131, `UpdateProfile`
   c=180 → `ProfileShared`; only from others, never logged) and group
   photos (`IconChange` c=190 → `ChatIcon`, groups only, a reference
-  without object / https URL / key dropped). Everything else
-  (`UpdateProfileSharing` and `RecoverProfile`, which our own devices
-  exchange about *our* sharing settings, SMS relay, recycle bin, …) is
+  without object / https URL / key dropped), text messages relayed by
+  the iPhone (`MessageType::SMS`, see [Text Message
+  Forwarding](#text-message-forwarding-sms-relayed-by-the-iphone)) and
+  the iPhone's send confirmations (`SmsConfirmSent` → `MessageSent`).
+  Everything else (`UpdateProfileSharing` and `RecoverProfile`, which our
+  own devices exchange about *our* sharing settings, recycle bin, …) is
   dropped, with its `c` value logged at debug.
 
 Chat ids: 1:1 = other party's URI (`mailto:bob@x.com`); group =
@@ -648,6 +654,100 @@ rustpush wraps both the APNs connection and the IDS identity in a
   `refresh_option` silently does nothing (returns `Ok`) if the identity was
   regenerated less than 15 s ago (`MAX_RESOURCE_REGEN`).
 
+## Text Message Forwarding (SMS relayed by the iPhone)
+
+`engine/rustpush_engine/sms.rs`. iPhones relay SMS / MMS / RCS to the
+account's other devices ("Text Message Forwarding"); rustpush speaks the
+protocol on the `com.apple.private.alloy.sms` topic.
+
+**Registration.** Nothing extra: `com.apple.private.alloy.sms` is a
+sub-service of `com.apple.madrid` in rustpush's `MADRID_SERVICE`, so the
+iMessage registration (`register(.., &[&MADRID_SERVICE], ..)`) already
+lists this device for it, `IMClient` already subscribes to the topic and
+sends `is_sms()` messages on it. The iPhone lists every device of the
+Apple ID registered for that sub-service under Settings > Messages > Text
+Message Forwarding (ours shows with the hwconfig's Mac model name).
+
+**Relay number.** `sms_relay_number`, else the first `tel:` entry of
+`other_handles`. It identifies the iPhone: of the account's devices
+(`IdentityManager::get_sms_targets(our handle)`, the IDS dependent
+registrations) the one whose identities include the number. Every
+activation message and text goes to that device's push token only
+(`MessageInst.target`). The number also counts as one of our handles.
+
+**Activation** (`EnableSmsForwarding(true)`, `imsg sms enable`):
+
+1. We send `Message::EnableSmsActivation(true)` (`c = 145`, payload
+   `{wc: false, ar: true}`, no reply expected) from our registered
+   handle, conversation without participants, targeted at the iPhone.
+   State `requested` (kept as `active` if it already is). If no device
+   carries the number: `Unsupported` and state `error`.
+2. The user turns this device on under Settings > Messages > Text Message
+   Forwarding on the iPhone.
+3. The iPhone sends this device its own `145` (`EnableSmsActivation(true)`)
+   from one of our handles; rustpush answers it with
+   `MessageReadOnDevice` (`c = 147`) by itself, from the handle it came to.
+   When that is the phone number (not registered here, so rustpush's
+   answer cannot go out) we send the `147` from our own handle, targeted at
+   the iPhone. State `active`. The first relayed text also makes it
+   `active` (the confirmation may have been missed).
+4. Turned off on the iPhone: a `145` with `{ue: true}`
+   (`EnableSmsActivation(false)`) → `off`. `EnableSmsForwarding(false)`
+   sends the same to the iPhone and goes `off` (locally even when the
+   iPhone cannot be reached).
+
+Every change is persisted in `state.enc` (`sms`), reported as
+`GetStatus.sms` and announced with the `SmsForwardingChanged` signal.
+
+**Receiving.** A relayed text is a `NormalMessage` with
+`MessageType::SMS { is_phone: false, using_number: <our number>,
+from_handle }` whose IDS sender is our iPhone:
+
+* `from_handle: Some(h)` (incoming, `RawSmsIncomingMessage`): the row's
+  sender is `h`, `is_from_me` only if `h` is ours, delivery `delivered`.
+* `from_handle: None` (`RawSmsOutgoingMessage`: a text sent from the
+  iPhone itself, or ours echoed): `is_from_me`, sender = `using_number`.
+* `service: "sms"`; chat = the other numbers (our handles and the relay
+  number left out): one → the 1:1 chat with that number, the same chat an
+  iMessage conversation with the number uses (as the Mac import does);
+  several (group MMS, which has no group id) → `group-p:` + the sorted
+  numbers. Text conversations are not added to the engine's conversation
+  cache, so they never change how an iMessage reply to the same number is
+  addressed.
+* MMS attachments arrive as ordinary attachment parts (rustpush fetches the
+  MMS body from MMCS and parses it; the parts are inline data) and go
+  through the normal attachment path.
+* rustpush sets no delivered receipt for texts (`should_send_delivered`
+  is iMessage-only) and the IDS sender is ours, so none is sent; a
+  certified-delivery ack goes out on the sms topic.
+
+**Sending** (`Engine::send_text_via` / `send_attachment_via` with
+`Service::Sms`): recipients must be phone numbers other than ours (from
+`ChatTarget::Participants`, a 1:1 `tel:` chat id, a `group-p:` id, or a
+known group's participants). The message is a `NormalMessage` with
+`MessageType::SMS { is_phone: false, using_number: <relay number>,
+from_handle: None }` (rustpush: `RawSmsOutgoingMessage`, `c` 143 / 144
+with attachments), conversation = recipients + our handle, sender = our
+registered handle, targeted at the iPhone. Requires forwarding `active`
+or `requested`. The `SentMessage` / stored row has `service: "sms"` and
+sender = the relay number. The iPhone sends the text and answers
+`SmsConfirmSent` (`c = 146` ok / `149` failed, same message id) →
+`MessageSent { sent | failed, "your iPhone could not send the text
+message" }`. Texts carry no reply reference.
+
+**Choosing the service** (`Hub::choose_service`, used by `SendText`,
+`SendFile` and `SendTextAs` / `SendFileAs` with service `""` / `"auto"`):
+SMS when forwarding is `active` and the target is phone numbers only (a
+1:1 `tel:` chat, a `group-p:` chat or a participant list; never a
+`group:<GUID>` iMessage group) of which at least one is not on iMessage
+(IDS lookup via `LookupHandles`, cached 6 h for "on iMessage" and 30 min
+for "not"; `LookupHandles` calls refresh the cache). Any lookup failure →
+iMessage. An explicit `"imessage"` / `"sms"` always wins.
+
+**Limits of text messages:** `React`, `Edit`, `Unsend` on an SMS row and
+`SetTyping` in a chat whose newest message is SMS fail with `Unsupported`;
+`MarkRead` marks locally but sends no read receipt for a text.
+
 ## Engine trait (for Phase 2b)
 
 `crates/imessaged/src/engine/mod.rs`:
@@ -664,6 +764,11 @@ pub trait Engine: Send + Sync {
     async fn handles(&self) -> Vec<Handle>;
     async fn send_text(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>) -> EngineResult<SentMessage>;
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage>;
+    // Text messages (default impls: iMessage → the above, Sms → Unsupported)
+    async fn send_text_via(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, service: Service) -> EngineResult<SentMessage>;
+    async fn send_attachment_via(&self, chat: &ChatTarget, path: &Path, mime: &str, service: Service) -> EngineResult<SentMessage>;
+    async fn sms_forwarding(&self) -> SmsForwarding;
+    async fn set_sms_forwarding(&self, enable: bool) -> EngineResult<SmsForwarding>;
     async fn react(&self, chat: &ChatTarget, message_id: &MessageId, kind: ReactionKind, remove: bool) -> EngineResult<SentMessage>;
     async fn edit(&self, chat: &ChatTarget, message_id: &MessageId, new_text: &str) -> EngineResult<SentMessage>;
     async fn unsend(&self, chat: &ChatTarget, message_id: &MessageId) -> EngineResult<SentMessage>;
@@ -685,8 +790,9 @@ pub trait Engine: Send + Sync {
   `ChatTarget::Chat` resolves. Unknown 1:1 ids resolve by themselves.
   Handles that are neither an email nor a phone number (`""`, `"bob"`)
   fail with `EngineError::InvalidHandle` (`model::Handle::try_normalize`).
-* Send-type calls return `SentMessage { id, chat_id, sent_at, sender }`
-  (`sender` = the handle the engine actually sent from). For
+* Send-type calls return `SentMessage { id, chat_id, sent_at, sender, service }`
+  (`sender` = the handle the engine actually sent from; for a text, the
+  relay number). For
   `Participants` naming a new group the engine mints the `group:<GUID>`
   id; this is the only place the caller learns it synchronously.
 * `MessageSent`, `Reaction`, `Edited`, `Unsent`, `ChatRenamed` and
@@ -721,7 +827,8 @@ pub trait Engine: Send + Sync {
   (without passwords/codes/locators/profile keys), `inject(event)`,
   `set_profile(record, FetchedProfile)`, `set_profiles_status`,
   `set_require_two_factor`, `set_reachable`, `fail_next`,
-  `set_connection_state`. Same chat-id scheme as the real engine: new
+  `set_connection_state`, `set_sms` / `activate_sms` (SMS sends are
+  recorded as `MockCall::SendSms` and need `active`). Same chat-id scheme as the real engine: new
   participant sets get a deterministic `group:00000000-0000-4000-9000-<n>`
   reused for the same set. See `crates/imessaged/tests/mock_engine.rs`.
 * `logout()` forgets the account locally (users, identity, saved
@@ -746,7 +853,9 @@ pub trait Engine: Send + Sync {
 * One tapback per sender per message (Apple's classic model).
 * `Search` is `LIKE`-based (ASCII case folding only); no FTS index yet.
 * `Logout` is local only (no IDS deregistration).
-* Stickers, app balloons, FaceTime, SMS relay: ignored. Shared names and
+* Stickers, app balloons, FaceTime: ignored. Text Message Forwarding is
+  implemented but group MMS addressing and RCS specifics are untested
+  against a real iPhone. Shared names and
   photos are received only; our own are not published.
 * Only one `RustpushEngine` per process (rustpush's keystore is global).
 * Nothing here has talked to Apple yet; first live run is Phase 5.

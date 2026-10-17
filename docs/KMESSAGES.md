@@ -116,10 +116,15 @@ generated photo, or stops: `HandleProfileUpdated` + `ChatUpdated`, and
 `GetHandleProfile` answers it), `SetGroupIcon`, `SetUnreadablePrefixes` (SendFile fails like the
 sandboxed daemon, "os error 2"), `SetSendFileDelay` (MessageReceived now,
 the reply later), `SetOtherHandles` (`registration.other_handles`),
-`FailDownloadsWithNoReply`, `Calls`,
+`FailDownloadsWithNoReply`, `SetSms` (Text Message Forwarding state,
+`SmsForwardingChanged`), `AddSmsChat` (a 1:1 text-message chat with a
+number that is not on iMessage), `Calls`,
 `ClearCalls`). Login: password `wrong`
 fails, an Apple ID containing `2fa` asks for a code, code `000000` is wrong.
-Addresses containing `android` are unreachable.
+Addresses containing `android` (and `AddSmsChat` numbers) are unreachable.
+Text messages: `EnableSmsForwarding` → `requested`; with `active`,
+`SendText` to an unreachable `tel:` chat stores `service: "sms"`;
+`SendTextAs` takes the service explicitly.
 
 CTest runs every test under `dbus-run-session --config-file=tests/session.conf`
 (private bus, no activation directories) with `QT_QPA_PLATFORM=offscreen`,
@@ -133,17 +138,32 @@ fails; `FakeControl.SetStatusDelay` delays `GetStatus` replies;
 
 | Test | Covers |
 |---|---|
-| `tst_json` (37 cases incl. data rows) | every payload in DBUS.md (fixtures in `tests/data/`), participants' `profile`, `icon_path`, `profiles` status, `HandleProfile` / `null`, malformed input, handle normalization (mirrors the Rust tests), helpers |
-| `tst_models` (31 incl. init) | shared names and photos (`HandleProfileUpdated` → chat list, group participants, transcript senders and avatars; stop sharing) and group photos as avatars; status/state changes (also via `PropertiesChanged` only), chat list order/names/unread/snippets/filter, paging with cursors, grouping/separators/delivery labels, live `MessageReceived`, reactions (injected + own toggle; toggle waits for the first `GetStatus`), typing set/clear, send/reply/edit/unsend + delivery updates, failed send/edit reported, sending to new recipients and groups, attachment download, handle lookup, MarkRead, search, daemon restart → resync, resync without snippet refetch + coalesced refresh, `revision`, no row refresh when own handles are unchanged, link punctuation, login + 2FA flow, `registration.sender`, "My other addresses" (normalizing, phone matching with/without country codes, "from me" in the chat list, the daemon's `other_handles` merged in), unverified runs as groups, staging of a `/tmp` file (copy sent and removed, original shown without a download, "cannot read that folder", purge, a planted symlink left alone), two same-name files in flight, download timeout → one retry / error |
+| `tst_json` (38 cases incl. data rows) | every payload in DBUS.md (fixtures in `tests/data/`), participants' `profile`, `icon_path`, `profiles` status, `sms` status / `SmsForwarding` / message and sent `service`, `HandleProfile` / `null`, malformed input, handle normalization (mirrors the Rust tests), helpers |
+| `tst_models` (32 incl. init) | Text Message Forwarding (EnableSmsForwarding, `SmsForwardingChanged`, `isSms` rows, `smsMode` only when active and the number is not on iMessage, no tapback / typing calls in a text chat, unreachable numbers sendable on the new-message page, a send stored as SMS); shared names and photos (`HandleProfileUpdated` → chat list, group participants, transcript senders and avatars; stop sharing) and group photos as avatars; status/state changes (also via `PropertiesChanged` only), chat list order/names/unread/snippets/filter, paging with cursors, grouping/separators/delivery labels, live `MessageReceived`, reactions (injected + own toggle; toggle waits for the first `GetStatus`), typing set/clear, send/reply/edit/unsend + delivery updates, failed send/edit reported, sending to new recipients and groups, attachment download, handle lookup, MarkRead, search, daemon restart → resync, resync without snippet refetch + coalesced refresh, `revision`, no row refresh when own handles are unchanged, link punctuation, login + 2FA flow, `registration.sender`, "My other addresses" (normalizing, phone matching with/without country codes, "from me" in the chat list, the daemon's `other_handles` merged in), unverified runs as groups, staging of a `/tmp` file (copy sent and removed, original shown without a download, "cannot read that folder", purge, a planted symlink left alone), two same-name files in flight, download timeout → one retry / error |
 | `tst_contacts` (9 incl. init) | shared profiles vs. the address book (name and photo precedence, no signal without a change, a participant without `profile` clears it, photo-only profiles); handle keys / IDS URIs for address-book numbers; lookups by email, `+1` and ten-digit phone, no last-ten match across country codes; contact names beat the daemon's `display`; group titles "Alice, Bob & Carol" / "… & 2 more"; avatar URLs and `ContactImageProvider`; KPeople against fixture vCards (`tests/data/contacts`, fake people) in a temporary `XDG_DATA_HOME`, incl. an edit on disk being picked up; chat list / transcript / tapback tooltips / contact suggestions (+ `LookupHandles` in bursts of five, cached, re-asked when stale) against the fake daemon |
-| `tst_screens` (21) | the real QML window (incl. `shared-profiles`: shared names and photos in the list, transcript and details, a group photo): grabs each screen to `kmessages/build/screenshots/*.png` and checks it is not blank; re-opening the open chat (twice, via `AppController::openChat`, with details open) keeps the transcript; older pages load when the first page fits (page size 5); the composer gets a failed send/edit back; Back closes the chat; notification decision (sender's contact name) + mark-read while active; contact photos (stand-in images) and the "To:" contact suggestions; composer attachments (a `/tmp` file + Ctrl+V of a clipboard image → two `SendFile`s, own images without `DownloadAttachment`); typing refresh; "My other addresses" suppress the notification and mark read only up to someone else's message (none: no MarkRead; unread hidden); inline reply (MarkRead on success, `replyFailed`); connection-problem notifications once per problem, NeedsAttention until connected; fails on any QML warning from our files |
+| `tst_screens` (22) | the real QML window (incl. `shared-profiles`: shared names and photos in the list, transcript and details, a group photo; `sms-chat`: green bubbles and the "Text Message" composer, back to "iMessage" when forwarding goes off): grabs each screen to `kmessages/build/screenshots/*.png` and checks it is not blank; re-opening the open chat (twice, via `AppController::openChat`, with details open) keeps the transcript; older pages load when the first page fits (page size 5); the composer gets a failed send/edit back; Back closes the chat; notification decision (sender's contact name) + mark-read while active; contact photos (stand-in images) and the "To:" contact suggestions; composer attachments (a `/tmp` file + Ctrl+V of a clipboard image → two `SendFile`s, own images without `DownloadAttachment`); typing refresh; "My other addresses" suppress the notification and mark read only up to someone else's message (none: no MarkRead; unread hidden); inline reply (MarkRead on success, `replyFailed`); connection-problem notifications once per problem, NeedsAttention until connected; fails on any QML warning from our files |
 
 Screenshots: `chat-list`, `transcript` (image, tapback, typing bubble, link,
 "Read"), `transcript-group`, `transcript-group-details` (three panes),
 `transcript-unverified` (unverified badge, unsent), `new-message`
 (reachable + unreachable recipient), `login`, `login-2fa`, `settings`,
 `narrow-transcript`, `narrow-list`, `daemon-unavailable`, `needs-login`,
-`composer-attachments`, `transcript-sent-images`, `shared-profiles`.
+`composer-attachments`, `transcript-sent-images`, `shared-profiles`,
+`sms-chat` (green text-message bubbles, "Text Message" composer),
+`settings-sms` (Text Message Forwarding section, active).
+
+**Text messages.** Rows with `service: "sms"` are green (`#34c759`)
+instead of blue and offer no tapback, edit or undo send. A conversation is
+in "text message" mode (`MessageListModel.smsMode`: placeholder "Text
+Message", green send button, no typing indicator) when the daemon reports
+Text Message Forwarding `active`, the chat is with phone numbers (1:1
+`tel:` or `group-p:`) and one of them is not on iMessage (`LookupHandles`;
+until that answer arrives: the newest message is a text). The send itself
+is a plain `SendText`: the daemon makes the same choice. On the
+new-message page an unreachable phone number is accepted while forwarding
+is active ("Text Message" in green). Settings has a **Text Message
+Forwarding** section: state, Enable / Ask Again / Disable
+(`EnableSmsForwarding`) and the iPhone step.
 
 To try the UI by hand against canned data:
 

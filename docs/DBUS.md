@@ -75,11 +75,15 @@ fails during an interactive `Login`, the call fails at once with
 | `Search` | `query s`, `limit u` | `s` | JSON array of [Message](#message), newest first. Case-insensitive (ASCII) substring match on text and subject; `%`/`_` are literal; unsent messages excluded. |
 | `SendText` | `chat_id_or_empty s`, `participants_json s`, `text s`, `reply_to s` | `s` | [SentMessage](#sentmessage) JSON. Either a chat id, or `""` plus a JSON array of handles (`["bob@example.com"]`; 2+ handles = a new or existing group; our own handles are not counted as recipients). A single one of our own handles is a note to self: sent from that handle, delivered to our other devices. `reply_to` = message id or `""`. The new row is stored and announced with `MessageReceived` (`is_from_me: true`) before the call returns. |
 | `SendFile` | `chat_id_or_empty s`, `participants_json s`, `path s`, `mime s` | `s` | [SentMessage](#sentmessage). `path` must be an absolute path to a regular file readable by the daemon; `mime` `""` = `application/octet-stream`. |
-| `React` | `chat_id s`, `message_id s`, `kind s`, `remove b` | — | `kind`: `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, `emoji:<emoji>` or a bare emoji. Stored and announced with `MessageUpdated`. |
+| `SendTextAs` | `chat_id_or_empty s`, `participants_json s`, `text s`, `reply_to s`, `service s` | `s` | `SendText` over a chosen service: `""` / `"auto"` = as `SendText` (below), `"imessage"`, or `"sms"` = a text message through the user's iPhone ([Text Message Forwarding](#text-message-forwarding)); `InvalidInput` for anything else. SMS goes to phone numbers only, needs forwarding `active` or `requested` (`Unsupported` otherwise) and carries no `reply_to`. |
+| `SendFileAs` | `chat_id_or_empty s`, `participants_json s`, `path s`, `mime s`, `service s` | `s` | `SendFile` over a chosen service (`"sms"` = MMS). |
+| `EnableSmsForwarding` | `enable b` | `s` | Ask the iPhone to relay text messages to this device (`true`), or stop (`false`). Returns [SmsForwarding](#smsforwarding) (`requested` / `off`); the user then turns this device on in the iPhone's Settings > Messages > Text Message Forwarding, and the state becomes `active` (`SmsForwardingChanged`). `InvalidInput` if no relay number is configured; `Unsupported` if no device of the account carries it. Slow (IDS round trips): 120 s timeout. |
+| `GetSmsForwarding` | — | `s` | [SmsForwarding](#smsforwarding) JSON (also `GetStatus.sms`). |
+| `React` | `chat_id s`, `message_id s`, `kind s`, `remove b` | — | `kind`: `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, `emoji:<emoji>` or a bare emoji. Stored and announced with `MessageUpdated`. `Unsupported` on a text message (SMS), like `Edit` and `Unsend`. |
 | `Edit` | `chat_id s`, `message_id s`, `text s` | — | Own messages only (`InvalidInput` otherwise). `MessageUpdated` with `edited: true`. |
 | `Unsend` | `chat_id s`, `message_id s` | — | Own messages only. Text, parts, attachments and reactions are dropped; `unsent: true`. |
-| `SetTyping` | `chat_id s`, `typing b` | — | Sends our typing indicator. |
-| `MarkRead` | `chat_id s`, `up_to_message_id s` | — | Marks incoming messages up to and including that one read locally (`""` = all), emits `ChatUpdated`, then sends a read receipt (best effort: a failed receipt is logged, not returned). |
+| `SetTyping` | `chat_id s`, `typing b` | — | Sends our typing indicator. `Unsupported` in a chat whose newest message is a text message (SMS). |
+| `MarkRead` | `chat_id s`, `up_to_message_id s` | — | Marks incoming messages up to and including that one read locally (`""` = all), emits `ChatUpdated`, then sends a read receipt (best effort: a failed receipt is logged, not returned; none for a text message). |
 | `LookupHandles` | `handles_json s` | `s` | JSON array of handles in → `[{"handle":"mailto:bob@example.com","reachable":true}, …]` in input order. Any invalid handle fails the call (`InvalidHandle`). |
 | `DownloadAttachment` | `attachment_id s` | `s` | Local path. Downloads once to `$STATE_DIR/attachments/<id>/<filename>` (file 0600, dirs 0700; filename sanitized and cut to 200 bytes); later and concurrent calls return the same path without downloading again. `NotFound` if the attachment is unknown, has no locator, or its locator is unreadable because the state key changed (see docs/DAEMON.md, recovery). Outgoing attachments (`SendFile`) return the daemon's own copy, made at send time in the same place, so deleting or moving the original does not break them (if that copy could not be made, a warning is logged and the original path is returned). |
 | `ImportChatBackground` | `chat_id s`, `path s` | `s` | Set the chat's transcript background **locally only** (nothing is sent) from a file the daemon can read: a PosterKit payload as Apple sends it or a plain image (e.g. recovered from a Mac's `~/Library/Messages/TranscriptBackgroundCache`). Copied into `$STATE_DIR/backgrounds/`; id `local-…`, `set_at` = the import time, so a later change from iMessage replaces it but a late-delivered older one (e.g. a removal) does not. Returns the updated [Chat](#chat) and emits `ChatUpdated`. `NotFound` for an unknown chat, `InvalidInput` for a relative path, an unreadable file or one over 32 MiB. |
@@ -105,6 +109,7 @@ fails during an interactive `Login`, the call fails at once with
 | `ConnectionStateChanged` | `state s` | Same value as the `ConnectionState` property. |
 | `TwoFactorRequired` | — | A login (interactive or the automatic re-login after IDS error 6005) needs a code: call `SubmitTwoFactor`. |
 | `BackgroundError` | `message s` | Background problems not tied to a method call (registration rejected, state save failed, task restarted, events dropped — resync). Method failures are D-Bus errors instead (below). |
+| `SmsForwardingChanged` | `state_json s` | Text Message Forwarding changed state ([SmsForwarding](#smsforwarding)): requested, confirmed by the iPhone / first relayed text (`active`), turned off on the iPhone, or an error. |
 | `HandleProfileUpdated` | `handle s`, `profile_json s` | A contact's shared name / photo was fetched or changed ([HandleProfile](#handleprofile)), or `null`: they stopped sharing. Followed by `ChatUpdated` for every chat with that participant (their `profile` in it changed). |
 
 Ordering: engine event → SQLite → signal, one event at a time, so a client
@@ -145,9 +150,12 @@ change. If the daemon's own event queue overflows it emits
   "registration": {"handles": [{"uri": "mailto:me@example.com"}], "registered_at": 1700000000, "expires_at": 1702592000,
                    "sender": {"uri": "mailto:me@example.com"}, "other_handles": ["tel:+15551234567"]},
   "unread": 3,
-  "profiles": {"state": "ready"}
+  "profiles": {"state": "ready"},
+  "sms": {"state": "active", "number": "tel:+15551234567", "since": 1700000100000}
 }
 ```
+
+`sms` is [SmsForwarding](#smsforwarding) (older daemons omit it).
 
 `profiles` says whether contacts' shared names and photos can be fetched
 (iCloud / CloudKit access): `{"state": "ready"}`, `"pending"` (not tried
@@ -247,9 +255,16 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
     {"kind": {"emoji": "🔥"}, "sender": {"uri": "mailto:carol@example.com"}, "added": true}
   ],
   "effect": null,
-  "verified": true
+  "verified": true,
+  "service": "imessage"
 }
 ```
+
+* `service`: `"imessage"`, or `"sms"` for a text message (SMS / MMS /
+  RCS) relayed by the user's iPhone; shown as a green bubble. Missing in
+  older payloads = `"imessage"`. A text message and an iMessage with the
+  same number share one 1:1 chat (`tel:…`); a group text is
+  `group-p:<sorted numbers>`. Texts have no tapbacks, edits or unsend.
 
 * `delivery`: `pending`, `sent`, `delivered`, `read`, `failed`. It only
   moves forward; `failed` only replaces `pending`/`sent`.
@@ -261,6 +276,31 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
 * `text` concatenates the text and mention parts; `null` if none.
 * An unsent message keeps its id/sender/time with `text: null`,
   `parts: []`, `unsent: true`.
+
+### SmsForwarding
+
+```json
+{"state": "requested", "number": "tel:+15551234567", "since": 1700000100000}
+```
+
+`state`: `off`, `requested` (asked the iPhone; waiting for the user to
+turn this device on under Settings > Messages > Text Message Forwarding),
+`active` (the iPhone confirmed, or relayed a text), `error` (with
+`"detail"`: the request could not be sent, e.g. no device of the account
+carries the number). `number` is the iPhone number texts go through
+(daemon setting `sms_relay_number`, else the first phone number in
+`other_handles`; `null` if none). `since` = ms of the last change.
+
+#### Text Message Forwarding
+
+The daemon relays SMS / MMS / RCS through the user's iPhone like a Mac
+does. Once `active`: incoming texts arrive as ordinary `MessageReceived`
+rows with `service: "sms"`, texts sent from the iPhone itself as
+`is_from_me` rows, and `SendText` / `SendFile` to a phone number that is
+not on iMessage go out as texts (`SendTextAs` / `SendFileAs` choose
+explicitly). The iPhone confirms each text it sends; a failure turns the
+row's delivery to `failed`. Details: docs/DAEMON.md, "Text Message
+Forwarding".
 
 ### HandleProfile
 
@@ -289,11 +329,15 @@ arrive.
 ### SentMessage
 
 ```json
-{"id": "6C1D…", "chat_id": "group:5B0E2C1A-…", "sent_at": 1700000123456, "sender": {"uri": "mailto:me@example.com"}}
+{"id": "6C1D…", "chat_id": "group:5B0E2C1A-…", "sent_at": 1700000123456, "sender": {"uri": "mailto:me@example.com"},
+ "service": "imessage"}
 ```
 
 `sender` is the handle the message was actually sent from (also the
-stored row's `sender`).
+stored row's `sender`; for a text message, the iPhone's number).
+`service` says how it went out (`SendText` picks SMS by itself when Text
+Message Forwarding is active and a phone-number recipient is not on
+iMessage).
 
 For a new group (`participants_json` with several handles) this is where
 the minted `group:<GUID>` chat id is learned.

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+* **Text messages through your iPhone** (Text Message Forwarding, like a
+  Mac): `imsg sms enable` / kmessages Settings → Text Message Forwarding
+  asks the iPhone to relay SMS / MMS / RCS; turn this computer on under the
+  iPhone's Settings > Messages > Text Message Forwarding. Relayed texts
+  are stored with `service: "sms"` in the same chat as iMessages with that
+  number (green bubbles in kmessages, `[SMS]` in `imsg messages`); texts
+  sent from the iPhone itself are yours. Sending to a number that is not
+  on iMessage goes out as a text automatically; `imsg send --sms` /
+  `SendTextAs` force it. New config `sms_relay_number` (default: the
+  first phone number in `other_handles`), D-Bus `EnableSmsForwarding`,
+  `GetSmsForwarding`, `SendTextAs`, `SendFileAs`, signal
+  `SmsForwardingChanged`, `GetStatus.sms`; store schema 5.
+
 ## 0.1.11 (2026-10-17)
 
 * **APNs liveness watchdog.** Rustpush acknowledges every push

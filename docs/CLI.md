@@ -113,7 +113,10 @@ registered at  2026-10-11 09:00 +02:00
 renews at      2026-11-10 09:00 +01:00
 unread         3
 profiles       ready
+sms            active (via +15551234567)
 ```
+
+`sms` (newer daemons only): Text Message Forwarding, see [`sms`](#sms-enabledisablestatus).
 
 `profiles` (newer daemons only): whether contacts' shared names and
 photos can be fetched: `ready`, `not tried yet`, `unavailable (…)`, or
@@ -142,14 +145,14 @@ A page of messages, oldest first (`--reverse`: newest first). Each message
 shows time, sender (`me` for your own; `(unverified)` when the sender's key
 could not be verified), text, reactions (`❤️2 👍1`), `[edited]`, `(unsent)`,
 delivery state of your own messages (`[sent]`, `[delivered]`, `[read]`,
-`[FAILED]`), attachments with their ids, the message id and the
+`[FAILED]`), `[SMS]` for a text message relayed by your iPhone, attachments with their ids, the message id and the
 reply-to id. When older messages exist, the command for the next page is
 printed on stderr (`--before CURSOR`). Times: today `14:03`, last week
 `Tue 14:03`, this year `Mar 05 14:03`, else `2025-03-05 14:03` (local time).
 
 `--json`: the `MessagePage` JSON unchanged (not reversed).
 
-### `send TO TEXT... [--reply-to MSG_ID]`
+### `send TO TEXT... [--reply-to MSG_ID] [--sms | --imessage]`
 
 `TO` is a chat (id or name), a handle, or several handles separated by
 commas: `alice@example.com,+15551234567` starts (or reuses) a group with
@@ -165,17 +168,57 @@ fortune | imsg send bob@example.com -
 imsg send bob@example.com "agreed" --reply-to 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0
 ```
 
-Prints `sent <id> to <chat id>`; `--json`: the `SentMessage` JSON (this is
-where a new group's `group:<GUID>` id is learned).
+Prints `sent <id> to <chat id>` (plus `as a text message (via your
+iPhone)` when it went out as SMS); `--json`: the `SentMessage` JSON (this
+is where a new group's `group:<GUID>` id is learned; `service` says
+`imessage` or `sms`).
 
-### `send-file TO PATH [--mime TYPE]`
+With Text Message Forwarding active (`imsg sms enable`), a message to a
+phone number that is not on iMessage goes out as a text message through
+your iPhone by itself. `--sms` forces a text message (phone numbers only;
+`--reply-to` is ignored), `--imessage` forces iMessage:
+
+```sh
+imsg send --sms +15555550123 "running late"
+```
+
+### `send-file TO PATH [--mime TYPE] [--sms | --imessage]`
 
 Sends a file. The path is made absolute; the daemon reads the file
 itself, so it must be readable by the daemon (the systemd unit has
 `PrivateTmp=yes`: files in `/tmp` are **not** visible to it, use your home
 directory). The MIME type is guessed from common extensions (jpeg, png,
 heic, gif, mov, mp4, m4a, pdf, …) unless `--mime` is given; otherwise the
-daemon uses `application/octet-stream`.
+daemon uses `application/octet-stream`. `--sms` sends it as a picture /
+MMS message through your iPhone, `--imessage` forces iMessage (default:
+as `send`).
+
+### `sms enable|disable|status`
+
+Text Message Forwarding: SMS, MMS and RCS relayed by your iPhone, like on
+a Mac. The daemon needs your iPhone's number (`sms_relay_number` in
+`config.toml`, else the first phone number in `other_handles`).
+
+```console
+$ imsg sms enable
+state   requested (via +15551234567)
+number  +15551234567
+since   2026-10-17 16:28 -05:00
+now, on your iPhone: Settings > Messages > Text Message Forwarding, and turn this device on.
+```
+
+1. `imsg sms enable` asks the iPhone to relay texts here (state
+   `requested`).
+2. On the iPhone open **Settings > Messages > Text Message Forwarding**
+   and turn on this computer (it is listed under the Mac model name of
+   the imported hardware identity).
+3. `imsg sms status` shows `active` once the iPhone confirms or relays its
+   first text. Incoming texts then appear in `imsg messages` / `watch`
+   marked `[SMS]`, in the same chat as iMessages with that number.
+
+`imsg sms disable` stops it (and tells the iPhone). `--json` prints the
+`SmsForwarding` JSON. `imsg watch` shows state changes as `sms forwarding
+…` lines.
 
 ### `react CHAT MSG_ID KIND [--remove]`
 

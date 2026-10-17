@@ -30,10 +30,13 @@ It logs in, registers and sends/receives iMessages on a real Apple ID:
   Photo", fetched from iCloud) and **group photos**, without a Mac: shown
   in the app wherever your address book has no name or photo, and by
   `imsg chat` / `imsg profile`.
+* **Text messages (SMS / MMS / RCS) through your iPhone** ("Text Message
+  Forwarding", like a Mac): green bubbles, sent by your iPhone; see
+  [Text messages](#text-messages-sms-through-your-iphone).
 
 Still missing: sending transcript backgrounds (they are received only),
-publishing your own shared name and photo,
-group admin operations, and SMS (needs an iPhone relay; not planned).
+publishing your own shared name and photo, and
+group admin operations.
 On Arch / CachyOS, see "Install on Arch" below for a package.
 
 ## Read this first: risks and limits
@@ -45,8 +48,9 @@ On Arch / CachyOS, see "Install on Arch" below for a package.
   Mac identities that are shared across many users or used for spam. The
   block can be temporary (1–2 days) or permanent.
 * **Email handle only.** A Mac-class identity registers your Apple ID email
-  address. Your phone number would need an always-on iPhone relay, which this
-  project does not do.
+  address. iMessages to your phone number keep going to your iPhone; SMS
+  can be relayed by the iPhone (Text Message Forwarding, below) while it
+  is on and online.
 * Turn off **Contact Key Verification** on the account.
 
 ## One-time step on a Mac
@@ -194,6 +198,33 @@ other_handles = ["+15551234567"]     # or IMESSAGED_OTHER_HANDLES=a,b / --other-
 
 They are never sent from. Messages already stored are not rewritten.
 
+## Text messages (SMS through your iPhone)
+
+Like a Mac, the daemon can send and receive SMS / MMS / RCS through your
+iPhone ("Text Message Forwarding"). It needs your iPhone's number: the
+first phone number in `other_handles` (above), or set it explicitly:
+
+```toml
+sms_relay_number = "+15551234567"   # or IMESSAGED_SMS_RELAY_NUMBER / --sms-relay-number
+```
+
+Then, once:
+
+1. `imsg sms enable` (or **Settings → Text Message Forwarding → Enable**
+   in kmessages).
+2. On the iPhone: **Settings > Messages > Text Message Forwarding**, turn
+   on this computer (listed under the Mac model name of your hardware
+   identity).
+3. `imsg sms status` says `active` once the iPhone confirms (or relays its
+   first text).
+
+Texts then arrive in the same chat as iMessages with that number (green
+bubbles in kmessages, `[SMS]` in `imsg messages`). Sending to a number that
+is not on iMessage goes out as a text automatically; `imsg send --sms
++1555… "text"` forces it. Texts have no tapbacks, edits, unsend or typing
+indicators. The iPhone must be on and online; it sends each text from its
+own number and confirms it (a failure shows as `failed`).
+
 ## Running the daemon
 
 `imessaged` keeps the Apple connection, stores messages in
@@ -279,7 +310,10 @@ from your iPhone's number shows up in kmessages as incoming unless the
 daemon's `other_handles` lists it (see Sending address). Put that
 number (and any other address of yours this computer does not send from)
 into **Settings → My other addresses**: messages from them then raise no
-notification and mark the chat read instead of leaving it unread.
+notification and mark the chat read instead of leaving it unread. Text
+messages relayed by your iPhone (see Text messages) show as green bubbles
+and the composer says "Text Message"; **Settings → Text Message
+Forwarding** turns the relay on or off.
 Details, tests and screenshots: [docs/KMESSAGES.md](docs/KMESSAGES.md).
 
 ## Contacts
