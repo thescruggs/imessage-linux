@@ -42,6 +42,17 @@ fn carries(device: &PrivateDeviceInfo, number: &str) -> bool {
     device.identites.iter().any(|i| Handle::normalize(i) == number)
 }
 
+/// The devices that can relay texts for `number`. Every device of the
+/// account lists the iPhone's number among its identities (iPad, Watch,
+/// Macs share it through iCloud), but only the iPhone has the SIM: prefer
+/// devices named like an iPhone, else all that carry the number.
+fn relay_devices<'a>(devices: &'a [PrivateDeviceInfo], number: &str) -> Vec<&'a PrivateDeviceInfo> {
+    let carrying: Vec<&PrivateDeviceInfo> = devices.iter().filter(|d| carries(d, number)).collect();
+    let phones: Vec<&PrivateDeviceInfo> =
+        carrying.iter().copied().filter(|d| d.device_name.as_deref().is_some_and(|n| n.to_lowercase().contains("iphone"))).collect();
+    if phones.is_empty() { carrying } else { phones }
+}
+
 /// Recipients of a text message: phone numbers only, not ours, at least one.
 pub(super) fn sms_recipients(raw: &[String], ours: &[String]) -> EngineResult<Vec<String>> {
     let all = normalize_handles(raw)?;
@@ -89,7 +100,7 @@ impl Inner {
         if !devices.iter().any(|d| carries(d, number)) {
             devices = client.identity.get_sms_targets(me, true).await.map_err(perr)?;
         }
-        let relays: Vec<&PrivateDeviceInfo> = devices.iter().filter(|d| carries(d, number)).collect();
+        let relays = relay_devices(&devices, number);
         log::debug!(
             "sms relay: {} of {} device(s) on the account carry the relay number{}",
             relays.len(),
@@ -256,5 +267,12 @@ mod tests {
         };
         assert!(carries(&d, "tel:+15555550100"));
         assert!(!carries(&d, "tel:+15555550199"));
+        let named = |n: &str, t: u8| PrivateDeviceInfo { device_name: Some(n.into()), token: vec![t], ..d.clone() };
+        let all = vec![named("Sam's iPad", 2), named("Sam’s iPhone", 3), named("Work Mac", 4)];
+        let r = relay_devices(&all, "tel:+15555550100");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].token, vec![3]);
+        let no_phone = vec![named("Sam's iPad", 2), named("Work Mac", 4)];
+        assert_eq!(relay_devices(&no_phone, "tel:+15555550100").len(), 2);
     }
 }
