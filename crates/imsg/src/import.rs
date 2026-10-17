@@ -232,7 +232,7 @@ pub struct Converted {
     pub stats: Stats,
 }
 
-struct Me {
+pub(crate) struct Me {
     /// Every handle of ours, normalized: `configured` plus the addresses
     /// the Mac received or sent on.
     all: BTreeSet<String>,
@@ -241,7 +241,7 @@ struct Me {
 }
 
 impl Me {
-    fn new(configured: &[String], seen: impl IntoIterator<Item = String>) -> Self {
+    pub(crate) fn new(configured: &[String], seen: impl IntoIterator<Item = String>) -> Self {
         let configured: Vec<String> = configured.iter().map(|h| Handle::normalize(h)).collect();
         let all = configured.iter().cloned().chain(seen).collect();
         Me { all, configured }
@@ -330,7 +330,7 @@ pub fn peer_handle(raw: &str) -> Handle {
 /// the chat (`dest`, a `destination_caller_id`) if the chat lists it, the
 /// first listed handle the daemon knows (registered or `other_handles`),
 /// the first listed; always in the form the daemon knows it.
-fn chat_for(c: &ChatRec, me: &Me, dest: Option<&str>, our: Option<&str>) -> Chat {
+pub(crate) fn chat_for(c: &ChatRec, me: &Me, dest: Option<&str>, our: Option<&str>) -> Chat {
     let mut others: Vec<Handle> = vec![];
     for h in c.participants.iter().filter(|p| !me.has(p)).map(|p| peer_handle(p)) {
         if !others.contains(&h) {
@@ -413,9 +413,14 @@ fn build_parts(text: &str, atts: Vec<(MessagePart, ImportAttachment)>, id: &Mess
 /// on the way a real directory and the file itself a regular file (no
 /// symlinks, FIFOs, ...). The export comes from another machine.
 pub fn staged_file(stage: &Path, p: &str) -> Option<PathBuf> {
+    staged_file_under(stage, "attachments", p)
+}
+
+/// [`staged_file`] for files under the stage's `top` directory.
+pub fn staged_file_under(stage: &Path, top: &str, p: &str) -> Option<PathBuf> {
     use std::path::Component;
     let comps: Vec<Component> = Path::new(p).components().collect();
-    if comps.len() < 2 || comps[0] != Component::Normal("attachments".as_ref()) || !comps.iter().all(|c| matches!(c, Component::Normal(_))) {
+    if comps.len() < 2 || comps[0] != Component::Normal(top.as_ref()) || !comps.iter().all(|c| matches!(c, Component::Normal(_))) {
         return None;
     }
     let mut cur = stage.to_path_buf();
@@ -633,6 +638,11 @@ pub fn since_unix(args: &ImportArgs, now: chrono::DateTime<chrono::Local>) -> Re
 
 /// `ssh [-F ~/.ssh/config] -o BatchMode=yes -o LogLevel=ERROR <host> python3 - ...`
 pub fn ssh_argv(host: &str, since: i64, max_mb: u64, home: Option<&Path>) -> Vec<String> {
+    ssh_python_argv(host, home, &["--since".into(), since.to_string(), "--max-attachment-mb".into(), max_mb.to_string()])
+}
+
+/// `ssh [-F ~/.ssh/config] -o BatchMode=yes -o LogLevel=ERROR <host> python3 - <script args>`
+pub fn ssh_python_argv(host: &str, home: Option<&Path>, script_args: &[String]) -> Vec<String> {
     let mut v = vec!["ssh".to_string()];
     if let Some(cfg) = home.map(|h| h.join(".ssh/config")).filter(|p| p.is_file()) {
         v.push("-F".into());
@@ -642,18 +652,19 @@ pub fn ssh_argv(host: &str, since: i64, max_mb: u64, home: Option<&Path>) -> Vec
         v.push("-o".into());
         v.push(o.into());
     }
-    v.extend([host.to_string(), "python3".into(), "-".into(), "--since".into(), since.to_string(), "--max-attachment-mb".into(), max_mb.to_string()]);
+    v.extend([host.to_string(), "python3".into(), "-".into()]);
+    v.extend(script_args.iter().cloned());
     v
 }
 
-fn cache_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join(".cache"))
 }
 
-fn private_dir(p: &Path) -> std::io::Result<()> {
+pub(crate) fn private_dir(p: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p)
 }
@@ -662,6 +673,13 @@ fn private_dir(p: &Path) -> std::io::Result<()> {
 fn fetch(args: &ImportArgs, since: i64, stage: &Path) -> anyhow::Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let argv = ssh_argv(&args.host, since, args.max_attachment_mb, home.as_deref());
+    fetch_tar(&argv, EXPORT_SCRIPT, &args.host, args.max_total_mb, stage)
+}
+
+/// Run `argv` (an ssh command running `python3 -`), feed it `script` on
+/// stdin and unpack the tar it prints into `stage` (`tar -x
+/// --no-same-owner --no-same-permissions`), aborting past `max_total_mb`.
+pub(crate) fn fetch_tar(argv: &[String], script: &'static str, host: &str, max_total_mb: u64, stage: &Path) -> anyhow::Result<()> {
     let mut ssh = Process::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::piped())
@@ -670,7 +688,7 @@ fn fetch(args: &ImportArgs, since: i64, stage: &Path) -> anyhow::Result<()> {
         .spawn()
         .map_err(|e| anyhow::anyhow!("cannot run ssh: {e}"))?;
     let mut stdin = ssh.stdin.take().expect("piped");
-    let writer = std::thread::spawn(move || stdin.write_all(EXPORT_SCRIPT.as_bytes()));
+    let writer = std::thread::spawn(move || stdin.write_all(script.as_bytes()));
     let tar = Process::new("tar")
         .args(["-x", "-f", "-", "--no-same-owner", "--no-same-permissions", "-C"])
         .arg(stage)
@@ -685,7 +703,7 @@ fn fetch(args: &ImportArgs, since: i64, stage: &Path) -> anyhow::Result<()> {
         }
     };
     // Through us, so the total is bounded.
-    let max = args.max_total_mb.saturating_mul(1 << 20);
+    let max = max_total_mb.saturating_mul(1 << 20);
     let mut from = ssh.stdout.take().expect("piped");
     let copied = {
         let mut to = tar.stdin.take().expect("piped");
@@ -701,11 +719,11 @@ fn fetch(args: &ImportArgs, since: i64, stage: &Path) -> anyhow::Result<()> {
     let ssh_status = ssh.wait()?;
     let _ = writer.join();
     if over {
-        anyhow::bail!("the export is larger than --max-total-mb {} MB; nothing imported", args.max_total_mb);
+        anyhow::bail!("the export is larger than --max-total-mb {max_total_mb} MB; nothing imported");
     }
     let tar = tar.map_err(|e| anyhow::anyhow!("cannot run tar: {e}"))?;
     if !ssh_status.success() {
-        anyhow::bail!("the export on {} failed ({ssh_status}); see the messages above", args.host);
+        anyhow::bail!("the export on {host} failed ({ssh_status}); see the messages above");
     }
     if !tar.success() {
         anyhow::bail!("unpacking the export failed ({tar})");

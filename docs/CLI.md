@@ -220,7 +220,8 @@ PosterKit payload or plain image, e.g. one recovered from a Mac's
 plist). FILE must be readable by the daemon (not under `/tmp`: the
 systemd unit has a private `/tmp`). A later background change from
 iMessage replaces it. Setting or clearing backgrounds over iMessage is
-not supported yet.
+not supported yet. To pull every chat's background from a Mac in one go,
+see `import-mac HOST --backgrounds`.
 
 ### `download ATTACHMENT_ID`
 
@@ -318,7 +319,8 @@ business chats, …) are skipped and counted as "without a valid address"
 Re-running is safe: the daemon skips every message id it already has
 (including live ones) and changes nothing about them. Imported messages
 are marked read and announced with one `ChatUpdated` per chat, not as new
-messages. Transcript backgrounds are not imported.
+messages. Transcript backgrounds are not imported this way; use
+`import-mac HOST --backgrounds` (below).
 
 Output: the export counts (chats, messages, reactions, attachments with /
 without file, skipped rows, text decoding failures) and, unless
@@ -327,6 +329,67 @@ chats, attachment files, reactions, orphaned reactions); `--dry-run` also
 lists the chat ids it would write with their message counts. `--json`:
 one object `{"host","since","dry_run","export":{…},"imported":ImportResult}`
 (`"chats": {"<chat id>": <messages>}` instead of `imported` in a dry run).
+
+### `import-mac HOST --backgrounds [--chat CHAT]... [--create] [--max-total-mb MB] [--dry-run]`
+
+Copies the chats' transcript backgrounds ("Backgrounds" in Messages on
+macOS 26) from a Mac into the daemon, **locally only** (nothing is sent;
+a later background change from iMessage replaces them). Same ssh and Full
+Disk Access requirements as the message import; one ssh connection.
+
+`tools/mac-backgrounds-export.py` (embedded in `imsg`) runs on the Mac
+with `python3 -`: for every chat whose `chat.db` `properties` plist has
+`backgroundProperties` it reads only the background id (`trabaid`), the
+payload version (`trabapv`), the announced size (`trabafs`), `trabav`
+and `refreshDate`. The MMCS download reference beside them (the file key
+`trabak`, `trabas`, `trabar`, `traboid`) is never read into the output,
+printed or stored. It streams back a tar with `backgrounds.jsonl` (one
+record per chat: Mac row id, identifier, style, group id, participants,
+those fields) and the cached files from
+`~/Library/Messages/TranscriptBackgroundCache/`: `<id>` (the PosterKit
+payload, Apple Archive `AA01` or stored zip) and, if present,
+`<id>-watchBackground` (a pre-rendered binary plist). Files over 32 MB
+(the daemon's limit) and anything that is not a regular file are left
+out. The tar is unpacked with `--no-same-owner --no-same-permissions`
+into `~/.cache/imsg/import/<run>/backgrounds/` (only plain relative paths
+under `backgrounds/` that are regular files are used; the whole stream is
+capped by `--max-total-mb`, default 2048) and removed afterwards.
+
+Each Mac chat maps to the daemon's chat id exactly as in the message
+import: a 1:1 is the other party's `tel:` / `mailto:` (bare national
+numbers get `+1`, SMS filter tags are stripped), a group is
+`group:<GROUP_ID>` (upper case), a style-43 "group" with one other person
+is that person's 1:1 chat, and our own handles only = note to self (our
+handles come from the daemon's status). When several Mac chats map to the
+same daemon chat (an SMS and an iMessage row for one number), the one
+with the newest `refreshDate` wins and the others are reported as
+`superseded`. Then, per chat, `ImportChatBackground` gets the poster; if
+the daemon finds no picture in it and a `-watchBackground` file exists,
+that one is imported instead (also when no poster is cached).
+
+`ImportChatBackground` refuses chats the daemon does not have, so those
+are skipped (`not-in-daemon`) unless `--create` is given: then the chat
+is first created with an `ImportMessages` batch holding just the chat
+(participants and name from the Mac, undated, so live state wins).
+`--chat` (repeatable) limits the run to those chats: a chat id, a handle
+(`2055550100` = `tel:+12055550100`) or a name the daemon knows.
+
+Re-running is safe: a chat is skipped when its background already has the
+Mac's background id (`already-set`, it arrived over iMessage) or is a
+local import (`local-…`) whose stored payload (`background.payload`) has
+the same SHA-256 as the Mac's poster or watch file (`already-imported`).
+
+`--dry-run` fetches and maps everything and shows what would happen
+without importing (it works without the daemon, mapping without our own
+handles). Output: a table `MAC CHAT  DAEMON CHAT  BACKGROUND  RESULT`, then
+a detail line per chat (which file was used, the new `local-…` id, the
+decoded picture). Results: `imported`, `created+imported`,
+`would-import`, `would-create+import`, `already-set`, `already-imported`,
+`not-in-daemon`, `superseded`, `not-cached` (the Mac has the background
+id but not the file), `too-large`, `bad-id`, `no-address` (no valid
+iMessage address), `failed` (exit code 1). `--json`: one object
+`{"host","dry_run","chats":[{"mac_rowid","mac_chat","chat_id",
+"background_id","version","size","result","detail","picture"}]}`.
 
 ### `store purge-invalid-chats [--yes]`
 

@@ -4,6 +4,7 @@
 //! command is one or two calls on `org.imessage.Daemon1`. `--json` prints
 //! the daemon's JSON unchanged; human output is the default.
 
+mod backgrounds;
 mod client;
 mod commands;
 mod format;
@@ -204,23 +205,35 @@ pub enum Command {
         /// ssh destination of the Mac (`mymac.local`, `user@mac`, a Host alias).
         host: String,
         /// Import the last N days.
-        #[arg(long, default_value_t = 10, conflicts_with = "since")]
+        #[arg(long, default_value_t = 10, conflicts_with_all = ["since", "backgrounds"])]
         days: u32,
         /// Import from this date on instead (YYYY-MM-DD, local time, or RFC 3339).
-        #[arg(long, value_name = "DATE")]
+        #[arg(long, value_name = "DATE", conflicts_with = "backgrounds")]
         since: Option<String>,
         /// Skip attachment files larger than this many MB.
-        #[arg(long, default_value_t = 50, value_name = "MB")]
+        #[arg(long, default_value_t = 50, value_name = "MB", conflicts_with = "backgrounds")]
         max_attachment_mb: u64,
         /// Abort if the whole export is larger than this many MB.
         #[arg(long, default_value_t = 2048, value_name = "MB")]
         max_total_mb: u64,
         /// Leave out SMS / RCS conversations relayed by the iPhone.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "backgrounds")]
         imessage_only: bool,
         /// Fetch and convert, print what would be imported, import nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Import the chats' transcript backgrounds instead of messages
+        /// (locally only; nothing is sent).
+        #[arg(long)]
+        backgrounds: bool,
+        /// With --backgrounds: only this chat (id or handle, or a name the
+        /// daemon knows); repeatable.
+        #[arg(long = "chat", value_name = "CHAT", requires = "backgrounds")]
+        chats: Vec<String>,
+        /// With --backgrounds: create chats the daemon does not have yet
+        /// (default: skip them).
+        #[arg(long, requires = "backgrounds")]
+        create: bool,
     },
     /// Message store maintenance.
     Store {
@@ -301,7 +314,10 @@ fn main() -> ExitCode {
                 Ok(rt) => rt.block_on(async {
                     match command {
                         Command::Doctor => local::doctor(&state_dir, &ctx.bus, ctx.json, ctx.style).await,
-                        Command::ImportMac { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run } => {
+                        Command::ImportMac { host, backgrounds: true, chats, create, max_total_mb, dry_run, .. } => {
+                            backgrounds::run(backgrounds::BackgroundArgs { host, chats, create, max_total_mb, dry_run }, &ctx).await
+                        }
+                        Command::ImportMac { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run, .. } => {
                             import::run(import::ImportArgs { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run }, &ctx).await
                         }
                         other => commands::run(other, &ctx).await,
@@ -403,10 +419,19 @@ mod tests {
                 max_attachment_mb: 50,
                 max_total_mb: 2048,
                 imessage_only: false,
-                dry_run: true
+                dry_run: true,
+                backgrounds: false,
+                chats: vec![],
+                create: false,
             }
         );
         assert!(parse(&["import-mac", "mac.local", "--since", "2026-10-01", "--days", "3"]).is_err());
+        let c = parse(&["import-mac", "mac.local", "--backgrounds", "--chat", "+12055550100", "--chat", "group:X", "--create", "--dry-run"]).unwrap();
+        assert!(matches!(c.command, Command::ImportMac { backgrounds: true, create: true, dry_run: true, ref chats, .. } if chats == &["+12055550100", "group:X"]));
+        assert!(parse(&["import-mac", "mac.local", "--chat", "x"]).is_err(), "--chat needs --backgrounds");
+        assert!(parse(&["import-mac", "mac.local", "--create"]).is_err());
+        assert!(parse(&["import-mac", "mac.local", "--backgrounds", "--since", "2026-10-01"]).is_err());
+        assert!(parse(&["import-mac", "mac.local", "--backgrounds", "--days", "3"]).is_err());
         let c = parse(&["store", "purge-invalid-chats"]).unwrap();
         assert_eq!(c.command, Command::Store { command: StoreCommand::PurgeInvalidChats { yes: false } });
         let c = parse(&["store", "purge-invalid-chats", "--yes"]).unwrap();
