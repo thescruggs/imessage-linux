@@ -102,10 +102,20 @@ impl Inner {
         }
         let relays = relay_devices(&devices, number);
         log::debug!(
-            "sms relay: {} of {} device(s) on the account carry the relay number{}",
+            "sms relay: {} of {} device(s) chosen; account devices:{}",
             relays.len(),
             devices.len(),
-            relays.iter().map(|d| format!(" [{}; sms sub-service: {}]", d.device_name.as_deref().unwrap_or("?"), d.sub_services.iter().any(|s| s == SMS_TOPIC))).collect::<String>()
+            devices
+                .iter()
+                .map(|d| format!(
+                    " [{}; sms sub-service: {}; carries number: {}; identities: {}; hsa trusted: {}]",
+                    d.device_name.as_deref().unwrap_or("?"),
+                    d.sub_services.iter().any(|s| s == SMS_TOPIC),
+                    carries(d, number),
+                    d.identites.len(),
+                    d.is_hsa_trusted
+                ))
+                .collect::<String>()
         );
         if relays.is_empty() {
             return Err(EngineError::Unsupported(format!(
