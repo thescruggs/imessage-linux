@@ -211,8 +211,67 @@ button.
    that prints a summary (button busy state, notification, failure path).
    Docs: README "Contacts" and "Install", CLI.md `sync-mac`, KMESSAGES.md.
 
+### E. Link previews (as Messages)
+
+Messages does not let the receiver fetch anything: the **sender** fetches
+the page's metadata (title, summary, site icon, hero image), packs it as a
+`com.apple.messages.URLBalloonProvider` balloon (`RichLink` →
+`LPLinkMetadata` + image attachments) and sends it with the text; every
+device shows the same card. rustpush already does both directions
+(`NormalMessage.link_meta: Option<LinkMeta>`; parsed on receive, packed on
+send; `rawmessages.rs` has `LPLinkMetadata` with `title`, `summary`, `url`,
+`original_url`, `image`/`icon` substitutes indexing the balloon's
+attachments). The daemon ignores `link_meta` today, so a link arrives as
+plain text with the card missing, and a message that is *only* a URL
+balloon shows "app message".
+
+1. **Model / store**: new part `{"type": "link", "url", "title", "summary",
+   "site_name", "image_attachment_id", "icon_attachment_id"}`
+   (`MessagePart::Link`); images and icons are stored as ordinary
+   attachment rows and files under `attachments/` (`inline`, no download
+   step), so `DownloadAttachment`, purge and import paths need nothing new.
+   `parts` is JSON in the store (schema unchanged; schema version 6 only
+   if a backfill is needed). `Message.text` keeps the URL so search,
+   snippets and the CLI keep working.
+2. **Receive** (`convert.rs`): `link_meta` → a `link` part after the text
+   part(s), its image/icon bytes → attachments. A URL-balloon with no text
+   gets the URL as text from `LPLinkMetadata.url`. Unparseable metadata →
+   today's behaviour, logged once per message.
+3. **Send** (`Engine::send_text`): when the text contains a URL (first
+   `http(s)://` token, as Messages previews only the first), the daemon
+   fetches it (reqwest, 5 s, ≤ 2 MB, HTML only, follow ≤ 3 redirects,
+   our own User-Agent; a small Open Graph / Twitter-card / `<title>` parser,
+   `lol_html` or a minimal hand parser over the `<head>`; `og:image`
+   downloaded ≤ 5 MB, re-encoded to JPEG ≤ 1024 px with the `image` crate
+   already used for photos; `favicon`/`apple-touch-icon` ≤ 256 px), builds
+   `LinkMeta` and sends the message with it in one go, so the recipient's
+   iPhone shows the same card as from a Mac. The fetch runs before the
+   send with a hard deadline; on any failure the text goes out alone (as
+   Messages does when offline). The sent row stores the same `link` part
+   so our own bubble shows the card. Setting `link_previews = true`
+   (daemon `config.toml` / `--no-link-previews`), and `SendTextAs` keeps
+   working for SMS (no preview: MMS does not carry it).
+   Privacy note in docs: the daemon contacts the linked site when *you*
+   send a link, never when you receive one.
+4. **kmessages**: a `LinkPreview.qml` card below the text in the bubble
+   (image on top when present, else icon + title, title bold, site name or
+   host under it, as Messages), clickable (opens the URL), hover shows the
+   full URL, context menu "Copy link"; for a bubble whose text is just the
+   URL, the card replaces the text (Messages hides the bare URL). Chat list
+   snippet: the title when the text is only the URL. Composer: nothing to
+   show while typing (Messages shows the preview after send; a pre-send
+   preview is a later nicety).
+5. **CLI**: `imsg messages` prints `[link: <title> — <host>]` after the text;
+   `--json` carries the part.
+6. **Mac import**: `chat.db` keeps the balloon in `message.payload_data`
+   (the same `RichLink` archive); the export script adds it to the tar and
+   the import turns it into the `link` part, so old conversations get their
+   cards back. Fake daemon: `InjectLink` for tests; a `link-preview`
+   screenshot; convert tests for receive (with and without text), send tests
+   with a local HTTP server fixture (OG tags, redirect, timeout, non-HTML).
+
 Order: D (CLI first, then the button) together with A's daemon part, then
-A's app part, B, C. Release as 0.1.13.
+A's app part, E, B, C. Release as 0.1.13.
 
 ## Future: easy install and a Mac companion app (not scheduled)
 
