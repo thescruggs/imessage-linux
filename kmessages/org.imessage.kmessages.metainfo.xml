@@ -30,6 +30,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.12" date="2026-10-17">
+      <description>
+        <p>Text messages (SMS/MMS) through your iPhone with Text Message Forwarding, your phone number registered as an address, and the transcript no longer jumping back to the newest message while you scroll up.</p>
+      </description>
+    </release>
     <release version="0.1.11" date="2026-10-17">
       <description>
         <p>Shared names and photos from iCloud, group photos, chat backgrounds pulled from a Mac, and an APNs liveness watchdog.</p>

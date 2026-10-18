@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.12 (2026-10-17)
 
 * **Your phone number is registered too (fixes Text Message Forwarding).**
   The vendored rustpush patch dropped the `tel:` handle Apple offers

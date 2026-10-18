@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: SSPL-1.0
 cmake_minimum_required(VERSION 3.25)
-project(kmessages VERSION 0.1.11 LANGUAGES CXX)
+project(kmessages VERSION 0.1.12 LANGUAGES CXX)
 
 set(QT_MIN_VERSION 6.10.0)
 set(KF_MIN_VERSION 6.8.0)

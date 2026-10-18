@@ -11,9 +11,9 @@ See [PLAN.md](PLAN.md) for the architecture and phases, and
 [docs/RESEARCH.md](docs/RESEARCH.md) for how iMessage registration works and
 why a Mac is needed once.
 
-## Status: 0.1.11, working on a live account
+## Status: 0.1.12, working on a live account
 
-Version 0.1.11 is the current release (changes: [CHANGELOG.md](CHANGELOG.md)).
+Version 0.1.12 is the current release (changes: [CHANGELOG.md](CHANGELOG.md)).
 It logs in, registers and sends/receives iMessages on a real Apple ID:
 
 * `crates/open-absinthe` runs Apple's `IMDAppleServices` under unicorn to
@@ -78,7 +78,7 @@ setup tools:
 
 ```sh
 git clone https://github.com/thescruggs/imessage-linux.git && cd imessage-linux/packaging/arch
-makepkg -si                      # or: sudo pacman -U imessage-linux-0.1.11-1-x86_64.pkg.tar.zst
+makepkg -si                      # or: sudo pacman -U imessage-linux-0.1.12-1-x86_64.pkg.tar.zst
 ```
 
 (`makepkg --nocheck` skips the test suite. From a local checkout, before
