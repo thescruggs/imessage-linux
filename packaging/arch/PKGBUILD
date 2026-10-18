@@ -14,7 +14,7 @@
 # suite, a few minutes).
 
 pkgname=imessage-linux
-pkgver=0.1.12
+pkgver=0.1.13
 pkgrel=1
 pkgdesc='Native iMessage client for Linux: daemon, CLI and KDE app (needs your own Mac once)'
 arch=('x86_64')

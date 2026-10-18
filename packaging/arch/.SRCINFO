@@ -1,6 +1,6 @@
 pkgbase = imessage-linux
 	pkgdesc = Native iMessage client for Linux: daemon, CLI and KDE app (needs your own Mac once)
-	pkgver = 0.1.12
+	pkgver = 0.1.13
 	pkgrel = 1
 	url = https://github.com/thescruggs/imessage-linux
 	install = imessage-linux.install
@@ -40,7 +40,7 @@ pkgbase = imessage-linux
 	optdepends = kimageformats: HEIC chat backgrounds and photos in kmessages
 	optdepends = openssh: anisette from your Mac, contacts and history import
 	options = !lto
-	source = imessage-linux::git+https://github.com/thescruggs/imessage-linux.git#tag=v0.1.12
+	source = imessage-linux::git+https://github.com/thescruggs/imessage-linux.git#tag=v0.1.13
 	source = rustpush::git+https://github.com/OpenBubbles/rustpush.git
 	source = apple-private-apis::git+https://github.com/OpenBubbles/apple-private-apis.git
 	source = clearadi-stub::git+https://github.com/OpenBubbles/clearadi-stub.git

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.13 (2026-10-18)
 
 * **kmessages: pick recipients with the keyboard.** On the new-message
   page Up / Down move a highlight over the suggestions (contacts, then
