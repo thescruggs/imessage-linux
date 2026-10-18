@@ -128,9 +128,8 @@ chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
 ### B. Keyboard: Ctrl+N and picking recipients with ↑ ↓ Enter
 
 `Ctrl+N` already exists (`Main.qml`, `StandardKey.New`, since 0.1.10) and
-opens the new-message page. Verify it works from every page, including when
-the composer or search field has focus, and add it to the Settings/About
-shortcut list and docs. Then the new-message page:
+opens the new-message page (verified by the user 2026-10-17; nothing to do
+beyond mentioning it in the docs). The new-message page:
 
 1. The suggestion area is two models (address-book `contactSuggestions`
    rendered in the ListView header, then `recipientSuggestions`). Give the
@@ -164,12 +163,12 @@ Typing `snake` offers 🐍, like macOS's inline emoji replacement.
    KConfig `Emoji/Recent`). Unit tests in tst_models.
 3. **Composer**: the word before the cursor (≥ 3 letters, or `:` + 2
    letters for the `:snake:` form) feeds the model; a small popup above the
-   text area lists the emoji; `Tab`/`Enter` inserts the highlighted one
-   replacing the word (`:snake:` form) or appending it after the word
-   (plain form, so "snake" becomes "snake 🐍"); `Left`/`Right` or `Up`/`Down`
-   move the highlight, `Escape` dismisses for that word. Off by default or
-   on? On, with a Settings toggle ("Suggest emoji while typing"). The
-   existing EmojiPicker grid gets a search field backed by the same model.
+   text area lists the emoji; `Tab`/`Enter` inserts the highlighted one,
+   **replacing the word** in both forms (decided 2026-10-17: "snake" becomes
+   "🐍"); `Left`/`Right` or `Up`/`Down` move the highlight, `Escape`
+   dismisses for that word. On by default, with a Settings toggle ("Suggest
+   emoji while typing"). The existing EmojiPicker grid gets a search field
+   backed by the same model.
 4. Tests: model ranking; a screenshot with the popup open; the composer
    test types "snake" and checks the suggestion and insertion.
 
@@ -249,7 +248,8 @@ balloon shows "app message".
    send with a hard deadline; on any failure the text goes out alone (as
    Messages does when offline). The sent row stores the same `link` part
    so our own bubble shows the card. Setting `link_previews = true`
-   (daemon `config.toml` / `--no-link-previews`), and `SendTextAs` keeps
+   (default on, decided 2026-10-17; daemon `config.toml` /
+   `--no-link-previews`), and `SendTextAs` keeps
    working for SMS (no preview: MMS does not carry it).
    Privacy note in docs: the daemon contacts the linked site when *you*
    send a link, never when you receive one.
@@ -257,7 +257,8 @@ balloon shows "app message".
    (image on top when present, else icon + title, title bold, site name or
    host under it, as Messages), clickable (opens the URL), hover shows the
    full URL, context menu "Copy link"; for a bubble whose text is just the
-   URL, the card replaces the text (Messages hides the bare URL). Chat list
+   URL, the card replaces the text (Messages hides the bare URL; decided
+   2026-10-17). Chat list
    snippet: the title when the text is only the URL. Composer: nothing to
    show while typing (Messages shows the preview after send; a pre-send
    preview is a later nicety).
