@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+* **Pinned conversations (daemon and CLI).** Chats can be pinned to the
+  top of the chat list, locally (like Messages' pins; not synced to
+  Apple): `imsg chat CHAT --pin [--position N]` / `--unpin`; `imsg chats`
+  marks pinned chats with 📌. New D-Bus `SetChatPinned` and
+  `ReorderPins`; `Chat` JSON gains `pinned` and `pin_order`
+  (`ChatUpdated` when they change); store schema 6. The kmessages side
+  (pinned chats first, a context menu) comes next.
+* **`imsg sync-mac`: contacts and pins from your Mac in one go.** One ssh
+  connection copies the Mac's contacts (the same `mac-<uid>.vcf` vCards
+  with photos as `tools/mac-contacts-export.sh`, now rewriting only the
+  files that changed) and its pinned conversations (mapped to your chats;
+  the Mac's pins come first, pins you set here are kept, and ones the Mac
+  unpinned since the last sync are unpinned), and with `--backgrounds`
+  the chats' transcript backgrounds. `--contacts` / `--pins` pick parts,
+  `--dry-run` changes nothing, `--json` prints a summary.
+  `tools/mac-contacts-export.sh` now runs `imsg sync-mac --contacts`
+  (or, without imsg, the same exporter directly).
+* **New daemon setting `mac_host`** (`--mac-host`, `IMESSAGED_MAC_HOST`):
+  the Mac `imsg sync-mac` uses when no host is given, reported as
+  `GetStatus.mac_host` and in `imsg status`. `imsg doctor` suggests the
+  host your ssh `anisette_command` reaches when it is unset.
+
 ## 0.1.12 (2026-10-17)
 
 * **Your phone number is registered too (fixes Text Message Forwarding).**

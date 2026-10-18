@@ -11,6 +11,7 @@ mod format;
 mod import;
 mod local;
 mod resolve;
+mod sync;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -79,10 +80,20 @@ pub enum Command {
         #[arg(long, default_value_t = 0)]
         offset: u32,
     },
-    /// Show one conversation's details (participants, background, ...).
+    /// Show one conversation's details (participants, background, ...),
+    /// or pin / unpin it.
     Chat {
         /// Chat id, handle or name.
         chat: String,
+        /// Pin it to the top of the chat list (local to this computer).
+        #[arg(long, conflicts_with = "unpin")]
+        pin: bool,
+        /// Unpin it.
+        #[arg(long)]
+        unpin: bool,
+        /// With --pin: its position among the pins (1 = first; default: last).
+        #[arg(long, value_name = "N", requires = "pin", value_parser = clap::value_parser!(u32).range(1..))]
+        position: Option<u32>,
     },
     /// Manage a conversation's transcript background.
     ChatBackground {
@@ -257,6 +268,30 @@ pub enum Command {
         #[arg(long, requires = "backgrounds")]
         create: bool,
     },
+    /// Copy contacts (with photos) and pinned conversations from your Mac
+    /// (over ssh), optionally also the chats' backgrounds.
+    SyncMac {
+        /// ssh destination of the Mac (default: the daemon's mac_host).
+        host: Option<String>,
+        /// Contacts, as vCards for KDE's address book (KPeople).
+        #[arg(long)]
+        contacts: bool,
+        /// Pinned conversations (pins only here are kept).
+        #[arg(long)]
+        pins: bool,
+        /// The chats' transcript backgrounds (as `import-mac --backgrounds`).
+        #[arg(long)]
+        backgrounds: bool,
+        /// Fetch and compare; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Write the vCards here instead of ~/.local/share/kpeoplevcard.
+        #[arg(long, value_name = "DIR")]
+        contacts_dir: Option<PathBuf>,
+        /// Abort if the export is larger than this many MB.
+        #[arg(long, default_value_t = 2048, value_name = "MB")]
+        max_total_mb: u64,
+    },
     /// Text Message Forwarding: SMS / MMS / RCS relayed by your iPhone.
     Sms {
         #[command(subcommand)]
@@ -357,6 +392,9 @@ fn main() -> ExitCode {
                         }
                         Command::ImportMac { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run, .. } => {
                             import::run(import::ImportArgs { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run }, &ctx).await
+                        }
+                        Command::SyncMac { host, contacts, pins, backgrounds, dry_run, contacts_dir, max_total_mb } => {
+                            sync::run(sync::SyncArgs { host, contacts, pins, backgrounds, dry_run, contacts_dir, max_total_mb }, &state_dir, &ctx).await
                         }
                         other => commands::run(other, &ctx).await,
                     }
@@ -477,6 +515,20 @@ mod tests {
         assert!(parse(&["import-mac", "mac.local", "--create"]).is_err());
         assert!(parse(&["import-mac", "mac.local", "--backgrounds", "--since", "2026-10-01"]).is_err());
         assert!(parse(&["import-mac", "mac.local", "--backgrounds", "--days", "3"]).is_err());
+        let c = parse(&["chat", "bob@x.com", "--pin", "--position", "2"]).unwrap();
+        assert_eq!(c.command, Command::Chat { chat: "bob@x.com".into(), pin: true, unpin: false, position: Some(2) });
+        assert!(parse(&["chat", "bob@x.com", "--pin", "--unpin"]).is_err());
+        assert!(parse(&["chat", "bob@x.com", "--position", "2"]).is_err(), "--position needs --pin");
+        assert!(parse(&["chat", "bob@x.com", "--pin", "--position", "0"]).is_err(), "1-based");
+        assert_eq!(parse(&["chat", "c"]).unwrap().command, Command::Chat { chat: "c".into(), pin: false, unpin: false, position: None });
+        let c = parse(&["sync-mac"]).unwrap();
+        assert_eq!(
+            c.command,
+            Command::SyncMac { host: None, contacts: false, pins: false, backgrounds: false, dry_run: false, contacts_dir: None, max_total_mb: 2048 }
+        );
+        let c = parse(&["sync-mac", "mac.local", "--pins", "--backgrounds", "--dry-run", "--json"]).unwrap();
+        assert!(c.json);
+        assert!(matches!(c.command, Command::SyncMac { host: Some(h), pins: true, backgrounds: true, dry_run: true, contacts: false, .. } if h == "mac.local"));
         let c = parse(&["store", "purge-invalid-chats"]).unwrap();
         assert_eq!(c.command, Command::Store { command: StoreCommand::PurgeInvalidChats { yes: false } });
         let c = parse(&["store", "purge-invalid-chats", "--yes"]).unwrap();

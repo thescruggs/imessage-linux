@@ -113,9 +113,14 @@ renews at      2026-11-10 09:00 +01:00
 unread         3
 profiles       ready
 sms            active (via +15551234567)
+mac host       mac.local
 ```
 
 `sms` (newer daemons only): Text Message Forwarding, see [`sms`](#sms-enabledisablestatus).
+
+`mac host` (only when set): the daemon's `mac_host`, the Mac
+[`sync-mac`](#sync-mac-host---contacts---pins---backgrounds---dry-run) uses
+when no host is given.
 
 `profiles` (newer daemons only): whether contacts' shared names and
 photos can be fetched: `ready`, `not tried yet`, `unavailable (…)`, or
@@ -146,7 +151,9 @@ iPhone linked it, without waiting for the renewal. Takes a few seconds.
 ### `chats [-n/--limit N] [--offset N]`
 
 Conversations, most recent activity first: id, name (or participants),
-last activity, unread count. Default 50, maximum 500 per call.
+last activity, unread count. Default 50, maximum 500 per call. Pinned
+chats have a 📌 in front of their name (the order stays by activity);
+`--json` carries `pinned` and `pin_order` for each chat.
 
 ### `messages CHAT [-n/--limit N] [--before CURSOR] [-r/--reverse]`
 
@@ -284,12 +291,20 @@ shared names in chat names (`imsg chats`, message senders).
 Case-insensitive substring search over message text and subject, newest
 first, with the chat id shown on each message.
 
-### `chat CHAT`
+### `chat CHAT [--pin [--position N] | --unpin]`
 
 One chat's details: id, name, participants (with the name each shared,
-`mailto:bob@example.com (Bobby)`), last activity, unread count, its
-transcript background (id, version, who set it, the image file), the
-group photo's file and the participants' shared photos.
+`mailto:bob@example.com (Bobby)`), last activity, unread count, whether
+it is pinned (and its place among the pins, `yes (#1)`), its transcript
+background (id, version, who set it, the image file), the group photo's
+file and the participants' shared photos.
+
+`--pin` pins the chat to the top of the chat list (kmessages shows pinned
+chats first), as the last pin or at `--position N` (1 = first); `--unpin`
+unpins it. Pins are local to this computer (the daemon's
+`SetChatPinned`); [`sync-mac`](#sync-mac-host---contacts---pins---backgrounds---dry-run)
+copies the Mac's. They print `pinned <id>` / `unpinned <id>`; `--json`
+prints the updated chat.
 
 ### `chat-background CHAT --import FILE`
 
@@ -472,6 +487,81 @@ iMessage address), `failed` (exit code 1). `--json`: one object
 `{"host","dry_run","chats":[{"mac_rowid","mac_chat","chat_id",
 "background_id","version","size","result","detail","picture"}]}`.
 
+### `sync-mac [HOST] [--contacts] [--pins] [--backgrounds] [--dry-run]`
+
+Copies your contacts (with photos) and pinned conversations from a Mac,
+and with `--backgrounds` also the chats' transcript backgrounds, in one
+ssh connection. Without section flags it syncs contacts and pins. Run it
+again whenever they change on the Mac; re-running only changes what
+changed. `HOST` is the Mac's ssh destination; without it the daemon's
+`mac_host` setting is used (`imsg status`, docs/DAEMON.md,
+Configuration), and with neither it fails with a hint (`imsg doctor`
+suggests the host your ssh `anisette_command` reaches). Same requirements
+on the Mac as `import-mac`: Remote Login, `python3`, and Full Disk Access
+for the ssh session.
+
+`tools/mac-sync-export.py` (embedded in `imsg`, plus
+`tools/mac-backgrounds-export.py` for `--backgrounds`) runs on the Mac with
+`python3 -`, opens everything read-only and streams one tar back:
+`sync.json` (what was exported, or each part's error: a part that fails
+does not stop the others), `contacts/mac-<uid>.vcf`, `pins.plist` and the
+backgrounds export. It is unpacked into `~/.cache/imsg/import/<run>/`
+(capped by `--max-total-mb`, default 2048) and removed afterwards.
+
+**Contacts.** The Mac's Contacts database (every account, each person
+once), one vCard 3.0 per person with the photo embedded (JPEG, at most
+256 px), the same files `tools/mac-contacts-export.sh` wrote. They go to
+`~/.local/share/kpeoplevcard/` (`$XDG_DATA_HOME/kpeoplevcard`; another
+folder with `--contacts-dir DIR`), where KPeople (kmessages' contacts)
+picks them up while running: new and changed `mac-*.vcf` files are
+written (0600), identical ones are left alone, `mac-*.vcf` files of
+people the Mac no longer has are removed, and no other file there is
+touched. If the Mac sends no contacts, nothing changes. The contacts part
+works without the daemon (given `HOST`).
+
+**Pins.** The Mac's pinned conversations
+(`~/Library/Preferences/com.apple.messages.pinning.plist`, `pD.pP`,
+converted with `plutil -convert xml1`), in order. Each is mapped to the
+daemon's chat: a phone number or email address is the 1:1 chat
+(`tel:+1…` / `mailto:…`; bare national numbers get `+1`, as in
+`import-mac`), a group chat id is looked up in the Mac's `chat.db` and
+mapped like the history import (`group:<GROUP_ID>`), a group GUID is
+`group:<GUID>`. Pins whose chat the daemon does not have are reported
+(`not-in-daemon`, not created), as are pins that cannot be mapped
+(`unknown`). The Mac's pins then come first, in its order; chats you
+pinned here that the Mac does not pin stay pinned after them; a chat that
+an earlier sync pinned because the Mac had it, and that the Mac no longer
+pins, is unpinned. (`imsg` remembers which pins came from the Mac in
+`~/.local/state/imsg/mac-pins.json`.) Applied with `SetChatPinned` /
+`ReorderPins`; nothing is sent to Apple.
+
+**Backgrounds.** As [`import-mac --backgrounds`](#import-mac-host---backgrounds---chat-chat---create---max-total-mb-mb---dry-run)
+without `--chat` / `--create` (chats the daemon does not have are
+skipped).
+
+`--dry-run` fetches, maps and compares, and changes nothing. Output, for
+example:
+
+```console
+$ imsg sync-mac
+syncing contacts, pins from mac.local ...
+mac-sync-export: 412 contacts (198 with photos), 3 pins
+contacts     412 from the Mac (198 with photos): 3 written, 409 unchanged, 0 removed; /home/me/.local/share/kpeoplevcard
+pins         3 on the Mac: 2 pinned, 1 not found; 1 local pin(s) kept, 0 unpinned (no longer pinned on the Mac)
+  +12055550100  tel:+12055550100  pinned
+  bob@example.com  mailto:bob@example.com  pinned
+  9F1C…  group:9F1C…  not-in-daemon (no such chat here; not created)
+```
+
+Exit code 1 when a requested part failed (e.g. no Full Disk Access: the
+script's message is shown). `--json`: one object
+`{"host","dry_run","contacts":{"dir","received","photos","written","unchanged","removed"},
+"pins":{"mac":[{"pin","chat_id","result","detail"}],"order":[…],"kept_local":[…],"unpin":[…]},
+"backgrounds":{"chats":[…as import-mac --backgrounds…]}}`, with
+`{"error": "…"}` in place of a part that failed and parts not asked for
+left out. Pin results: `pinned` (`would-pin` in a dry run), `duplicate`,
+`not-in-daemon`, `unknown`.
+
 ### `store purge-invalid-chats [--yes]`
 
 Maintenance after a bad import: lists the chats whose id is not a valid
@@ -501,6 +591,7 @@ Checks, each `ok` / `WARN` / `FAIL`:
 | `connection` | connection state (`connected` = ok, `error` = FAIL) |
 | `registration` | registered iMessage handles and the next renewal |
 | `profiles` | shared names and photos (`GetStatus.profiles`): `ready` = ok, anything else WARN; `needs_login` says to run `imsg login` once |
+| `mac host` | the daemon's `mac_host` (ok); when it is unset and `anisette_command` is an ssh command, WARN suggesting `mac_host = "<the host it reaches>"` for `imsg sync-mac`; nothing otherwise |
 
 Exit code 1 if any check FAILs. `--json`: `{"checks":[{"check","level","detail"}…],"ok":bool}`.
 

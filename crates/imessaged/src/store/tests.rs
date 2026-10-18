@@ -26,6 +26,8 @@ fn direct_chat(other: &str) -> Chat {
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     }
 }
 
@@ -199,7 +201,7 @@ fn every_event_type_is_persisted() {
         .unwrap();
     assert!(matches!(&up[0], StoreUpdate::ChatUpdated(c) if c.participants == vec![Handle::new(BOB), Handle::new(CAROL)]));
     // an old message carrying an old snapshot does not undo the rename / membership
-    let old_snapshot = Chat { id: g.clone(), participants: vec![Handle::new(BOB)], display_name: Some("Ancient".into()), is_group: true, last_message_at: Some(10), unread_count: 0, background: None, icon_path: None };
+    let old_snapshot = Chat { id: g.clone(), participants: vec![Handle::new(BOB)], display_name: Some("Ancient".into()), is_group: true, last_message_at: Some(10), unread_count: 0, background: None, icon_path: None, pinned: false, pin_order: None };
     s.apply_event(&received(msg("G0", &g, BOB, 10, "old"), old_snapshot)).unwrap();
     let gc = s.get_chat(&g).unwrap().unwrap();
     assert_eq!(gc.display_name.as_deref(), Some("Team"));
@@ -639,6 +641,8 @@ fn import_snapshot_does_not_clobber_live_participants() {
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     };
     s.upsert_chat(&live).unwrap();
     let names = |s: &Store| s.get_chat(&g).unwrap().unwrap().participants.into_iter().map(|h| h.uri).collect::<Vec<_>>();
@@ -688,6 +692,8 @@ fn group_chat(guid: &str, participants: &[&str], name: Option<&str>) -> Chat {
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     }
 }
 
@@ -883,4 +889,65 @@ fn message_service_round_trips() {
     // JSON carries it
     let j = serde_json::to_value(s.get_message(&MessageId::new("S1")).unwrap().unwrap()).unwrap();
     assert_eq!(j["service"], "sms");
+}
+
+/// Pins: insert at a position, move, unpin, reorder; dense pin_order;
+/// ChatUpdated only for chats whose pin changed; unknown chats refused.
+#[test]
+fn pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path());
+    let (bob, carol, dave) = (ChatId::direct(BOB), ChatId::direct(CAROL), ChatId::direct("tel:+15551234567"));
+    for h in [BOB, CAROL, "tel:+15551234567"] {
+        s.upsert_chat(&direct_chat(h)).unwrap();
+    }
+    let order = |s: &Store| s.pinned_chats().unwrap().iter().map(|c| (c.id.0.clone(), c.pin_order)).collect::<Vec<_>>();
+    let changed = |u: &[StoreUpdate]| {
+        let mut v: Vec<String> = u.iter().filter_map(|u| if let StoreUpdate::ChatUpdated(c) = u { Some(c.id.0.clone()) } else { None }).collect();
+        v.sort();
+        v
+    };
+    let c = s.get_chat(&bob).unwrap().unwrap();
+    assert!(!c.pinned && c.pin_order.is_none());
+
+    let u = s.set_chat_pinned(&bob, true, None).unwrap();
+    assert_eq!(changed(&u), vec![BOB.to_string()]);
+    let c = s.get_chat(&bob).unwrap().unwrap();
+    assert!(c.pinned && c.pin_order == Some(0));
+    // carol at the front: bob moves down
+    let u = s.set_chat_pinned(&carol, true, Some(0)).unwrap();
+    assert_eq!(changed(&u), vec![BOB.to_string(), CAROL.to_string()]);
+    assert_eq!(order(&s), vec![(CAROL.into(), Some(0)), (BOB.into(), Some(1))]);
+    // past the end = last
+    s.set_chat_pinned(&dave, true, Some(99)).unwrap();
+    assert_eq!(order(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), [CAROL, BOB, "tel:+15551234567"]);
+    // the same again: no change, no signal
+    assert!(s.set_chat_pinned(&dave, true, Some(2)).unwrap().is_empty());
+    assert!(s.set_chat_pinned(&dave, true, None).unwrap().is_empty());
+    // unpin the middle one: the rest close up
+    let u = s.set_chat_pinned(&bob, false, None).unwrap();
+    assert_eq!(changed(&u), vec![BOB.to_string(), "tel:+15551234567".to_string()]);
+    assert_eq!(order(&s), vec![(CAROL.into(), Some(0)), ("tel:+15551234567".into(), Some(1))]);
+    let c = s.get_chat(&bob).unwrap().unwrap();
+    assert!(!c.pinned && c.pin_order.is_none());
+    assert!(s.set_chat_pinned(&bob, false, None).unwrap().is_empty(), "unpinning an unpinned chat changes nothing");
+
+    // reorder: listed first (bob gets pinned), the others keep their order after
+    let u = s.reorder_pins(&[bob.clone(), dave.clone(), bob.clone()]).unwrap();
+    assert_eq!(changed(&u), vec![BOB.to_string(), CAROL.to_string()], "dave stays at 1");
+    assert_eq!(order(&s), vec![(BOB.into(), Some(0)), ("tel:+15551234567".into(), Some(1)), (CAROL.into(), Some(2))]);
+    assert!(s.reorder_pins(std::slice::from_ref(&bob)).unwrap().is_empty());
+    // unknown chats: refused, nothing changes
+    assert!(matches!(s.reorder_pins(&[carol.clone(), ChatId::direct("mailto:nobody@example.com")]), Err(StoreError::NotFound(_))));
+    assert!(matches!(s.set_chat_pinned(&ChatId::direct("mailto:nobody@example.com"), true, None), Err(StoreError::NotFound(_))));
+    assert_eq!(order(&s)[0].0, BOB);
+    // pins survive a reopen and upserts
+    s.upsert_chat(&direct_chat(BOB)).unwrap();
+    s.close().unwrap();
+    let s = open(dir.path());
+    assert_eq!(order(&s).len(), 3);
+    assert!(s.list_chats(10, 0).unwrap().iter().filter(|c| c.pinned).count() == 3);
+    // a purged chat leaves the pins
+    s.purge_chat(&dave).unwrap();
+    assert_eq!(order(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), [BOB, CAROL]);
 }

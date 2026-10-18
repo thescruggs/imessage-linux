@@ -37,9 +37,18 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             }
             Ok(exit::OK)
         }
-        Command::Chat { chat } => {
+        Command::Chat { chat, pin, unpin, position } => {
             let id = resolve::resolve_chat(&client, &chat).await?;
-            let c = client.get_chat(&id).await?.ok_or_else(|| CliError::new(exit::NOT_FOUND, format!("no such chat: {id}")))?;
+            let c = if pin || unpin {
+                let c = client.set_chat_pinned(&id, pin, position.map(|p| p - 1)).await?;
+                if !ctx.json {
+                    confirm(ctx, &format!("{} {}", if pin { "pinned" } else { "unpinned" }, c.value.id));
+                    return Ok(exit::OK);
+                }
+                c
+            } else {
+                client.get_chat(&id).await?.ok_or_else(|| CliError::new(exit::NOT_FOUND, format!("no such chat: {id}")))?
+            };
             if ctx.json {
                 println!("{}", c.raw);
             } else {
@@ -195,7 +204,7 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             }
             Ok(exit::OK)
         }
-        Command::Doctor | Command::Hwconfig { .. } | Command::ImportMac { .. } => unreachable!("handled in main"),
+        Command::Doctor | Command::Hwconfig { .. } | Command::ImportMac { .. } | Command::SyncMac { .. } => unreachable!("handled in main"),
     }
 }
 

@@ -186,6 +186,8 @@ mod tests {
             unread_count: 0,
             background: None,
             icon_path: None,
+            pinned: false,
+            pin_order: None,
         }
     }
 

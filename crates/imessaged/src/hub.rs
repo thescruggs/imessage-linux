@@ -96,6 +96,9 @@ pub struct Status {
     pub profiles: ProfilesStatus,
     /// Text Message Forwarding (SMS relayed by the iPhone).
     pub sms: SmsForwarding,
+    /// The daemon's `mac_host` setting: the Mac's ssh destination for
+    /// `imsg sync-mac` (`null` when unset).
+    pub mac_host: Option<String>,
 }
 
 /// `LookupHandles` result element.
@@ -236,6 +239,8 @@ pub struct Hub {
     /// IDS reachability answers (handle -> (on iMessage, when asked)) for
     /// choosing between iMessage and SMS.
     reachability: Mutex<HashMap<String, (bool, Instant)>>,
+    /// `mac_host` from the configuration (reported in `GetStatus`).
+    mac_host: Mutex<Option<String>>,
 }
 
 impl Hub {
@@ -253,7 +258,13 @@ impl Hub {
             typing_timeout,
             stop: watch::channel(false).0,
             reachability: Mutex::new(HashMap::new()),
+            mac_host: Mutex::new(None),
         })
+    }
+
+    /// The `mac_host` setting `GetStatus` reports.
+    pub fn set_mac_host(&self, host: Option<String>) {
+        *self.mac_host.lock().unwrap_or_else(|p| p.into_inner()) = host;
     }
 
     pub fn engine(&self) -> &Arc<dyn Engine> {
@@ -460,6 +471,7 @@ impl Hub {
             unread,
             profiles: self.engine.profiles_status().await,
             sms: self.engine.sms_forwarding().await,
+            mac_host: self.mac_host.lock().unwrap_or_else(|p| p.into_inner()).clone(),
         }
     }
 
@@ -563,6 +575,27 @@ impl Hub {
 
     pub async fn list_chats(&self, limit: u32, offset: u32) -> OpResult<Vec<Chat>> {
         Ok(self.store()?.call(move |s| s.list_chats(limit, offset)).await?)
+    }
+
+    /// Pin or unpin a chat (local only). `order`: position among the pins
+    /// (0 = first), `None` = last. Emits `ChatUpdated` for every chat whose
+    /// pin changed and returns the chat.
+    pub async fn set_chat_pinned(self: &Arc<Self>, chat_id: &str, pinned: bool, order: Option<u32>) -> OpResult<Chat> {
+        let id = ChatId(chat_id.to_string());
+        let k = id.clone();
+        let updates = self.store()?.call(move |s| s.set_chat_pinned(&k, pinned, order)).await?;
+        self.publish(updates).await;
+        let k = id.clone();
+        self.store()?.call(move |s| s.get_chat(&k)).await?.ok_or_else(|| OpError::NotFound(format!("chat {id}")))
+    }
+
+    /// Put `ids` first among the pins, in this order (pinning them); the
+    /// other pins follow. Returns all pinned chats in order.
+    pub async fn reorder_pins(self: &Arc<Self>, ids: Vec<String>) -> OpResult<Vec<Chat>> {
+        let ids: Vec<ChatId> = ids.into_iter().map(ChatId).collect();
+        let updates = self.store()?.call(move |s| s.reorder_pins(&ids)).await?;
+        self.publish(updates).await;
+        Ok(self.store()?.call(|s| s.pinned_chats()).await?)
     }
 
     /// A chat whose background has not been downloaded (or whose file went
@@ -802,6 +835,8 @@ impl Hub {
             unread_count: 0,
             background: None,
             icon_path: None,
+            pinned: false,
+            pin_order: None,
         };
         let (stored, chat) = self
             .store()?

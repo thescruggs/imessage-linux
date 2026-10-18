@@ -235,7 +235,7 @@ fn anisette_url(state_dir: &Path) -> String {
 
 /// The anisette command, if the daemon is configured to use one
 /// (`IMESSAGED_ANISETTE_COMMAND`, config `anisette_command`).
-fn anisette_command(state_dir: &Path) -> Option<String> {
+pub(crate) fn anisette_command(state_dir: &Path) -> Option<String> {
     daemon_setting(state_dir, "IMESSAGED_ANISETTE_COMMAND", "anisette_command")
 }
 
@@ -418,7 +418,25 @@ fn systemd_check() -> Option<DoctorLine> {
 }
 
 /// Checks against the running daemon.
-async fn daemon_checks(bus: &Bus) -> Vec<DoctorLine> {
+/// `imsg sync-mac`'s default host: the daemon's `mac_host`, or (unset) a
+/// suggestion from the host the ssh anisette command reaches (pure).
+pub fn mac_host_line(mac_host: Option<&str>, anisette_host: Option<&str>, config: &Path) -> Option<DoctorLine> {
+    match (mac_host, anisette_host) {
+        (Some(h), _) => Some(line("mac host", Level::Ok, format!("{h} (`imsg sync-mac` syncs contacts and pins from it)"))),
+        (None, Some(a)) => Some(line(
+            "mac host",
+            Level::Warn,
+            format!(
+                "mac_host is not set, so `imsg sync-mac` needs the Mac's host every time; your anisette command reaches {a}: \
+                 add `mac_host = \"{a}\"` to {} and restart imessaged",
+                config.display()
+            ),
+        )),
+        (None, None) => None,
+    }
+}
+
+async fn daemon_checks(bus: &Bus, state_dir: &Path) -> Vec<DoctorLine> {
     let mut lines = Vec::new();
     let client = match Client::connect(bus).await {
         Ok(c) => c,
@@ -475,6 +493,8 @@ async fn daemon_checks(bus: &Bus) -> Vec<DoctorLine> {
                 }
                 lines.push(line("profiles", level, d));
             }
+            let anisette_host = anisette_command(state_dir).and_then(|c| imessage_common::ssh::host_of_command(&c));
+            lines.extend(mac_host_line(s.mac_host.as_deref(), anisette_host.as_deref(), &state_dir.join("config.toml")));
         }
         Err(e) => lines.push(line("connection", Level::Fail, e.message)),
     }
@@ -488,7 +508,7 @@ pub async fn doctor(state_dir: &Path, bus: &Bus, json: bool, st: Style) -> anyho
     if let Some(l) = systemd_check() {
         lines.push(l);
     }
-    lines.extend(daemon_checks(bus).await);
+    lines.extend(daemon_checks(bus, state_dir).await);
 
     let worst = lines.iter().map(|l| l.level).max().unwrap_or(Level::Ok);
     if json {
@@ -562,6 +582,16 @@ mod tests {
         assert!(ssh_lines(good, Some("HOME=/home/u\n"), Some(agent_in_config)).is_empty(), "IdentityAgent in ssh config: no warning");
         assert!(ssh_lines(good, Some("HOME=/home/u\n"), Some("Host m\n  identityfile ~/.ssh/id\n")).is_empty());
         assert_eq!(ssh_lines(good, Some("HOME=/home/u\n"), Some("# IdentityAgent commented out\n")).len(), 1);
+    }
+
+    #[test]
+    fn mac_host_suggestion() {
+        let cfg = Path::new("/s/config.toml");
+        let l = mac_host_line(Some("bebop.local"), Some("other"), cfg).unwrap();
+        assert!(l.level == Level::Ok && l.detail.starts_with("bebop.local"), "{}", l.detail);
+        let l = mac_host_line(None, Some("bebop.local"), cfg).unwrap();
+        assert!(l.level == Level::Warn && l.detail.contains("mac_host = \"bebop.local\"") && l.detail.contains("/s/config.toml"), "{}", l.detail);
+        assert!(mac_host_line(None, None, cfg).is_none());
     }
 
     #[test]

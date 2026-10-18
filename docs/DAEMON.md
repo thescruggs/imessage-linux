@@ -88,6 +88,7 @@ database with a version newer than the binary knows is refused.
 | `reactions` | `(message_id, sender)` PK, `kind` (JSON `ReactionKind`), `added`, `at`; one per sender, removals kept as tombstones; no FK (may precede the message) |
 | `handle_profiles` (schema 4) | `handle` (PK), `record_key` (CloudKit record; `NULL` = not shared / stopped), `decryption_key` (sealed BLOB), `poster` (sealed contact-poster tags, kept but not fetched), `name` / `first` / `last`, `photo_path`, `shared_at` (`at` of the newest share or stop), `fetched_at` / `fetched_key` (last successful fetch and of which record), `last_seen_at` |
 | `chats.icon_*` (schema 4) | group photo: `icon_id`, `icon_locator` (sealed MMCS locator), `icon_size`, `icon_path` (downloaded file), `icon_at` (`at` of the newest change, removals included) |
+| `chats.pinned_at` / `chats.pin_order` (schema 6) | pins (local only): when the chat was pinned (ms; `NULL` = not pinned) and its position among the pins, renumbered 0, 1, 2, … by every `SetChatPinned` / `ReorderPins` (a purged pinned chat leaves a gap until the next change; order is by `pin_order`, then `pinned_at`). Model `Chat.pinned` / `pin_order` |
 
 How each `EngineEvent` lands:
 
@@ -259,6 +260,7 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `sender_handle` | `--sender-handle` / `IMESSAGED_SENDER_HANDLE` | unset = the first registered email handle |
 | `other_handles` | `--other-handle` (repeatable) / `IMESSAGED_OTHER_HANDLES` (comma-separated) | `[]` |
 | `sms_relay_number` | `--sms-relay-number` / `IMESSAGED_SMS_RELAY_NUMBER` | unset = the first phone number in `other_handles`; the iPhone number text messages are relayed through (must be a phone number) |
+| `mac_host` | `--mac-host` / `IMESSAGED_MAC_HOST` | unset; the ssh destination of your Mac (`mac.local`, `me@mac.local`, a `Host` alias) for `imsg sync-mac` and kmessages' "Sync from Mac". Only reported (`GetStatus.mac_host`); the daemon never connects to it. A value starting with `-` or containing spaces or shell characters fails startup. `imsg doctor` suggests the host your ssh `anisette_command` reaches |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
 

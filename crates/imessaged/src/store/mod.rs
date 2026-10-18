@@ -45,6 +45,7 @@ const MIGRATIONS: &[(i64, &str)] =
         (3, include_str!("migrations/0003_background_image.sql")),
         (4, include_str!("migrations/0004_profiles_icons.sql")),
         (5, include_str!("migrations/0005_message_service.sql")),
+        (6, include_str!("migrations/0006_pins.sql")),
     ];
 
 /// Default / maximum page sizes for list calls.
@@ -775,6 +776,75 @@ impl Store {
     }
 
     // ------------------------------------------------------------------
+    // pins
+    // ------------------------------------------------------------------
+
+    /// The pinned chats, in pin order.
+    pub fn pinned_chats(&self) -> StoreResult<Vec<Chat>> {
+        self.tx(|tx, _| {
+            let mut out = vec![];
+            for id in pinned_ids(tx)? {
+                out.extend(get_chat_tx(tx, &id)?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Pin (`pinned`) or unpin a chat. A pin goes to position `order`
+    /// among the pins (0 = first; `None` or past the end = last), the
+    /// others move down; pinning an already pinned chat moves it. Pin
+    /// orders are renumbered 0, 1, 2, ... Returns a `ChatUpdated` for
+    /// every chat whose pin state or position changed (none if nothing
+    /// did). `NotFound` for an unknown chat.
+    pub fn set_chat_pinned(&self, id: &ChatId, pinned: bool, order: Option<u32>) -> StoreResult<Vec<StoreUpdate>> {
+        self.tx(|tx, _| {
+            let was: Option<Option<i64>> = tx.query_row("SELECT pinned_at FROM chats WHERE id = ?1", params![id.0], |r| r.get(0)).optional()?;
+            let Some(was) = was else { return Err(StoreError::NotFound(format!("chat {id}"))) };
+            let before = pin_state(tx)?;
+            let mut ids: Vec<ChatId> = pinned_ids(tx)?.into_iter().filter(|p| p != id).collect();
+            if pinned {
+                let at = order.map_or(ids.len(), |o| (o as usize).min(ids.len()));
+                ids.insert(at, id.clone());
+                if was.is_none() {
+                    tx.execute("UPDATE chats SET pinned_at = ?2 WHERE id = ?1", params![id.0, now_ms()])?;
+                }
+            } else {
+                tx.execute("UPDATE chats SET pinned_at = NULL, pin_order = NULL WHERE id = ?1", params![id.0])?;
+            }
+            renumber_pins(tx, &ids)?;
+            pin_updates(tx, &before)
+        })
+    }
+
+    /// Put `ids` first among the pins, in this order (pinning any that are
+    /// not pinned yet); other pins keep their relative order after them.
+    /// Duplicates count once. `NotFound` (and nothing changes) if any chat
+    /// is unknown. Returns the `ChatUpdated`s, as [`Store::set_chat_pinned`].
+    pub fn reorder_pins(&self, ids: &[ChatId]) -> StoreResult<Vec<StoreUpdate>> {
+        self.tx(|tx, _| {
+            let mut first: Vec<ChatId> = vec![];
+            for id in ids {
+                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)", params![id.0], |r| r.get(0))?;
+                if !exists {
+                    return Err(StoreError::NotFound(format!("chat {id}")));
+                }
+                if !first.contains(id) {
+                    first.push(id.clone());
+                }
+            }
+            let before = pin_state(tx)?;
+            let now = now_ms();
+            for id in &first {
+                tx.execute("UPDATE chats SET pinned_at = ?2 WHERE id = ?1 AND pinned_at IS NULL", params![id.0, now])?;
+            }
+            let rest: Vec<ChatId> = pinned_ids(tx)?.into_iter().filter(|p| !first.contains(p)).collect();
+            first.extend(rest);
+            renumber_pins(tx, &first)?;
+            pin_updates(tx, &before)
+        })
+    }
+
+    // ------------------------------------------------------------------
     // maintenance
     // ------------------------------------------------------------------
 
@@ -1048,12 +1118,19 @@ fn set_participants_at_tx(tx: &Transaction<'_>, id: &ChatId, participants: &[Han
 
 fn get_chat_tx(tx: &Transaction<'_>, id: &ChatId) -> StoreResult<Option<Chat>> {
     let row = tx
-        .prepare_cached("SELECT display_name, is_group, last_message_at, unread_count FROM chats WHERE id = ?1")?
+        .prepare_cached("SELECT display_name, is_group, last_message_at, unread_count, pinned_at, pin_order FROM chats WHERE id = ?1")?
         .query_row(params![id.0], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, i64>(3)?))
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
         })
         .optional()?;
-    let Some((display_name, is_group, last, unread)) = row else { return Ok(None) };
+    let Some((display_name, is_group, last, unread, pinned_at, pin_order)) = row else { return Ok(None) };
     let participants = {
         let mut st = tx.prepare_cached(
             "SELECT p.handle, h.display FROM chat_participants p LEFT JOIN handles h ON h.uri = p.handle WHERE p.chat_id = ?1 ORDER BY p.position",
@@ -1073,7 +1150,52 @@ fn get_chat_tx(tx: &Transaction<'_>, id: &ChatId) -> StoreResult<Option<Chat>> {
         unread_count: unread.clamp(0, u32::MAX as i64) as u32,
         background: chat_background_tx(tx, id)?,
         icon_path: profiles::chat_icon_path_tx(tx, id)?,
+        pinned: pinned_at.is_some(),
+        pin_order: pinned_at.and(pin_order).map(|o| o.clamp(0, u32::MAX as i64) as u32),
     }))
+}
+
+/// Pinned chat ids in pin order (then by when they were pinned, then id).
+fn pinned_ids(tx: &Transaction<'_>) -> StoreResult<Vec<ChatId>> {
+    let mut st = tx.prepare_cached("SELECT id FROM chats WHERE pinned_at IS NOT NULL ORDER BY pin_order IS NULL, pin_order, pinned_at, id")?;
+    let ids = st.query_map([], |r| Ok(ChatId(r.get(0)?)))?.collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+
+/// `(id, pinned_at, pin_order)` of every pinned chat.
+fn pin_state(tx: &Transaction<'_>) -> StoreResult<Vec<(String, i64, Option<i64>)>> {
+    let mut st = tx.prepare_cached("SELECT id, pinned_at, pin_order FROM chats WHERE pinned_at IS NOT NULL")?;
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// `pin_order` = position in `ids` (all of which must be pinned).
+fn renumber_pins(tx: &Transaction<'_>, ids: &[ChatId]) -> StoreResult<()> {
+    for (i, id) in ids.iter().enumerate() {
+        tx.prepare_cached("UPDATE chats SET pin_order = ?2 WHERE id = ?1 AND pin_order IS NOT ?2")?.execute(params![id.0, i as i64])?;
+    }
+    Ok(())
+}
+
+/// `ChatUpdated` for every chat whose pin state differs from `before`.
+fn pin_updates(tx: &Transaction<'_>, before: &[(String, i64, Option<i64>)]) -> StoreResult<Vec<StoreUpdate>> {
+    let after = pin_state(tx)?;
+    let mut changed: Vec<&str> = vec![];
+    for (id, at, order) in &after {
+        if !before.iter().any(|(b, bat, bo)| b == id && bat == at && bo == order) {
+            changed.push(id);
+        }
+    }
+    for (id, _, _) in before {
+        if !after.iter().any(|(a, _, _)| a == id) {
+            changed.push(id);
+        }
+    }
+    let mut out = vec![];
+    for id in changed {
+        out.extend(get_chat_tx(tx, &ChatId(id.to_string()))?.map(StoreUpdate::ChatUpdated));
+    }
+    Ok(out)
 }
 
 fn chat_background_tx(tx: &Transaction<'_>, id: &ChatId) -> StoreResult<Option<ChatBackground>> {

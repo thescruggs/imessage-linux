@@ -23,6 +23,9 @@
 //! sms_relay_number  = "+15551234567"               # your iPhone's number that relays text
 //!                     # messages (Text Message Forwarding); default: the first
 //!                     # phone number in other_handles
+//! mac_host          = "mac.local"                  # ssh destination of your Mac for
+//!                     # `imsg sync-mac` (contacts, pins); only reported
+//!                     # in GetStatus, the daemon never connects to it
 //! ```
 //!
 //! **Logging and privacy.** The default filter ([`DEFAULT_LOG_LEVEL`]) keeps
@@ -159,6 +162,7 @@ pub struct FileConfig {
     pub sender_handle: Option<String>,
     pub other_handles: Option<Vec<String>>,
     pub sms_relay_number: Option<String>,
+    pub mac_host: Option<String>,
 }
 
 impl FileConfig {
@@ -189,6 +193,7 @@ pub struct Overrides {
     /// Replaces the file's list when `Some`.
     pub other_handles: Option<Vec<String>>,
     pub sms_relay_number: Option<String>,
+    pub mac_host: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +224,10 @@ pub struct DaemonConfig {
     /// The iPhone number (`tel:` URI) that relays text messages; `None` =
     /// the first `tel:` entry of `other_handles` (see [`DaemonConfig::sms_number`]).
     pub sms_relay_number: Option<String>,
+    /// ssh destination of the user's Mac (`mac.local`, `me@mac`, a `Host`
+    /// alias) for `imsg sync-mac`. The daemon only reports it
+    /// (`GetStatus.mac_host`); it never connects to it. `None` = unset.
+    pub mac_host: Option<String>,
 }
 
 impl DaemonConfig {
@@ -234,6 +243,7 @@ impl DaemonConfig {
             sender_handle: None,
             other_handles: vec![],
             sms_relay_number: None,
+            mac_host: None,
         }
     }
 
@@ -275,6 +285,10 @@ impl DaemonConfig {
             let v = v.trim();
             c.sms_relay_number = (!v.is_empty()).then(|| Handle::try_normalize(v).unwrap_or_else(|| v.to_string()));
         }
+        if let Some(v) = over.mac_host.or(file.mac_host) {
+            let v = v.trim();
+            c.mac_host = (!v.is_empty()).then(|| v.to_string());
+        }
         c
     }
 
@@ -308,6 +322,11 @@ impl DaemonConfig {
             && !Handle::try_normalize(n).is_some_and(|h| h.starts_with("tel:"))
         {
             anyhow::bail!("invalid sms_relay_number {n:?}: expected a phone number");
+        }
+        if let Some(h) = &self.mac_host
+            && !imessage_common::ssh::valid_host(h)
+        {
+            anyhow::bail!("invalid mac_host {h:?}: expected an ssh destination such as mac.local or me@mac.local");
         }
         Ok(())
     }
@@ -378,6 +397,7 @@ mod tests {
             sender_handle: None,
             other_handles: None,
             sms_relay_number: None,
+            mac_host: None,
         };
         let c = DaemonConfig::resolve("/s".into(), f, o);
         assert_eq!(c.anisette_url, "http://localhost:6969");
@@ -466,6 +486,25 @@ mod tests {
         c.validate().unwrap();
         let f = FileConfig::parse("sms_relay_number = \"me@example.com\"").unwrap();
         assert!(DaemonConfig::resolve("/s".into(), f, Overrides::default()).validate().is_err());
+    }
+
+    #[test]
+    fn mac_host_resolution() {
+        let c = DaemonConfig::resolve("/s".into(), FileConfig::default(), Overrides::default());
+        assert_eq!(c.mac_host, None);
+        let f = FileConfig::parse("mac_host = \" bebop.local \"").unwrap();
+        let c = DaemonConfig::resolve("/s".into(), f.clone(), Overrides::default());
+        assert_eq!(c.mac_host.as_deref(), Some("bebop.local"));
+        c.validate().unwrap();
+        let o = Overrides { mac_host: Some("me@mac".into()), ..Default::default() };
+        assert_eq!(DaemonConfig::resolve("/s".into(), f.clone(), o).mac_host.as_deref(), Some("me@mac"));
+        // IMESSAGED_MAC_HOST= means unset
+        let o = Overrides { mac_host: Some(" ".into()), ..Default::default() };
+        assert_eq!(DaemonConfig::resolve("/s".into(), f, o).mac_host, None);
+        for bad in ["-oProxyCommand=x", "mac local", "mac;rm"] {
+            let o = Overrides { mac_host: Some(bad.into()), ..Default::default() };
+            assert!(DaemonConfig::resolve("/s".into(), FileConfig::default(), o).validate().is_err(), "{bad}");
+        }
     }
 
     #[test]

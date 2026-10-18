@@ -88,6 +88,8 @@ fails during an interactive `Login`, the call fails at once with
 | `LookupHandles` | `handles_json s` | `s` | JSON array of handles in → `[{"handle":"mailto:bob@example.com","reachable":true}, …]` in input order. Any invalid handle fails the call (`InvalidHandle`). |
 | `DownloadAttachment` | `attachment_id s` | `s` | Local path. Downloads once to `$STATE_DIR/attachments/<id>/<filename>` (file 0600, dirs 0700; filename sanitized and cut to 200 bytes); later and concurrent calls return the same path without downloading again. `NotFound` if the attachment is unknown, has no locator, or its locator is unreadable because the state key changed (see docs/DAEMON.md, recovery). Outgoing attachments (`SendFile`) return the daemon's own copy, made at send time in the same place, so deleting or moving the original does not break them (if that copy could not be made, a warning is logged and the original path is returned). |
 | `ImportChatBackground` | `chat_id s`, `path s` | `s` | Set the chat's transcript background **locally only** (nothing is sent) from a file the daemon can read: a PosterKit payload as Apple sends it or a plain image (e.g. recovered from a Mac's `~/Library/Messages/TranscriptBackgroundCache`). Copied into `$STATE_DIR/backgrounds/`; id `local-…`, `set_at` = the import time, so a later change from iMessage replaces it but a late-delivered older one (e.g. a removal) does not. Returns the updated [Chat](#chat) and emits `ChatUpdated`. `NotFound` for an unknown chat, `InvalidInput` for a relative path, an unreadable file or one over 32 MiB. |
+| `SetChatPinned` | `chat_id s`, `pinned b`, `order i` | `s` | Pin a chat to the top of the chat list (`pinned = true`) or unpin it, **locally only** (Messages' own pins sync through CloudKit, which we do not; `imsg sync-mac` copies the Mac's). `order` is the position among the pins, 0 = first; negative or past the end = last; pinning a pinned chat moves it. The pins are renumbered 0, 1, 2, … Returns the updated [Chat](#chat); `ChatUpdated` is emitted for every chat whose `pinned` / `pin_order` changed (none if nothing did). `NotFound` for an unknown chat. |
+| `ReorderPins` | `chat_ids_json s` | `s` | Put these chats first among the pins, in this order (pinning any that are not pinned); the other pins keep their relative order after them. Duplicates count once; `[]` changes nothing. Returns a JSON array of all pinned [Chat](#chat)s in pin order; `ChatUpdated` as for `SetChatPinned`. Any unknown chat id fails the call with `NotFound` and nothing changes; `InvalidInput` for JSON that is not an array of strings. |
 | `ImportMessages` | `batch_json s` | `s` | One-time history import ([ImportBatch](#importbatch) in, [ImportResult](#importresult) out); used by `imsg import-mac`. Insert-only and idempotent by message id: a message the store already has is skipped and left unchanged. Every chat id and handle must be valid (see below), else `InvalidInput` naming the first bad value and nothing is stored. Slow (copies files): call with a 120 s timeout. |
 | `PurgeInvalidChats` | `dry_run b` | `s` | Maintenance (`imsg store purge-invalid-chats`): deletes every chat whose id is not a valid chat id (a `mailto:` / `tel:` URI, `group:<GUID>` or `group-p:<URIs>`; e.g. raw Mac SMS handles like `46339(smsft)` left by an old import) with its messages, reactions, attachment rows and the copied files under `$STATE_DIR/attachments/` (and background files), plus handle rows with an invalid URI no remaining chat lists. `dry_run = true` deletes nothing and reports what would go. Returns a [PurgeSummary](#purgesummary). No signals (only logged): clients should reload their chat list afterwards. |
 | `Version` | — | `s` | daemon version, e.g. `"0.1.0"` |
@@ -105,7 +107,7 @@ fails during an interactive `Login`, the call fails at once with
 |---|---|---|
 | `MessageReceived` | `chat_id s`, `message_json s` | A **new message row**: incoming, from another of our devices, or sent through this daemon (`is_from_me` tells which). Fires after the row is stored. |
 | `MessageUpdated` | `chat_id s`, `message_json s` | An existing message changed: delivery state (`sent` → `delivered` → `read`, or `failed`), reaction added/removed, edit, unsend. Carries the full current message. |
-| `ChatUpdated` | `chat_json s` | Chat created, renamed, membership changed, new activity, unread count changed. |
+| `ChatUpdated` | `chat_json s` | Chat created, renamed, membership changed, new activity, unread count changed, pinned / unpinned / moved among the pins. |
 | `Typing` | `chat_id s`, `handle s`, `typing b` | Someone started/stopped typing. A start without refresh is cleared after 60 s, and a message from that person clears it. In memory only. |
 | `ConnectionStateChanged` | `state s` | Same value as the `ConnectionState` property. |
 | `TwoFactorRequired` | — | A login (interactive or the automatic re-login after IDS error 6005) needs a code: call `SubmitTwoFactor`. |
@@ -152,11 +154,18 @@ change. If the daemon's own event queue overflows it emits
                    "sender": {"uri": "mailto:me@example.com"}, "other_handles": ["tel:+15551234567"]},
   "unread": 3,
   "profiles": {"state": "ready"},
-  "sms": {"state": "active", "number": "tel:+15551234567", "since": 1700000100000}
+  "sms": {"state": "active", "number": "tel:+15551234567", "since": 1700000100000},
+  "mac_host": "mac.local"
 }
 ```
 
 `sms` is [SmsForwarding](#smsforwarding) (older daemons omit it).
+
+`mac_host` is the daemon's `mac_host` setting (docs/DAEMON.md,
+Configuration): the ssh destination of the user's Mac that `imsg
+sync-mac` (and the kmessages "Sync from Mac" button) copies contacts and
+pins from when no host is given; `null` when unset (older daemons omit
+it). The daemon itself never connects to it.
 
 `profiles` says whether contacts' shared names and photos can be fetched
 (iCloud / CloudKit access): `{"state": "ready"}`, `"pending"` (not tried
@@ -203,9 +212,18 @@ store is unavailable.
     "set_by": "mailto:bob@example.com",
     "set_at": 1700000100000
   },
-  "icon_path": "/home/me/.local/state/imessaged/chat_icons/group_5B0E…/6F1A….jpg"
+  "icon_path": "/home/me/.local/state/imessaged/chat_icons/group_5B0E…/6F1A….jpg",
+  "pinned": true,
+  "pin_order": 0
 }
 ```
+
+`pinned` says whether the chat is pinned to the top of the chat list and
+`pin_order` is its position among the pins (0 = first; `null` when not
+pinned). Pins are local to this computer (`SetChatPinned`,
+`ReorderPins`); clients show pinned chats first in `pin_order`, then the
+rest by `last_message_at`. `ListChats` keeps its newest-activity order.
+Older daemons omit both (read them as `false` / `null`).
 
 `icon_path` is the group's photo (Messages "Change Name and Photo" on a
 group), absent / `null` for none or until it is downloaded. A change

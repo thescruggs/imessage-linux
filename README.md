@@ -94,6 +94,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now imessaged
 imsg doctor
 imsg login --apple-id you@icloud.com
+imsg sync-mac you@mac.local    # contacts + pinned chats from the Mac; see "Contacts"
 ```
 
 The packaged unit runs `/usr/bin/imessaged`. A unit you installed by
@@ -286,6 +287,8 @@ imsg register                                     # re-register now (e.g. to pic
 imsg chats                                        # conversations, newest first
 imsg messages bob@example.com                     # a chat by handle, id or name
 imsg chat bob@example.com                         # one chat's details (incl. background)
+imsg chat bob@example.com --pin                   # pin it to the top (--unpin)
+imsg sync-mac mac.local                           # contacts + pinned chats from your Mac
 imsg send bob@example.com "hello from Linux"
 imsg send alice@example.com,bob@example.com hi    # group
 imsg send-file bob@example.com ~/Pictures/cat.jpg
@@ -339,18 +342,26 @@ drop in shows up while kmessages runs. KAddressBook / Akonadi contacts work
 automatically once Akonadi's KPeople plugin is installed (from
 `akonadi-contacts`).
 
-To copy your **Mac's** contacts (one-off, re-run whenever they change):
+To copy your **Mac's** contacts and pinned conversations (re-run whenever
+they change):
 
 ```sh
-tools/mac-contacts-export.sh mac.local     # ssh host of the Mac; [OUTDIR] optional
+imsg sync-mac mac.local     # ssh host of the Mac; or set mac_host and run `imsg sync-mac`
+imsg sync-mac --contacts    # contacts only (--pins: pins only; --dry-run: change nothing)
 ```
 
 It reads the Contacts database over one ssh connection (read-only; no
 Contacts.app, no privacy prompt; the ssh session needs Full Disk Access as
 for `chat.db`) and writes one vCard 3.0 per person, photo embedded (JPEG,
 256 px), as `~/.local/share/kpeoplevcard/mac-<uid>.vcf`. Re-running replaces
-only the `mac-*.vcf` files. `--dry-run` lists what would be written. The
-files are your address book: keep them out of git and backups you share.
+only the `mac-*.vcf` files (and rewrites only those that changed). The
+same trip copies the Mac's pinned conversations: kmessages shows them at
+the top; pins you set here (`imsg chat CHAT --pin`) are kept. Set the
+daemon's `mac_host` (`mac_host = "mac.local"` in `config.toml`; `imsg
+doctor` suggests it) to leave out the host. Details: [docs/CLI.md](docs/CLI.md),
+`sync-mac`. `tools/mac-contacts-export.sh mac.local [OUTDIR]` still works
+(it runs `imsg sync-mac --contacts`). The files are your address book:
+keep them out of git and backups you share.
 
 ## Importing history from the Mac
 

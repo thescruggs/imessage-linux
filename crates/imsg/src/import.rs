@@ -369,6 +369,8 @@ pub(crate) fn chat_for(c: &ChatRec, me: &Me, dest: Option<&str>, our: Option<&st
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     }
 }
 
@@ -675,13 +677,13 @@ pub(crate) fn private_dir(p: &Path) -> std::io::Result<()> {
 fn fetch(args: &ImportArgs, since: i64, stage: &Path) -> anyhow::Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let argv = ssh_argv(&args.host, since, args.max_attachment_mb, home.as_deref());
-    fetch_tar(&argv, EXPORT_SCRIPT, &args.host, args.max_total_mb, stage)
+    fetch_tar(&argv, EXPORT_SCRIPT.to_string(), &args.host, args.max_total_mb, stage)
 }
 
 /// Run `argv` (an ssh command running `python3 -`), feed it `script` on
 /// stdin and unpack the tar it prints into `stage` (`tar -x
 /// --no-same-owner --no-same-permissions`), aborting past `max_total_mb`.
-pub(crate) fn fetch_tar(argv: &[String], script: &'static str, host: &str, max_total_mb: u64, stage: &Path) -> anyhow::Result<()> {
+pub(crate) fn fetch_tar(argv: &[String], script: String, host: &str, max_total_mb: u64, stage: &Path) -> anyhow::Result<()> {
     let mut ssh = Process::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::piped())
@@ -721,7 +723,7 @@ pub(crate) fn fetch_tar(argv: &[String], script: &'static str, host: &str, max_t
     let ssh_status = ssh.wait()?;
     let _ = writer.join();
     if over {
-        anyhow::bail!("the export is larger than --max-total-mb {max_total_mb} MB; nothing imported");
+        anyhow::bail!("the export is larger than --max-total-mb {max_total_mb} MB; nothing changed");
     }
     let tar = tar.map_err(|e| anyhow::anyhow!("cannot run tar: {e}"))?;
     if !ssh_status.success() {

@@ -59,6 +59,11 @@ struct Args {
     #[arg(long, env = "IMESSAGED_SMS_RELAY_NUMBER")]
     sms_relay_number: Option<String>,
 
+    /// ssh destination of your Mac (e.g. mac.local) for `imsg sync-mac`;
+    /// only reported in GetStatus, the daemon never connects to it.
+    #[arg(long, env = "IMESSAGED_MAC_HOST")]
+    mac_host: Option<String>,
+
     /// Do not serve the D-Bus API (headless / tests). Messages are still
     /// received and stored.
     #[arg(long)]
@@ -80,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
             sender_handle: args.sender_handle,
             other_handles: (!args.other_handles.is_empty()).then_some(args.other_handles),
             sms_relay_number: args.sms_relay_number,
+            mac_host: args.mac_host,
         },
     )?;
 
@@ -95,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if !cfg.other_handles.is_empty() {
         log::info!("other handles (also mine): {}", cfg.other_handles.join(", "));
+    }
+    if let Some(h) = &cfg.mac_host {
+        log::info!("Mac host (for imsg sync-mac): {h}");
     }
     if let Some(n) = cfg.sms_number() {
         log::info!("SMS relay number (Text Message Forwarding): {n}");

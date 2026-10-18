@@ -110,7 +110,9 @@ def cached_file(cache, name, max_bytes):
     return path, None
 
 
-def export(args, out_stream):
+def export(args, out_stream, tar=None):
+    """Write the tar to `out_stream`, or add the members to the open `tar`
+    (mac-sync-export.py: one tar for several exports) and leave it open."""
     db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(args.db), uri=True)
     max_bytes = int(args.max_file_mb * 1024 * 1024)
     chats = []
@@ -166,7 +168,7 @@ def export(args, out_stream):
     meta = {"type": "meta", "format": 1, "exported_at": int(time.time())}
     meta.update(counters)
     body = "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in [meta] + chats).encode("utf-8")
-    out = tarfile.open(fileobj=out_stream, mode="w|", format=tarfile.PAX_FORMAT)
+    out = tar if tar is not None else tarfile.open(fileobj=out_stream, mode="w|", format=tarfile.PAX_FORMAT)
     info = tarfile.TarInfo("backgrounds.jsonl")
     info.size = len(body)
     info.mtime = int(time.time())
@@ -183,8 +185,9 @@ def export(args, out_stream):
                 out.addfile(info, f)
         except OSError as e:
             sys.stderr.write("mac-backgrounds-export: skipping %s: %s\n" % (arc, e))
-    out.close()
-    out_stream.flush()
+    if tar is None:
+        out.close()
+        out_stream.flush()
     return counters
 
 

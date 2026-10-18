@@ -371,7 +371,7 @@ pub async fn run(args: BackgroundArgs, ctx: &Ctx) -> anyhow::Result<u8> {
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let argv = import::ssh_python_argv(&args.host, home.as_deref(), &["--max-file-mb".into(), MAX_FILE_MB.to_string()]);
-    let fetched = tokio::task::block_in_place(|| import::fetch_tar(&argv, EXPORT_SCRIPT, &args.host, args.max_total_mb, &stage).and_then(|_| read_records(&stage)));
+    let fetched = tokio::task::block_in_place(|| import::fetch_tar(&argv, EXPORT_SCRIPT.to_string(), &args.host, args.max_total_mb, &stage).and_then(|_| read_records(&stage)));
     let recs = match fetched {
         Ok(r) => r,
         Err(e) => {
@@ -404,7 +404,7 @@ pub async fn run(args: BackgroundArgs, ctx: &Ctx) -> anyhow::Result<u8> {
     Ok(if out.iter().any(|o| o.result == "failed") { exit::ERROR } else { exit::OK })
 }
 
-async fn execute(args: &BackgroundArgs, client: Option<&Client>, rows: &[PlanRow]) -> anyhow::Result<Vec<Outcome>> {
+pub(crate) async fn execute(args: &BackgroundArgs, client: Option<&Client>, rows: &[PlanRow]) -> anyhow::Result<Vec<Outcome>> {
     let mut out = vec![];
     for r in rows {
         let mut o = Outcome {
@@ -667,6 +667,8 @@ mod tests {
             is_group: false,
             background: None,
             icon_path: None,
+            pinned: false,
+            pin_order: None,
         };
         assert_eq!(already_there(&chat, "P", Some(&poster), None), None);
         let bg = |id: &str, payload: Option<&Path>, path: Option<&str>| ChatBackground {

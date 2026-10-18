@@ -94,6 +94,8 @@ async fn sms_routing_storage_and_limits() {
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     };
     let incoming = Message {
         id: MessageId::new("SMS-IN-1"),

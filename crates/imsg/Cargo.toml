@@ -28,11 +28,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 libc = "0.2"
 # Reads the daemon's config.toml (anisette_url) for `doctor`.
 toml = "0.8"
+# The Mac's pinned-conversations plist (`sync-mac`).
+plist.workspace = true
 
 [dev-dependencies]
 # Integration tests run imessaged in-process with MockEngine on a private
 # bus. Dev-only: `cargo tree -p imsg -e normal` stays free of rustpush.
 imessaged = { path = "../imessaged" }
 tempfile = "3"
-# Synthetic chat.db `properties` fixtures for the background exporter tests.
-plist.workspace = true

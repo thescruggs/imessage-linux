@@ -34,6 +34,8 @@ fn chat(id: ChatId, who: &[&str]) -> Chat {
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     }
 }
 

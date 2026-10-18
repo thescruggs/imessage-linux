@@ -135,6 +135,8 @@ fn sms_chat(inst: &MessageInst, my_handles: &[String], last_message_at: Option<u
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     })
 }
 
@@ -163,6 +165,8 @@ pub fn chat_for(conv: &ConversationData, sender: Option<&str>, my_handles: &[Str
         unread_count: 0,
         background: None,
         icon_path: None,
+        pinned: false,
+        pin_order: None,
     }
 }
 

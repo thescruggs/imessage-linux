@@ -177,12 +177,20 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn pad(s: &str, width: usize) -> String {
-    let n = s.chars().count();
-    if n >= width { s.to_string() } else { format!("{s}{}", " ".repeat(width - n)) }
+/// Terminal columns of `s`: one per char, two for the pin mark.
+fn width(s: &str) -> usize {
+    s.chars().map(|c| if c == PIN_MARK { 2 } else { 1 }).sum()
 }
 
-/// Chat table: `ID  NAME  LAST  UNREAD`.
+fn pad(s: &str, width_: usize) -> String {
+    let n = width(s);
+    if n >= width_ { s.to_string() } else { format!("{s}{}", " ".repeat(width_ - n)) }
+}
+
+/// Marks pinned chats in `imsg chats`.
+pub const PIN_MARK: char = '📌';
+
+/// Chat table: `ID  NAME  LAST  UNREAD`; pinned chats' names start with 📌.
 pub fn chats_table(chats: &[Chat], st: Style, now: &DateTime<impl TimeZone<Offset: std::fmt::Display>>) -> String {
     if chats.is_empty() {
         return "no conversations\n".to_string();
@@ -192,7 +200,7 @@ pub fn chats_table(chats: &[Chat], st: Style, now: &DateTime<impl TimeZone<Offse
         .map(|c| {
             [
                 c.id.0.clone(),
-                truncate(&chat_name(c), 40),
+                if c.pinned { format!("{PIN_MARK} {}", truncate(&chat_name(c), 37)) } else { truncate(&chat_name(c), 40) },
                 c.last_message_at.map(|t| render_time(t, now)).unwrap_or_else(|| "-".into()),
                 if c.unread_count > 0 { c.unread_count.to_string() } else { String::new() },
             ]
@@ -202,7 +210,7 @@ pub fn chats_table(chats: &[Chat], st: Style, now: &DateTime<impl TimeZone<Offse
     let mut w = headers.map(|h| h.len());
     for r in &rows {
         for (i, cell) in r.iter().enumerate() {
-            w[i] = w[i].max(cell.chars().count());
+            w[i] = w[i].max(width(cell));
         }
     }
     let mut out = String::new();
@@ -225,6 +233,7 @@ pub fn chat_details(c: &Chat, st: Style, now: &DateTime<impl TimeZone<Offset: st
         ("participants", c.participants.iter().map(participant).collect::<Vec<_>>().join(", ")),
         ("last", c.last_message_at.map(|t| render_time(t, now)).unwrap_or_else(|| "-".into())),
         ("unread", c.unread_count.to_string()),
+        ("pinned", if c.pinned { format!("yes (#{})", c.pin_order.map_or(0, |o| o + 1)) } else { "no".into() }),
     ];
     match &c.background {
         None => rows.push(("background", "none".into())),
@@ -439,6 +448,9 @@ pub fn status_table(s: &Status, st: Style) -> String {
     if let Some(sms) = &s.sms {
         rows.push(("sms", sms_state_colored(sms, st)));
     }
+    if let Some(h) = &s.mac_host {
+        rows.push(("mac host", h.clone()));
+    }
     if matches!(s.connection, ConnectionState::NeedsLogin) {
         rows.push(("hint", "run `imsg login`".into()));
     }
@@ -599,16 +611,27 @@ mod tests {
             unread_count: 2,
             background: None,
             icon_path: None,
+            pinned: false,
+            pin_order: None,
         };
         assert_eq!(chat_name(&c), "bob@example.com, +15551234567");
         let named = Chat { display_name: Some("Team".into()), unread_count: 0, last_message_at: None, ..c.clone() };
         assert_eq!(chat_name(&named), "Team");
-        let t = chats_table(&[c, named], Style::PLAIN, &now());
+        let t = chats_table(&[c, named.clone()], Style::PLAIN, &now());
         let lines: Vec<&str> = t.lines().collect();
         assert_eq!(lines[0], "ID        NAME                           LAST   UNREAD");
         assert_eq!(lines[1], "group:G1  bob@example.com, +15551234567  09:05  2");
         assert_eq!(lines[2], "group:G1  Team                           -");
         assert_eq!(chats_table(&[], Style::PLAIN, &now()), "no conversations\n");
+        // pinned: marked, columns still line up (the mark is two columns wide)
+        let pinned = Chat { pinned: true, pin_order: Some(0), id: ChatId::direct("mailto:bob@example.com"), ..named.clone() };
+        let t = chats_table(&[pinned.clone(), named.clone()], Style::PLAIN, &now());
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines[0], "ID                      NAME     LAST  UNREAD");
+        assert_eq!(lines[1], "mailto:bob@example.com  📌 Team  -");
+        assert_eq!(lines[2], "group:G1                Team     -");
+        assert!(chat_details(&pinned, Style::PLAIN, &now()).contains("pinned        yes (#1)"));
+        assert!(chat_details(&named, Style::PLAIN, &now()).contains("pinned        no"));
         assert_eq!(truncate("abcdef", 4), "abc…");
     }
 
@@ -625,6 +648,8 @@ mod tests {
             unread_count: 0,
             background: None,
             icon_path: Some("/s/i/g.jpg".into()),
+            pinned: false,
+            pin_order: None,
         };
         assert_eq!(chat_name(&c), "Bobby, +15551234567");
         let t = chat_details(&c, Style::PLAIN, &now());
@@ -653,11 +678,13 @@ mod tests {
             unread: Some(0),
             profiles: Some(ProfilesStatus { state: ProfilesState::NeedsLogin, detail: Some("Apple wants a fresh sign-in for iCloud".into()) }),
             sms: Some(SmsForwarding { state: SmsState::Active, number: Some("tel:+15555550100".into()), since: None, detail: None }),
+            mac_host: Some("bebop.local".into()),
         };
         let t = status_table(&s, Style::PLAIN);
         assert!(t.contains("profiles    needs `imsg login` (Apple wants a fresh sign-in for iCloud)"), "{t}");
         assert!(t.contains("connection  needs_login"), "{t}");
         assert!(t.contains("sms         active (via +15555550100)"), "{t}");
+        assert!(t.contains("mac host    bebop.local"), "{t}");
         let e = SmsForwarding { state: SmsState::Error, detail: Some("no iPhone".into()), ..Default::default() };
         assert_eq!(sms_state_colored(&e, Style::PLAIN), "error (no iPhone)");
         assert!(sms_table(&SmsForwarding::default(), Style::PLAIN).contains("state   off"));

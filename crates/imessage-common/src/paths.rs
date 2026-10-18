@@ -39,3 +39,15 @@ pub fn default_state_dir() -> PathBuf {
 pub fn data_dir() -> PathBuf {
     xdg("XDG_DATA_HOME", ".local/share").join("imessage-linux")
 }
+
+/// Where KPeople (kmessages' contacts) reads vCards from and `imsg
+/// sync-mac` writes the Mac's: `${XDG_DATA_HOME:-~/.local/share}/kpeoplevcard`.
+pub fn kpeople_vcard_dir() -> PathBuf {
+    xdg("XDG_DATA_HOME", ".local/share").join("kpeoplevcard")
+}
+
+/// `imsg`'s own state (the pins the last `imsg sync-mac` applied):
+/// `${XDG_STATE_HOME:-~/.local/state}/imsg`.
+pub fn imsg_state_dir() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("imsg")
+}

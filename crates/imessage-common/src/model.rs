@@ -303,6 +303,14 @@ pub struct Chat {
     /// Photo" on a group), once downloaded; `None` for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_path: Option<String>,
+    /// Pinned to the top of the chat list (local to this computer, like
+    /// Messages' pins; `imsg sync-mac` copies the Mac's).
+    #[serde(default)]
+    pub pinned: bool,
+    /// Position among the pinned chats, ascending (0 = first); `None` when
+    /// not pinned.
+    #[serde(default)]
+    pub pin_order: Option<u32>,
 }
 
 /// A chat's transcript background as the daemon has it.

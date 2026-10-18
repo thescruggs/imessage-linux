@@ -134,7 +134,7 @@ fn incoming(id: &str, at: u64, text: &str) -> EngineEvent {
             verified: true,
             service: Default::default(),
         },
-        chat: Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None },
+        chat: Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None, pinned: false, pin_order: None },
         attachments: vec![],
     }
 }
@@ -396,5 +396,134 @@ async fn sms_enable_status_and_send() {
     assert!(o.stdout.contains("[SMS]"), "{}", o.stdout);
     let o = h.run(&["sms", "disable", "--json"]).await;
     assert_eq!(o.json()["state"], "off");
+    h.shutdown().await;
+}
+
+/// `chat --pin/--unpin`, the pin mark in `chats`, `pinned`/`pin_order` in
+/// `chats --json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pin_and_unpin() {
+    let Some(h) = Harness::logged_in().await else { return };
+    for to in ["bob@example.com", "carol@example.com"] {
+        assert_eq!(h.run(&["send", to, "hi"]).await.code, 0);
+    }
+    let o = h.run(&["chat", "carol@example.com", "--pin"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_eq!(o.stdout.trim(), "pinned mailto:carol@example.com");
+    let o = h.run(&["chat", "bob@example.com", "--pin", "--position", "1", "--json"]).await;
+    assert_eq!((o.json()["pinned"].as_bool(), o.json()["pin_order"].as_u64()), (Some(true), Some(0)));
+    let o = h.run(&["chats"]).await;
+    assert!(o.stdout.lines().any(|l| l.starts_with("mailto:carol@example.com") && l.contains("📌 carol@example.com")), "{}", o.stdout);
+    let v = h.run(&["chats", "--json"]).await.json();
+    let carol = v.as_array().unwrap().iter().find(|c| c["id"] == "mailto:carol@example.com").unwrap();
+    assert_eq!((carol["pinned"].as_bool(), carol["pin_order"].as_u64()), (Some(true), Some(1)));
+    let o = h.run(&["chat", "carol@example.com"]).await;
+    assert!(o.stdout.contains("pinned        yes (#2)"), "{}", o.stdout);
+    let o = h.run(&["chat", "carol@example.com", "--unpin"]).await;
+    assert_eq!(o.stdout.trim(), "unpinned mailto:carol@example.com");
+    let o = h.run(&["chat", "carol@example.com", "--json"]).await;
+    assert_eq!((o.json()["pinned"].as_bool(), o.json()["pin_order"].is_null()), (Some(false), true));
+    h.shutdown().await;
+}
+
+/// `sync-mac` end to end: a fake `ssh` on PATH runs the embedded exporter
+/// locally against a synthetic Mac home (tools/test_mac_sync_export.py
+/// builds it). Skipped without python3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_mac_with_a_fake_ssh() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return eprintln!("SKIP: python3 not found");
+    }
+    let Some(h) = Harness::logged_in().await else { return };
+    let t = tempfile::tempdir().unwrap();
+    let (mac, bin, data, state, cache, home) = (t.path().join("mac"), t.path().join("bin"), t.path().join("data"), t.path().join("state"), t.path().join("cache"), t.path().join("home"));
+    for d in [&mac, &bin, &home] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let maker = t.path().join("test_mac_sync_export.py");
+    std::fs::write(&maker, include_str!("../../../tools/test_mac_sync_export.py")).unwrap();
+    std::fs::write(t.path().join("mac-sync-export.py"), include_str!("../../../tools/mac-sync-export.py")).unwrap();
+    std::fs::write(t.path().join("mac-backgrounds-export.py"), include_str!("../../../tools/mac-backgrounds-export.py")).unwrap();
+    let st = std::process::Command::new("python3").arg("-I").arg(&maker).arg(t.path().join("mac-sync-export.py")).arg("--make-home").arg(&mac).status().unwrap();
+    assert!(st.success());
+    // ssh [-F x] -o a -o b HOST python3 - ARGS  ->  HOME=<mac> python3 -I - ARGS
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nwhile [ $# -gt 0 ] && [ \"$1\" != python3 ]; do shift; done\nshift\nHOME=\"$FAKE_MAC_HOME\" exec python3 -I \"$@\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let sync = |args: &[&str]| {
+        let mut c = h.command(args);
+        c.env("PATH", &path).env("FAKE_MAC_HOME", &mac).env("HOME", &home).env("XDG_DATA_HOME", &data).env("XDG_STATE_HOME", &state).env("XDG_CACHE_HOME", &cache);
+        run(c, None)
+    };
+    for to in ["bob@example.com", "carol@example.com"] {
+        assert_eq!(h.run(&["send", to, "hi"]).await.code, 0);
+    }
+    assert_eq!(h.run(&["chat", "carol@example.com", "--pin"]).await.code, 0);
+
+    // no HOST and no mac_host: usage error
+    let o = sync(&["sync-mac"]).await;
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert!(o.stderr.contains("mac_host"), "{}", o.stderr);
+
+    // dry run: reports, changes nothing
+    let o = sync(&["sync-mac", "fakemac", "--dry-run", "--json"]).await;
+    assert_eq!(o.code, 0, "{} {}", o.stderr, o.stdout);
+    let v = o.json();
+    assert_eq!((v["contacts"]["received"].as_u64(), v["contacts"]["written"].as_u64()), (Some(6), Some(6)));
+    let results: Vec<(&str, &str)> = v["pins"]["mac"].as_array().unwrap().iter().map(|r| (r["pin"].as_str().unwrap(), r["result"].as_str().unwrap())).collect();
+    assert_eq!(
+        results,
+        [
+            ("+12055550100", "not-in-daemon"),
+            ("bob@example.com", "would-pin"),
+            ("5b0e2c1a-3f4d-4e21-9a55-0c7e1b2d3f40", "not-in-daemon"),
+            ("chat987654", "not-in-daemon"),
+            ("garbage!", "unknown")
+        ]
+    );
+    assert_eq!(v["pins"]["mac"][3]["chat_id"], "group:ABCD-0000-1111");
+    assert_eq!(v["pins"]["order"], serde_json::json!(["mailto:bob@example.com", "mailto:carol@example.com"]));
+    assert!(!data.join("kpeoplevcard").exists());
+    let bob = h.run(&["chat", "bob@example.com", "--json"]).await.json();
+    assert_eq!(bob["pinned"], false);
+
+    // for real: vCards written, bob pinned first, carol (local) kept after
+    let o = sync(&["sync-mac", "fakemac"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stdout.contains("contacts     6 from the Mac (2 with photos): 6 written, 0 unchanged, 0 removed"), "{}", o.stdout);
+    assert!(o.stdout.contains("pins         5 on the Mac: 1 pinned, 4 not found; 1 local pin(s) kept"), "{}", o.stdout);
+    let vcf = data.join("kpeoplevcard/mac-AAAA-1111_ABPerson.vcf");
+    assert!(std::fs::read_to_string(&vcf).unwrap().contains("FN:Alice Anderson"));
+    let chats = h.run(&["chats", "--json"]).await.json();
+    let order = |id: &str| chats.as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["pin_order"].as_u64();
+    assert_eq!((order("mailto:bob@example.com"), order("mailto:carol@example.com")), (Some(0), Some(1)));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(state.join("imsg/mac-pins.json")).unwrap()).unwrap();
+    assert_eq!(saved["chats"], serde_json::json!(["mailto:bob@example.com"]));
+
+    // again: nothing to write; the Mac unpins bob -> unpinned here, carol stays
+    let o = sync(&["sync-mac", "fakemac", "--contacts", "--json"]).await;
+    assert_eq!((o.json()["contacts"]["unchanged"].as_u64(), o.json().get("pins").is_none()), (Some(6), true));
+    let plist = mac.join("Library/Preferences/com.apple.messages.pinning.plist");
+    std::fs::write(&plist, "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>pD</key><dict><key>pP</key><array/></dict></dict></plist>").unwrap();
+    let o = sync(&["sync-mac", "fakemac", "--pins", "--json"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_eq!(o.json()["pins"]["unpin"], serde_json::json!(["mailto:bob@example.com"]));
+    assert_eq!(h.run(&["chat", "bob@example.com", "--json"]).await.json()["pinned"], false);
+    assert_eq!(h.run(&["chat", "carol@example.com", "--json"]).await.json()["pin_order"], 0);
+
+    // backgrounds ride along in the same ssh trip (the fixture's chat is not in the daemon)
+    let o = sync(&["sync-mac", "fakemac", "--backgrounds", "--json"]).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_eq!(o.json()["backgrounds"]["chats"][0]["result"], "not-in-daemon");
+
+    // a section failing on the Mac: reported, exit 1, the folder left alone
+    std::fs::remove_dir_all(mac.join("Library/Application Support/AddressBook")).unwrap();
+    let o = sync(&["sync-mac", "fakemac", "--json"]).await;
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert!(o.json()["contacts"]["error"].as_str().unwrap().contains("no Contacts database"));
+    assert!(o.json()["pins"]["order"].is_array());
+    assert!(vcf.exists());
     h.shutdown().await;
 }

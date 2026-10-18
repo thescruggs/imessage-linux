@@ -156,7 +156,8 @@ package() {
   local tools="$pkgdir/usr/share/imessage-linux/tools"
   install -Dm755 -t "$tools" tools/bootstrap.sh tools/mac-hwinfo.sh \
     tools/mac-anisette-install.sh tools/mac-contacts-export.sh
-  install -Dm644 -t "$tools" tools/mac-messages-export.py
+  install -Dm644 -t "$tools" tools/mac-messages-export.py tools/mac-sync-export.py \
+    tools/mac-backgrounds-export.py
   install -Dm644 -t "$tools/mac-anisette" tools/mac-anisette/*
 
   install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md CHANGELOG.md docs/*.md

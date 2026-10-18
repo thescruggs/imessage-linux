@@ -238,6 +238,21 @@ impl Daemon1 {
         Ok(to_json(&self.hub.import_chat_background(chat_id, path).await?))
     }
 
+    /// Pin (`pinned`) or unpin a chat, locally. `order`: position among
+    /// the pins, 0 = first; negative = last. -> the updated Chat JSON.
+    async fn set_chat_pinned(&self, chat_id: &str, pinned: bool, order: i32) -> Result<String> {
+        let order = u32::try_from(order).ok();
+        Ok(to_json(&self.hub.set_chat_pinned(chat_id, pinned, order).await?))
+    }
+
+    /// Put these chats first among the pins, in this order (pinning them);
+    /// other pins keep their order after them. -> JSON array of the pinned
+    /// Chats in order.
+    async fn reorder_pins(&self, chat_ids_json: &str) -> Result<String> {
+        let ids = parse_json_strings("chat_ids_json", chat_ids_json)?;
+        Ok(to_json(&self.hub.reorder_pins(ids).await?))
+    }
+
     /// One-time history import (docs/DBUS.md): `batch_json` is an
     /// `ImportBatch`, the result an `ImportResult`.
     async fn import_messages(&self, batch_json: &str) -> Result<String> {

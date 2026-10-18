@@ -99,6 +99,7 @@ impl Daemon {
             anyhow::bail!("the D-Bus API needs the message store");
         }
         let hub = Hub::new(self.engine.clone(), self.store.clone(), self.cfg.state_dir.clone(), self.typing_timeout);
+        hub.set_mac_host(self.cfg.mac_host.clone());
         hub.delete_empty_groups().await;
         hub.seed_engine_chats().await;
         let conn = match &self.bus {

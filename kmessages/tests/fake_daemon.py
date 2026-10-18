@@ -145,7 +145,7 @@ class Store:
 
         bob = "mailto:bob@example.com"
         self.chats[bob] = {"id": bob, "participants": [{"uri": bob, "display": "Bob Smith"}],
-                           "display_name": None, "is_group": False, "last_message_at": None, "unread_count": 0}
+                           "display_name": None, "is_group": False, "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
         # 30 messages spread over three days for paging tests.
         start = now - 2 * day - 3 * hour
         for i in range(30):
@@ -170,7 +170,7 @@ class Store:
         self.chats[team] = {"id": team, "participants": [{"uri": bob, "display": "Bob Smith"}, {"uri": carol},
                                                           {"uri": dave}],
                             "display_name": "Weekend Trip", "is_group": True, "last_message_at": None,
-                            "unread_count": 0}
+                            "unread_count": 0, "pinned": False, "pin_order": None}
         t0 = now - 5 * hour
         self._msg(team, carol, t0, "Who's bringing the tent?")
         self._msg(team, carol, t0 + minute, "I can bring snacks")
@@ -193,7 +193,7 @@ class Store:
         self.chats[team]["unread_count"] = 2
 
         self.chats[dave] = {"id": dave, "participants": [{"uri": dave}], "display_name": None, "is_group": False,
-                            "last_message_at": None, "unread_count": 1}
+                            "last_message_at": None, "unread_count": 1, "pinned": False, "pin_order": None}
         self._msg(dave, dave, now - 3 * day, "Call me when you land", verified=False)
         um = self._msg(dave, None, now - 3 * day + hour, None, from_me=True, delivery="delivered")
         um["unsent"] = True
@@ -201,7 +201,7 @@ class Store:
 
         eve = "mailto:eve@example.org"
         self.chats[eve] = {"id": eve, "participants": [{"uri": eve, "display": "Eve Adams"}], "display_name": None,
-                           "is_group": False, "last_message_at": None, "unread_count": 0}
+                           "is_group": False, "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
         self._msg(eve, None, now - 9 * day, "Happy birthday! 🎉", from_me=True, delivery="read")
         self._msg(eve, eve, now - 9 * day + 30 * minute, "Thank you!!")
         self._msg(eve, None, now - 9 * day + 31 * minute, "", from_me=True, delivery="failed",
@@ -250,6 +250,7 @@ class FakeDaemon(dbus.service.Object):
         self.profiles = {}  # SetProfile: handle -> HandleProfile dict
         self.sms = {"state": "off", "number": "tel:+15555550100", "since": None}
         self.unreachable = set()  # AddSmsChat numbers
+        self.mac_host = None  # SetMacHost: GetStatus.mac_host
         self.tmp = tempfile.mkdtemp(prefix="kmessages-fake-")
 
     # -- helpers ----------------------------------------------------------
@@ -281,7 +282,8 @@ class FakeDaemon(dbus.service.Object):
                                  "other_handles": list(self.other_handles)},
                 "unread": self.store.unread_total(),
                 "profiles": {"state": "ready"},
-                "sms": dict(self.sms)}
+                "sms": dict(self.sms),
+                "mac_host": self.mac_host}
 
     def chat(self, cid):
         c = self.store.chats.get(cid)
@@ -308,14 +310,14 @@ class FakeDaemon(dbus.service.Object):
             cid = handles[0]
             if cid not in self.store.chats:
                 self.store.chats[cid] = {"id": cid, "participants": [{"uri": cid}], "display_name": None,
-                                         "is_group": False, "last_message_at": None, "unread_count": 0}
+                                         "is_group": False, "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
             return cid
         for c in self.store.chats.values():
             if c["is_group"] and sorted(p["uri"] for p in c["participants"]) == sorted(handles):
                 return c["id"]
         cid = "group:" + guid()
         self.store.chats[cid] = {"id": cid, "participants": [{"uri": h} for h in handles], "display_name": None,
-                                 "is_group": True, "last_message_at": None, "unread_count": 0}
+                                 "is_group": True, "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
         return cid
 
     def announce_new(self, m):
@@ -584,6 +586,42 @@ class FakeDaemon(dbus.service.Object):
             raise Error("InvalidHandle", f"invalid handle: {handle}")
         return dumps(self.profiles.get(n))
 
+    def pinned_ids(self):
+        pins = [c for c in self.store.chats.values() if c.get("pinned")]
+        return [c["id"] for c in sorted(pins, key=lambda c: (c["pin_order"], c["id"]))]
+
+    def apply_pins(self, ids):
+        """Make `ids` the pins, in order (pin_order 0, 1, ...); ChatUpdated
+        for every chat whose pin changed (as imessaged)."""
+        for cid, c in self.store.chats.items():
+            pinned, order = (True, ids.index(cid)) if cid in ids else (False, None)
+            if c.get("pinned") != pinned or c.get("pin_order") != order:
+                c["pinned"], c["pin_order"] = pinned, order
+                self.ChatUpdated(dumps(c))
+
+    @dbus.service.method(IFACE, in_signature="sbi", out_signature="s")
+    def SetChatPinned(self, chat_id, pinned, order):
+        self.log("SetChatPinned", chat_id, bool(pinned), int(order))
+        self.chat(chat_id)
+        ids = [i for i in self.pinned_ids() if i != chat_id]
+        if pinned:
+            ids.insert(len(ids) if order < 0 else min(int(order), len(ids)), chat_id)
+        self.apply_pins(ids)
+        return dumps(self.chat(chat_id))
+
+    @dbus.service.method(IFACE, in_signature="s", out_signature="s")
+    def ReorderPins(self, chat_ids_json):
+        self.log("ReorderPins", chat_ids_json)
+        try:
+            first = json.loads(chat_ids_json) if chat_ids_json.strip() else []
+        except ValueError as e:
+            raise Error("InvalidInput", f"chat_ids_json: {e}")
+        for cid in first:
+            self.chat(cid)
+        first = list(dict.fromkeys(first))
+        self.apply_pins(first + [i for i in self.pinned_ids() if i not in first])
+        return dumps([self.chat(i) for i in self.pinned_ids()])
+
     @dbus.service.method(IFACE, in_signature="", out_signature="s")
     def Version(self):
         return VERSION
@@ -745,7 +783,7 @@ class FakeDaemon(dbus.service.Object):
         if name:
             participant["display"] = name
         self.store.chats[cid] = {"id": cid, "participants": [participant], "display_name": None, "is_group": False,
-                                 "last_message_at": None, "unread_count": 0}
+                                 "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
         now = int(time.time() * 1000)
         minute = 60_000
         self.store._msg(cid, cid, now - 40 * minute, "Hey, it's Sam. New phone, who dis? 😄", service="sms")
@@ -796,6 +834,11 @@ class FakeDaemon(dbus.service.Object):
     @dbus.service.method(CTRL, in_signature="u", out_signature="")
     def SetSendFileDelay(self, ms):
         self.send_file_delay_ms = int(ms)
+
+    @dbus.service.method(CTRL, in_signature="s", out_signature="")
+    def SetMacHost(self, host):
+        """`mac_host` in GetStatus ("" = unset)."""
+        self.mac_host = str(host) or None
 
     @dbus.service.method(CTRL, in_signature="as", out_signature="")
     def SetOtherHandles(self, uris):

@@ -1,7 +1,7 @@
 //! D-Bus client for `org.imessage.Daemon1` (see docs/DBUS.md).
 //!
-//! [`Daemon1Proxy`] mirrors the interface 1:1 (19 methods, 2 properties,
-//! 7 signals). [`Client`] wraps it: every call returns both the raw JSON
+//! [`Daemon1Proxy`] mirrors the interface 1:1 (methods, properties and
+//! signals of docs/DBUS.md). [`Client`] wraps it: every call returns both the raw JSON
 //! string (for `--json`, printed unchanged) and the parsed model type, and
 //! every error becomes a [`CliError`] with a readable message and an exit
 //! code (see [`exit`]).
@@ -174,6 +174,8 @@ pub trait Daemon1 {
     fn lookup_handles(&self, handles_json: &str) -> zbus::Result<String>;
     fn download_attachment(&self, attachment_id: &str) -> zbus::Result<String>;
     fn import_chat_background(&self, chat_id: &str, path: &str) -> zbus::Result<String>;
+    fn set_chat_pinned(&self, chat_id: &str, pinned: bool, order: i32) -> zbus::Result<String>;
+    fn reorder_pins(&self, chat_ids_json: &str) -> zbus::Result<String>;
     fn import_messages(&self, batch_json: &str) -> zbus::Result<String>;
     fn purge_invalid_chats(&self, dry_run: bool) -> zbus::Result<String>;
     fn get_handle_profile(&self, handle: &str) -> zbus::Result<String>;
@@ -224,6 +226,10 @@ pub struct Status {
     /// Text Message Forwarding; older daemons do not report it.
     #[serde(default)]
     pub sms: Option<imessage_common::model::SmsForwarding>,
+    /// The daemon's `mac_host` setting (`imsg sync-mac`); older daemons
+    /// do not report it.
+    #[serde(default)]
+    pub mac_host: Option<String>,
 }
 
 /// `ListMessages`.
@@ -474,6 +480,19 @@ impl Client {
 
     pub async fn import_chat_background(&self, chat_id: &str, path: &str) -> Result<Json<Chat>> {
         parse("chat", self.proxy.import_chat_background(chat_id, path).await.map_err(map_zbus)?)
+    }
+
+    /// `SetChatPinned`: `order` = position among the pins (0 = first),
+    /// `None` = last.
+    pub async fn set_chat_pinned(&self, chat_id: &str, pinned: bool, order: Option<u32>) -> Result<Json<Chat>> {
+        let order = order.and_then(|o| i32::try_from(o).ok()).unwrap_or(-1);
+        parse("chat", self.proxy.set_chat_pinned(chat_id, pinned, order).await.map_err(map_zbus)?)
+    }
+
+    /// `ReorderPins`: these chats first, in order; returns all pinned chats.
+    pub async fn reorder_pins(&self, chat_ids: &[String]) -> Result<Json<Vec<Chat>>> {
+        let arg = serde_json::to_string(chat_ids).expect("strings serialize");
+        parse("chat list", self.proxy.reorder_pins(&arg).await.map_err(map_zbus)?)
     }
 
     /// One `ImportMessages` batch (copies attachment files: slow).

@@ -37,11 +37,18 @@ struct Harness {
 impl Harness {
     /// `None` (test skipped) when `dbus-daemon` is not installed.
     async fn start() -> Option<Harness> {
+        Harness::start_with(|_| {}).await
+    }
+
+    /// [`Harness::start`] with a changed configuration.
+    async fn start_with(configure: impl FnOnce(&mut DaemonConfig)) -> Option<Harness> {
         let bus = common::PrivateBus::start()?;
         let dir = tempfile::tempdir().unwrap();
         let mock = Arc::new(MockEngine::new());
         let store = StoreHandle::new(Store::open(dir.path(), StateKey::from_bytes([5; 32])).unwrap());
-        let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), mock.clone())
+        let mut cfg = DaemonConfig::new(dir.path().into());
+        configure(&mut cfg);
+        let running = Daemon::with_engine(cfg, mock.clone())
             .with_store(store)
             .with_dbus(BusChoice::Address(bus.address.clone()))
             .with_typing_timeout(Duration::from_millis(200))
@@ -118,7 +125,7 @@ where
 }
 
 fn bob_chat(at: u64) -> Chat {
-    Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None }
+    Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None, pinned: false, pin_order: None }
 }
 
 /// An incoming message from Bob, optionally with one attachment (part 1).
@@ -614,5 +621,50 @@ async fn sms_forwarding_and_send_text_as() {
     assert_eq!(sent["service"], "imessage");
     let e = p.call::<_, _, ()>("React", &("tel:+15555550123", page["messages"][0]["id"].as_str().unwrap(), "love", false)).await.unwrap_err();
     assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.Unsupported");
+    h.shutdown().await;
+}
+
+/// SetChatPinned / ReorderPins: Chat JSON carries pinned + pin_order,
+/// ChatUpdated announces it, unknown chats are NotFound; GetStatus reports
+/// mac_host (unset here).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pins_and_mac_host() {
+    let Some(h) = Harness::logged_in().await else { return };
+    let p = &h.p;
+    assert!(h.call_json("GetStatus", &()).await["mac_host"].is_null());
+    let mut received = p.receive_signal("MessageReceived").await.unwrap();
+    h.mock.inject(incoming("IN-1", 2_000_000_000_000, "hi", None));
+    next_signal(&mut received, |(_, m): &(String, String)| json(m)["id"] == "IN-1").await;
+    let chat = h.call_json("GetChat", &(BOB,)).await;
+    assert_eq!((chat["pinned"].as_bool(), chat["pin_order"].is_null()), (Some(false), true));
+
+    let mut updated = p.receive_signal("ChatUpdated").await.unwrap();
+    let c = h.call_json("SetChatPinned", &(BOB, true, -1i32)).await;
+    assert_eq!((c["pinned"].as_bool(), c["pin_order"].as_u64()), (Some(true), Some(0)));
+    next_signal(&mut updated, |(c,): &(String,)| json(c)["pinned"] == true).await;
+    assert_eq!(h.call_json("ListChats", &(0u32, 0u32)).await[0]["pinned"], true);
+
+    let pins = h.call_json("ReorderPins", &(format!("[\"{BOB}\"]"),)).await;
+    assert_eq!(pins.as_array().unwrap().len(), 1);
+    assert_eq!(pins[0]["id"], BOB);
+    let e = p.call::<_, _, String>("ReorderPins", &("[\"mailto:nobody@example.com\"]",)).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.NotFound");
+    let e = p.call::<_, _, String>("SetChatPinned", &("mailto:nobody@example.com", true, 0i32)).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.NotFound");
+    let e = p.call::<_, _, String>("ReorderPins", &("not json",)).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.InvalidInput");
+
+    let c = h.call_json("SetChatPinned", &(BOB, false, 0i32)).await;
+    assert_eq!((c["pinned"].as_bool(), c["pin_order"].is_null()), (Some(false), true));
+    next_signal(&mut updated, |(c,): &(String,)| json(c)["pinned"] == false).await;
+    assert_eq!(h.call_json("ReorderPins", &("[]",)).await, serde_json::json!([]));
+    h.shutdown().await;
+}
+
+/// The configured mac_host is reported in GetStatus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_reports_mac_host() {
+    let Some(h) = Harness::start_with(|c| c.mac_host = Some("bebop.local".into())).await else { return };
+    assert_eq!(h.call_json("GetStatus", &()).await["mac_host"], "bebop.local");
     h.shutdown().await;
 }
