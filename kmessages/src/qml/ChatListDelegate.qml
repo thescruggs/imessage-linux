@@ -23,8 +23,9 @@ QQC2.ItemDelegate {
     required property bool typing
     required property bool pinned
 
-    /// Right-click, or press and hold on touch: the row's context menu.
-    signal menuRequested
+    /// Right-click, or press and hold on touch: the row's context menu, at
+    /// (x, y) in the row.
+    signal menuRequested(real x, real y)
 
     width: ListView.view ? ListView.view.width : implicitWidth
     highlighted: chatId === App.currentChatId && applicationWindow().pageStack.wideMode
@@ -33,11 +34,13 @@ QQC2.ItemDelegate {
     topPadding: Kirigami.Units.smallSpacing * 1.5
     bottomPadding: Kirigami.Units.smallSpacing * 1.5
 
-    onPressAndHold: menuRequested()
     TapHandler {
         acceptedButtons: Qt.RightButton
-        onTapped: delegate.menuRequested()
+        onTapped: eventPoint => delegate.menuRequested(eventPoint.position.x, eventPoint.position.y)
     }
+    // The button's own press and hold (a connected handler also stops the
+    // release from counting as a click), at the finger.
+    onPressAndHold: menuRequested(pressX, pressY)
 
     Accessible.name: hasUnread ? i18n("%1, %2 unread: %3", name, unreadCount, snippet) : i18n("%1: %2", name, snippet)
 

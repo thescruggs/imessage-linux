@@ -131,9 +131,12 @@ chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
    daemon `SetChatPinned`.
    As built: roles `pinned`, `pinOrder`, `section` ("Pinned" /
    "Conversations", empty while nothing is pinned, so the plain list has
-   no header); a pin change re-sorts the whole list with row moves (the
-   daemon renumbers several pins, one `ChatUpdated` each), new activity
-   only repositions within its block. Context menu = right-click or press
+   no header); a pin change re-sorts the whole list (the daemon renumbers
+   several pins, one `ChatUpdated` each), new activity only repositions
+   within its block. Reorders are `layoutChanged(VerticalSortHint)`, and
+   the list binds `ChatListModel` directly unless searching: the
+   `QSortFilterProxyModel` drops the hint, and QML resets the view (all
+   delegates, scroll to top) on an unhinted layout change (review fix). Context menu = right-click or press
    and hold → Pin / Unpin (`SetChatPinned`, order -1); a Pin / Unpin button
    under the heading of the details page; a small `pin` icon next to the
    time. Not built: drag to reorder the pins (`ReorderPins` is wired in
@@ -234,7 +237,8 @@ button.
    pins (1 not found)"; part errors as "Sync from Mac incomplete: …";
    `{"error"}` and exit code 5 have their own messages; non-JSON output
    falls back to imsg's last stderr line); a 10-minute timeout kills a
-   hung ssh. There is no menu bar, so the second entry point is the tray
+   hung ssh (SIGTERM, SIGKILL after 3 s); clicking the busy button stops a
+   sync the same way. The summary lists every pin outcome imsg reports. There is no menu bar, so the second entry point is the tray
    menu ("Sync from Mac"); Settings has a Sync from Mac card (Mac host,
    Sync Now with the last sync time, the imsg path). The toolbar button
    is the action's `displayComponent`, with a busy indicator in place of

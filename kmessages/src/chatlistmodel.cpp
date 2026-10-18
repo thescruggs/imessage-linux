@@ -9,6 +9,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <functional>
 
 using namespace Qt::StringLiterals;
 
@@ -265,8 +266,15 @@ void ChatListModel::refresh()
         std::stable_sort(self->m_entries.begin(), self->m_entries.end(), [](const Entry &a, const Entry &b) {
             return precedes(a.chat, b.chat);
         });
+        // Before the views re-read the rows: `section` depends on it.
+        const bool hadPinned = self->m_hasPinned;
+        self->m_hasPinned = std::any_of(self->m_entries.cbegin(), self->m_entries.cend(), [](const Entry &e) {
+            return e.chat.pinned;
+        });
         self->endResetModel();
-        self->updateHasPinned();
+        if (hadPinned != self->m_hasPinned) {
+            Q_EMIT self->hasPinnedChanged();
+        }
         self->m_loading = false;
         self->m_loaded = true;
         Q_EMIT self->loadingChanged();
@@ -415,6 +423,12 @@ void ChatListModel::setOwnUnread(const QString &chatId, int n)
     }
 }
 
+bool ChatListModel::isPinned(const QString &chatId) const
+{
+    const int row = indexOf(chatId);
+    return row >= 0 && m_entries.at(row).chat.pinned;
+}
+
 bool ChatListModel::isGroupChat(const QString &chatId) const
 {
     const int row = indexOf(chatId);
@@ -464,30 +478,46 @@ int ChatListModel::reposition(int row)
     if (newRow == row) {
         return row;
     }
-    // beginMoveRows wants the destination as "insert before" in the old numbering.
-    beginMoveRows(QModelIndex(), row, row, QModelIndex(), newRow > row ? newRow + 1 : newRow);
-    m_entries.move(row, newRow);
-    endMoveRows();
+    reorder([&] {
+        m_entries.move(row, newRow);
+    });
     return newRow;
+}
+
+void ChatListModel::reorder(const std::function<void()> &change)
+{
+    // One layout change with VerticalSortHint (also for a whole re-sort):
+    // QML's delegate model answers it by rebinding its items in place, with
+    // no reset and no scrolling. (A QSortFilterProxyModel drops the hint, so
+    // the chat list binds this model directly unless searching.)
+    Q_EMIT layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+    const QModelIndexList from = persistentIndexList();
+    QStringList ids;
+    ids.reserve(from.size());
+    for (const auto &idx : from) {
+        ids << m_entries.at(idx.row()).chat.id;
+    }
+    change();
+    QModelIndexList to;
+    to.reserve(ids.size());
+    for (const auto &id : std::as_const(ids)) {
+        to << index(indexOf(id));
+    }
+    changePersistentIndexList(from, to);
+    Q_EMIT layoutChanged({}, QAbstractItemModel::VerticalSortHint);
 }
 
 void ChatListModel::resort()
 {
-    // Selection sort with one row move per misplaced row: stable, keeps the
-    // views' items (and the filter proxy) in step; pins change rarely.
-    for (int target = 0; target < m_entries.size(); ++target) {
-        int best = target;
-        for (int i = target + 1; i < m_entries.size(); ++i) {
-            if (precedes(m_entries.at(i).chat, m_entries.at(best).chat)) {
-                best = i;
-            }
-        }
-        if (best != target) {
-            beginMoveRows(QModelIndex(), best, best, QModelIndex(), target);
-            m_entries.move(best, target);
-            endMoveRows();
-        }
+    const auto less = [](const Entry &a, const Entry &b) {
+        return precedes(a.chat, b.chat);
+    };
+    if (std::is_sorted(m_entries.cbegin(), m_entries.cend(), less)) {
+        return;
     }
+    reorder([&] {
+        std::stable_sort(m_entries.begin(), m_entries.end(), less);
+    });
 }
 
 void ChatListModel::updateHasPinned()
@@ -545,9 +575,10 @@ void ChatListModel::upsert(const Chat &chat, bool fetchSnippetIfNew)
         row = reposition(row);
     }
     emitRowChanged(row);
+    // `e` may now refer to another chat: the rows moved under it.
     if (unreadChangedNow) {
         Q_EMIT totalUnreadChanged();
-        Q_EMIT unreadChanged(chat.id, shownUnread(e.chat));
+        Q_EMIT unreadChanged(chat.id, shownUnread(m_entries.at(row).chat));
     }
 }
 
@@ -640,14 +671,28 @@ ChatFilterModel::ChatFilterModel(ChatListModel *source, QObject *parent)
     connect(this, &QAbstractItemModel::layoutChanged, this, &ChatFilterModel::countChanged);
 }
 
+QVariant ChatFilterModel::data(const QModelIndex &index, int role) const
+{
+    // Search results are one plain list (a lone "Conversations" header over
+    // hits that are all unpinned would only confuse).
+    if (role == ChatListModel::SectionRole && searching()) {
+        return QString();
+    }
+    return QSortFilterProxyModel::data(index, role);
+}
+
 void ChatFilterModel::setFilterText(const QString &text)
 {
     if (text == m_filterText) {
         return;
     }
+    const bool wasSearching = searching();
     m_filterText = text;
     beginFilterChange();
     endFilterChange(QSortFilterProxyModel::Direction::Rows);
+    if (wasSearching != searching() && rowCount() > 0) {
+        Q_EMIT dataChanged(index(0, 0), index(rowCount() - 1, 0), {ChatListModel::SectionRole});
+    }
     Q_EMIT filterTextChanged();
     Q_EMIT countChanged();
 }

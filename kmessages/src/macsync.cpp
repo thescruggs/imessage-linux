@@ -20,6 +20,13 @@ namespace km
 namespace
 {
 constexpr int DefaultTimeoutMs = 10 * 60 * 1000; // a big address book over a slow link
+constexpr int KillGraceMs = 3000; // after SIGTERM, before SIGKILL
+
+/// "312 contacts (3 updated, 1 removed)"; just `head` without details.
+QString withDetails(const QString &head, const QStringList &details)
+{
+    return details.isEmpty() ? head : i18nc("sync from Mac: %1 = '312 contacts', %2 = details", "%1 (%2)", head, details.join(u", "_s));
+}
 
 /// The last non-empty line of imsg's / ssh's diagnostics, without imsg's prefix.
 QString lastLine(const QString &text)
@@ -51,6 +58,13 @@ MacSync::MacSync(DaemonClient *client, AppSettings *settings, KSharedConfigPtr c
     connect(&m_timer, &QTimer::timeout, this, [this] {
         if (m_process) {
             m_timedOut = true;
+            terminate();
+        }
+    });
+    m_killTimer.setSingleShot(true);
+    m_killTimer.setInterval(KillGraceMs);
+    connect(&m_killTimer, &QTimer::timeout, this, [this] {
+        if (m_process) {
             m_process->kill();
         }
     });
@@ -129,6 +143,7 @@ void MacSync::start()
     m_process->setArguments(arguments());
     m_process->setStandardInputFile(QProcess::nullDevice());
     m_timedOut = false;
+    m_stopped = false;
     connect(m_process, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
         onProcessFinished(exitCode, status == QProcess::CrashExit);
     });
@@ -140,12 +155,30 @@ void MacSync::start()
         m_process->deleteLater();
         m_process = nullptr;
         m_timer.stop();
+        m_killTimer.stop();
         Q_EMIT runningChanged();
         finish(false, i18n("Sync from Mac: cannot run imsg (%1).", what));
     });
-    m_process->start();
+    // Running from here on; a start failure (reported synchronously or later)
+    // undoes it in the errorOccurred handler above.
     m_timer.start();
     Q_EMIT runningChanged();
+    m_process->start();
+}
+
+void MacSync::stop()
+{
+    if (!m_process || m_stopped) {
+        return;
+    }
+    m_stopped = true;
+    terminate();
+}
+
+void MacSync::terminate()
+{
+    m_process->terminate();
+    m_killTimer.start();
 }
 
 void MacSync::onProcessFinished(int exitCode, bool crashed)
@@ -158,8 +191,13 @@ void MacSync::onProcessFinished(int exitCode, bool crashed)
     m_process->deleteLater();
     m_process = nullptr;
     m_timer.stop();
+    m_killTimer.stop();
     Q_EMIT runningChanged();
 
+    if (m_stopped) {
+        finish(false, i18n("Sync from Mac stopped."));
+        return;
+    }
     if (m_timedOut) {
         finish(false, i18n("Sync from Mac: no answer from the Mac in time; stopped."));
         return;
@@ -213,9 +251,16 @@ QString MacSync::summarize(const QByteArray &json, int exitCode, const QString &
             errors << i18nc("sync from Mac: a part failed", "contacts: %1", c.value("error"_L1).toString());
         } else {
             const int received = c.value("received"_L1).toInt();
-            const int updated = c.value("written"_L1).toInt() + c.value("removed"_L1).toInt();
-            parts << (updated > 0 ? i18ncp("sync from Mac", "%1 contact (%2 updated)", "%1 contacts (%2 updated)", received, updated)
-                                  : i18ncp("sync from Mac", "%1 contact", "%1 contacts", received));
+            const int written = c.value("written"_L1).toInt();
+            const int removed = c.value("removed"_L1).toInt();
+            QStringList details;
+            if (written > 0) {
+                details << i18ncp("sync from Mac: contacts", "%1 updated", "%1 updated", written);
+            }
+            if (removed > 0) {
+                details << i18ncp("sync from Mac: contacts", "%1 removed", "%1 removed", removed);
+            }
+            parts << withDetails(i18ncp("sync from Mac", "%1 contact", "%1 contacts", received), details);
         }
     }
     const QJsonValue pinsValue = o.value("pins"_L1);
@@ -226,16 +271,44 @@ QString MacSync::summarize(const QByteArray &json, int exitCode, const QString &
         } else {
             int pinned = 0;
             int missing = 0;
+            int duplicate = 0;
             for (const auto &v : p.value("mac"_L1).toArray()) {
                 const QString result = v.toObject().value("result"_L1).toString();
                 if (result == "pinned"_L1 || result == "would-pin"_L1) {
                     ++pinned;
                 } else if (result == "not-in-daemon"_L1 || result == "unknown"_L1) {
                     ++missing;
+                } else if (result == "duplicate"_L1) {
+                    ++duplicate;
                 }
             }
-            parts << (missing > 0 ? i18ncp("sync from Mac", "%1 pin (%2 not found)", "%1 pins (%2 not found)", pinned, missing)
-                                  : i18ncp("sync from Mac", "%1 pin", "%1 pins", pinned));
+            const int unpinned = int(p.value("unpin"_L1).toArray().size());
+            const int keptLocal = int(p.value("kept_local"_L1).toArray().size());
+            const int keptUnmapped = int(p.value("kept_unmapped"_L1).toArray().size());
+            QStringList details;
+            if (missing > 0) {
+                details << i18ncp("sync from Mac: pins", "%1 not found", "%1 not found", missing);
+            }
+            if (duplicate > 0) {
+                details << i18ncp("sync from Mac: pins", "%1 duplicate", "%1 duplicates", duplicate);
+            }
+            if (unpinned > 0) {
+                details << i18ncp("sync from Mac: pins the Mac no longer has", "%1 unpinned", "%1 unpinned", unpinned);
+            }
+            if (keptLocal > 0) {
+                details << i18ncp("sync from Mac: pins made on this computer", "%1 local kept", "%1 local kept", keptLocal);
+            }
+            if (keptUnmapped > 0) {
+                details << i18ncp("sync from Mac: earlier Mac pins kept because some pins could not be mapped",
+                                  "%1 kept (unmapped)",
+                                  "%1 kept (unmapped)",
+                                  keptUnmapped);
+            }
+            const QString lookupError = p.value("lookup_error"_L1).toString();
+            if (!lookupError.isEmpty()) {
+                details << i18nc("sync from Mac: the Mac's chat.db could not be read", "group lookup failed: %1", lookupError);
+            }
+            parts << withDetails(i18ncp("sync from Mac", "%1 pin", "%1 pins", pinned), details);
         }
     }
     const QJsonValue backgroundsValue = o.value("backgrounds"_L1);

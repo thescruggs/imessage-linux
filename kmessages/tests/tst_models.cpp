@@ -13,6 +13,7 @@
 #include "outgoingfiles.h"
 
 #include <QAbstractItemModelTester>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
@@ -262,10 +263,18 @@ private Q_SLOTS:
                            {"pin":"bob@example.com","chat_id":"mailto:bob@example.com","result":"pinned"},
                            {"pin":"9F1C","chat_id":"group:9F1C","result":"not-in-daemon"}],
                     "order":[],"kept_local":[],"unpin":[]}})";
-        QCOMPARE(MacSync::summarize(full, 0, QString(), &ok), u"Synced from mac.local: 312 contacts (4 updated), 2 pins (1 not found)"_s);
+        QCOMPARE(MacSync::summarize(full, 0, QString(), &ok), u"Synced from mac.local: 312 contacts (3 updated, 1 removed), 2 pins (1 not found)"_s);
         QVERIFY(ok);
         QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"received":1,"written":0,"removed":0},"pins":{"mac":[]}})", 0, QString(), &ok),
                  u"Synced from m: 1 contact, 0 pins"_s);
+        QVERIFY(ok);
+        // Every pin outcome imsg reports.
+        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"received":5,"written":2,"removed":0},
+            "pins":{"mac":[{"result":"pinned"},{"result":"pinned"},{"result":"pinned"},{"result":"duplicate"},{"result":"unknown"}],
+                    "order":[],"kept_local":["a","b"],"unpin":["c"],"kept_unmapped":["d"],"lookup_error":"chat.db locked"}})",
+                                    0, QString(), &ok),
+                 u"Synced from m: 5 contacts (2 updated), 3 pins (1 not found, 1 duplicate, 1 unpinned, 2 local kept, 1 kept (unmapped), "
+                 u"group lookup failed: chat.db locked)"_s);
         QVERIFY(ok);
         // A part failed (exit 1): what worked and the error.
         QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"error":"no Full Disk Access"},"pins":{"mac":[{"result":"pinned"}]}})", 1, QString(), &ok),
@@ -282,6 +291,211 @@ private Q_SLOTS:
                  u"Sync from Mac failed: unrecognized subcommand 'sync-mac'"_s);
         QCOMPARE(MacSync::summarize("", 1, QString(), &ok), u"Sync from Mac failed (imsg exited with code 1)."_s);
         QVERIFY(!ok);
+    }
+
+    void reordersDoNotResetViews()
+    {
+        // Reorders must reach QML as a VerticalSortHint layout change, never
+        // as a reset, rowsMoved or an unhinted layoutChanged (QML's delegate
+        // model rebuilds every delegate and scrolls to the top for those).
+        // The list binds ChatListModel directly unless searching.
+        const QString eve = u"mailto:eve@example.org"_s;
+        auto client = connectedClient();
+        ChatListModel chats(client.get());
+        ChatFilterModel proxy(&chats);
+        QAbstractItemModelTester tester(&chats);
+        QAbstractItemModelTester proxyTester(&proxy);
+        QTRY_COMPARE_WITH_TIMEOUT(chats.rowCount(), 4, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(!roleOf(chats, 3, ChatListModel::SnippetRole).toString().isEmpty(), Timeout);
+        int resets = 0;
+        int moves = 0;
+        QList<QAbstractItemModel::LayoutChangeHint> hints;
+        connect(&chats, &QAbstractItemModel::modelReset, this, [&] {
+            ++resets;
+        });
+        connect(&chats, &QAbstractItemModel::rowsMoved, this, [&] {
+            ++moves;
+        });
+        connect(&chats, &QAbstractItemModel::layoutChanged, this, [&](const QList<QPersistentModelIndex> &, QAbstractItemModel::LayoutChangeHint hint) {
+            hints << hint;
+        });
+        const auto hinted = [&] {
+            const bool ok = resets == 0 && moves == 0 && !hints.isEmpty()
+                && std::all_of(hints.cbegin(), hints.cend(), [](auto h) {
+                       return h == QAbstractItemModel::VerticalSortHint;
+                   });
+            hints.clear();
+            return ok;
+        };
+        // A persistent index (as a view's current item) follows its chat.
+        const QPersistentModelIndex daveIndex(chats.index(chats.indexOf(Dave)));
+
+        // A pin change.
+        client->setChatPinned(eve, true);
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::ChatIdRole).toString(), eve, Timeout);
+        QVERIFY2(hinted(), "pin");
+        QCOMPARE(proxy.chatIdAt(0), eve);
+        // A new message in a chat that is not on top.
+        m_fake.control(u"InjectMessage"_s, {Dave, Dave, u"move me up"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 1, ChatListModel::ChatIdRole).toString(), Dave, Timeout);
+        QVERIFY2(hinted(), "new message");
+        QCOMPARE(daveIndex.row(), 1);
+        QCOMPARE(proxy.chatIdAt(1), Dave);
+        // While searching (the proxy is shown) the filtered rows reorder too,
+        // and search results have no section headers.
+        proxy.setFilterText(u"example"_s); // every chat but Dave's has an example address
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.rowCount(), 3, Timeout);
+        QCOMPARE(chats.data(chats.index(0), ChatListModel::SectionRole).toString(), u"Pinned"_s);
+        QCOMPARE(proxy.data(proxy.index(0, 0), ChatListModel::SectionRole).toString(), QString());
+        client->setChatPinned(Team, true, 0);
+        QTRY_COMPARE_WITH_TIMEOUT(proxy.chatIdAt(0), Team, Timeout);
+        QCOMPARE(proxy.chatIdAt(1), eve);
+        QVERIFY2(hinted(), "pin while searching");
+        proxy.setFilterText(QString());
+        QCOMPARE(proxy.data(proxy.index(0, 0), ChatListModel::SectionRole).toString(), u"Pinned"_s);
+        QCOMPARE(daveIndex.row(), 2);
+    }
+
+    void chatUpdatedCombinedChanges()
+    {
+        const QString eve = u"mailto:eve@example.org"_s;
+        auto client = connectedClient();
+        ChatListModel chats(client.get());
+        QAbstractItemModelTester tester(&chats);
+        QTRY_COMPARE_WITH_TIMEOUT(chats.rowCount(), 4, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(!roleOf(chats, 3, ChatListModel::SnippetRole).toString().isEmpty(), Timeout);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const auto put = [&](const QString &json) {
+            m_fake.control(u"PutChat"_s, {json});
+        };
+
+        // Unread and activity in one ChatUpdated: the row moves and the
+        // unread signal carries this chat's count (not the row's new tenant's).
+        QSignalSpy unread(&chats, &ChatListModel::unreadChanged);
+        put(uR"({"id":"%1","unread_count":5,"last_message_at":%2})"_s.arg(Dave).arg(now));
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::ChatIdRole).toString(), Dave, Timeout);
+        QCOMPARE(unread.count(), 1);
+        QCOMPARE(unread.first().at(0).toString(), Dave);
+        QCOMPARE(unread.first().at(1).toInt(), 5);
+        QCOMPARE(chats.unreadFor(Dave), 5);
+
+        // Pin and activity together, then unpin and activity together.
+        put(uR"({"id":"%1","pinned":true,"pin_order":0,"last_message_at":%2})"_s.arg(eve).arg(now - 1000));
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::ChatIdRole).toString(), eve, Timeout);
+        QVERIFY(roleOf(chats, 0, ChatListModel::PinnedRole).toBool());
+        QCOMPARE(roleOf(chats, 1, ChatListModel::ChatIdRole).toString(), Dave);
+        put(uR"({"id":"%1","pinned":false,"pin_order":null,"last_message_at":%2})"_s.arg(eve).arg(now + 1000));
+        QTRY_VERIFY_WITH_TIMEOUT(!chats.hasPinned(), Timeout);
+        QCOMPARE(roleOf(chats, 0, ChatListModel::ChatIdRole).toString(), eve); // newest now
+        QCOMPARE(roleOf(chats, 1, ChatListModel::ChatIdRole).toString(), Dave);
+
+        // A new chat that arrives pinned goes into the pinned block.
+        const QString zed = u"mailto:zed@example.com"_s;
+        put(uR"({"id":"%1","pinned":true,"pin_order":0,"last_message_at":null})"_s.arg(zed));
+        QTRY_COMPARE_WITH_TIMEOUT(chats.rowCount(), 5, Timeout);
+        QCOMPARE(roleOf(chats, 0, ChatListModel::ChatIdRole).toString(), zed);
+        QVERIFY(chats.hasPinned());
+        QCOMPARE(roleOf(chats, 0, ChatListModel::SectionRole).toString(), u"Pinned"_s);
+        QCOMPARE(roleOf(chats, 1, ChatListModel::SectionRole).toString(), u"Conversations"_s);
+        QVERIFY(chats.isPinned(zed));
+        QVERIFY(!chats.isPinned(eve));
+    }
+
+    void macSyncProcess()
+    {
+        QTemporaryDir bin;
+        QVERIFY(bin.isValid());
+        const QString script = bin.filePath(u"imsg"_s);
+        {
+            QFile f(script);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(R"SH(#!/bin/sh
+echo "$@" > "$(dirname "$0")/args"
+if [ "$FAKE_IMSG_MODE" = slow ]; then exec sleep 30; fi
+echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed": 0}, "pins": {"mac": []}}'
+)SH");
+            f.close();
+            QVERIFY(f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        }
+        QTemporaryDir empty;
+        const QByteArray oldPath = qgetenv("PATH");
+        qunsetenv("KMESSAGES_IMSG");
+        qunsetenv("FAKE_IMSG_MODE");
+
+        auto client = connectedClient();
+        QTRY_VERIFY_WITH_TIMEOUT(client->isStatusKnown(), Timeout);
+        auto config = KSharedConfig::openConfig(u"tst-macsyncrc"_s, KConfig::SimpleConfig);
+        AppSettings settings(config);
+        MacSync sync(client.get(), &settings, config);
+        QSignalSpy finished(&sync, &MacSync::finished);
+        const auto lastMessage = [&] {
+            return finished.isEmpty() ? QString() : finished.last().at(1).toString();
+        };
+
+        // KMESSAGES_IMSG wins over the setting and PATH.
+        settings.setImsgPath(u"/somewhere/imsg"_s);
+        qputenv("KMESSAGES_IMSG", QFile::encodeName(script));
+        QCOMPARE(sync.program(), script);
+        qunsetenv("KMESSAGES_IMSG");
+        QCOMPARE(sync.program(), u"/somewhere/imsg"_s);
+
+        // Not found anywhere: said at once, nothing run.
+        settings.setImsgPath(QString());
+        qputenv("PATH", QFile::encodeName(empty.path()));
+        QVERIFY(sync.program().isEmpty());
+        sync.start();
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(lastMessage().contains(u"imsg program was not found"_s));
+        QVERIFY(!sync.isRunning());
+
+        // No Mac set (neither here nor in the daemon): a hint, nothing run.
+        qputenv("PATH", QByteArray(QFile::encodeName(bin.path()) + ':' + oldPath));
+        QCOMPARE(sync.program(), script);
+        QVERIFY(sync.host().isEmpty());
+        sync.start();
+        QCOMPARE(finished.count(), 2);
+        QCOMPARE(lastMessage(), u"Sync from Mac: no Mac set. Enter its ssh address in Settings."_s);
+        QVERIFY(!QFile::exists(bin.filePath(u"args"_s)));
+
+        // A program that cannot start.
+        settings.setMacHost(u"mac.local"_s);
+        settings.setImsgPath(u"/nonexistent/imsg"_s);
+        sync.start();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 3, Timeout);
+        QVERIFY(lastMessage().startsWith(u"Sync from Mac: cannot run imsg ("_s));
+        QVERIFY(!finished.last().at(0).toBool());
+        QVERIFY(!sync.isRunning());
+        settings.setImsgPath(QString());
+
+        // Success.
+        sync.start();
+        QVERIFY(sync.isRunning());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 4, Timeout);
+        QVERIFY(finished.last().at(0).toBool());
+        QCOMPARE(lastMessage(), u"Synced from mac.local: 2 contacts, 0 pins"_s);
+        QVERIFY(sync.lastSync().isValid());
+
+        // Too slow: terminated after the timeout.
+        qputenv("FAKE_IMSG_MODE", "slow");
+        sync.setTimeout(300);
+        sync.start();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 5, Timeout);
+        QCOMPARE(lastMessage(), u"Sync from Mac: no answer from the Mac in time; stopped."_s);
+        QVERIFY(!sync.isRunning());
+
+        // Stopped by the user.
+        sync.setTimeout(60000);
+        sync.start();
+        QTRY_VERIFY_WITH_TIMEOUT(sync.isRunning(), Timeout);
+        QTest::qWait(200);
+        sync.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 6, Timeout);
+        QCOMPARE(lastMessage(), u"Sync from Mac stopped."_s);
+        QVERIFY(!finished.last().at(0).toBool());
+        QVERIFY(!sync.isRunning());
+
+        qunsetenv("FAKE_IMSG_MODE");
+        qputenv("PATH", oldPath);
     }
 
     void sharedProfilesAndGroupIcons()

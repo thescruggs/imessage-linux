@@ -10,6 +10,8 @@
 #include <QSortFilterProxyModel>
 #include <QTimer>
 
+#include <functional>
+
 namespace km
 {
 class DaemonClient;
@@ -91,6 +93,7 @@ public:
     /// the daemon's count whenever that drops.
     void setOwnUnread(const QString &chatId, int n);
     Q_INVOKABLE bool isGroupChat(const QString &chatId) const;
+    Q_INVOKABLE bool isPinned(const QString &chatId) const;
     /// Display name for a handle, using what the chats know about it.
     Q_INVOKABLE QString nameForHandle(const QString &uri) const;
     std::optional<Chat> chat(const QString &chatId) const;
@@ -127,9 +130,12 @@ private:
     static bool precedes(const Chat &a, const Chat &b);
     /// Move row `row` to keep the order (precedes()); returns its new row.
     int reposition(int row);
-    /// Restore the order of the whole list with row moves (after pins changed:
-    /// the daemon renumbers several chats, one ChatUpdated each).
+    /// Restore the order of the whole list (after pins changed: the daemon
+    /// renumbers several chats, one ChatUpdated each).
     void resort();
+    /// Run `change` (which reorders m_entries) inside a VerticalSortHint
+    /// layout change, keeping persistent indexes on their chats.
+    void reorder(const std::function<void()> &change);
     void updateHasPinned();
     void emitRowChanged(int row);
 
@@ -156,6 +162,8 @@ public:
     void setFilterText(const QString &text);
     int count() const { return rowCount(); }
     Q_INVOKABLE QString chatIdAt(int row) const;
+    /// No sections while a search text is set.
+    QVariant data(const QModelIndex &index, int role) const override;
 
 Q_SIGNALS:
     void filterTextChanged();
@@ -165,6 +173,7 @@ protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override;
 
 private:
+    bool searching() const { return !m_filterText.trimmed().isEmpty(); }
     QString m_filterText;
 };
 

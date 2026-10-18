@@ -26,10 +26,10 @@ Kirigami.ScrollablePage {
         searchField.forceActiveFocus();
     }
 
-    function openChatMenu(chatId: string, pinned: bool, anchor: Item) {
+    // At the click or touch point: after a press and hold there is no cursor.
+    function openChatMenu(chatId: string, anchor: Item, x: real, y: real) {
         chatMenu.chatId = chatId;
-        chatMenu.pinned = pinned;
-        chatMenu.popup(anchor);
+        chatMenu.popup(anchor, x, y);
     }
 
     actions: [
@@ -44,15 +44,18 @@ Kirigami.ScrollablePage {
             objectName: "syncFromMacAction"
             icon.name: "view-refresh"
             text: i18n("Sync from Mac")
-            // No IconOnly hint: the toolbar would use its own icon button
-            // instead of displayComponent (which is icon-only anyway).
+            // Not IconOnly: the toolbar would use its own icon button instead
+            // of displayComponent (which is icon-only anyway). KeepVisible
+            // keeps it out of the overflow menu, where displayComponent
+            // would be loaded as is.
+            displayHint: Kirigami.DisplayHint.KeepVisible
             enabled: !App.macSync.running
             tooltip: {
                 const what = App.macSync.host.length > 0
                     ? i18n("Copy contacts and pinned conversations from %1", App.macSync.host)
                     : i18n("Copy contacts and pinned conversations from your Mac");
                 const when = App.macSync.running
-                    ? i18n("Syncing…")
+                    ? i18n("Syncing… Click to stop.")
                     : (App.macSync.lastSyncText.length > 0 ? i18n("Last synced %1", App.macSync.lastSyncText) : i18n("Not synced yet"));
                 return what + "\n" + when;
             }
@@ -65,8 +68,8 @@ Kirigami.ScrollablePage {
                 // Same size with or without the icon.
                 implicitWidth: Kirigami.Units.iconSizes.smallMedium + leftPadding + rightPadding
                 implicitHeight: Kirigami.Units.iconSizes.smallMedium + topPadding + bottomPadding
-                enabled: syncAction.enabled
-                onClicked: syncAction.trigger()
+                // While syncing, a click stops it.
+                onClicked: App.macSync.running ? App.macSync.stop() : syncAction.trigger()
                 QQC2.ToolTip.text: syncAction.tooltip
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -109,13 +112,19 @@ Kirigami.ScrollablePage {
     ListView {
         id: list
 
-        model: App.chats
+        objectName: "chatListView"
+        // The source model itself unless searching: ChatFilterModel (a
+        // QSortFilterProxyModel) turns every reorder (a pin change, a new
+        // message) into a layout change without a hint, which the view
+        // answers with a full reset (all delegates recreated, scrolled to the
+        // top). ChatListModel's own reorders carry VerticalSortHint.
+        model: page.searching ? App.chats : App.chatList
         currentIndex: -1
         reuseItems: true
 
         delegate: ChatListDelegate {
             onClicked: applicationWindow().openChat(chatId)
-            onMenuRequested: page.openChatMenu(chatId, pinned, this)
+            onMenuRequested: (x, y) => page.openChatMenu(chatId, this, x, y)
         }
 
         // "Pinned" above the pinned chats, "Conversations" above the rest;
@@ -230,7 +239,11 @@ Kirigami.ScrollablePage {
         id: chatMenu
         objectName: "chatContextMenu"
         property string chatId
-        property bool pinned
+        // Live: a sync may pin or unpin the chat while the menu is open.
+        readonly property bool pinned: {
+            App.chatList.revision;
+            return App.chatList.isPinned(chatId);
+        }
 
         QQC2.MenuItem {
             objectName: "pinChatAction"

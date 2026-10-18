@@ -36,7 +36,6 @@ class MacSync : public QObject
 
 public:
     /// Exit codes of imsg (docs/CLI.md).
-    static constexpr int ExitUsage = 2;
     static constexpr int ExitNoDaemon = 5;
 
     MacSync(DaemonClient *client, AppSettings *settings, KSharedConfigPtr config, QObject *parent = nullptr);
@@ -57,6 +56,9 @@ public:
 
     /// Start a sync (no-op while one is running). Ends with finished().
     Q_INVOKABLE void start();
+    /// Stop the running sync: SIGTERM, SIGKILL after a grace period; finished()
+    /// then says it was stopped.
+    Q_INVOKABLE void stop();
 
     /// The notification text for a finished run: `json` is imsg's stdout
     /// (may be empty or not JSON), `stderrText` its diagnostics. `ok` is set
@@ -75,6 +77,7 @@ Q_SIGNALS:
 
 private:
     void finish(bool ok, const QString &message);
+    void terminate();
     void onProcessFinished(int exitCode, bool crashed);
 
     QPointer<DaemonClient> m_client;
@@ -82,7 +85,9 @@ private:
     KSharedConfigPtr m_config;
     QProcess *m_process = nullptr;
     QTimer m_timer;
+    QTimer m_killTimer;
     bool m_timedOut = false;
+    bool m_stopped = false;
     QDateTime m_lastSync;
     QString m_lastMessage;
 };

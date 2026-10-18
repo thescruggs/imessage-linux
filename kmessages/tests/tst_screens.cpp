@@ -849,6 +849,46 @@ private Q_SLOTS:
         invoke("toggleDetails");
         invoke("popToList");
         settle();
+
+        // A plain left click on a row still opens the chat.
+        QVERIFY(m_controller->currentChatId().isEmpty());
+        QQuickItem *row = chatRow(Dave);
+        QVERIFY(row);
+        QTest::mouseClick(m_window, Qt::LeftButton, {}, row->mapToScene(QPointF(row->width() / 2, row->height() / 2)).toPoint());
+        QTRY_COMPARE_WITH_TIMEOUT(m_controller->currentChatId(), Dave, Timeout);
+        QVERIFY(!menu->property("opened").toBool());
+        invoke("popToList");
+        settle();
+    }
+
+    void reorderKeepsListScroll()
+    {
+        // Reorders arrive as VerticalSortHint layout changes on the model the
+        // list binds directly: no reset, so the view keeps its scroll position.
+        const QString eve = u"mailto:eve@example.org"_s;
+        m_window->resize(1280, 330);
+        settle();
+        auto *view = visibleItem(u"chatListView"_s);
+        QVERIFY(view);
+        const qreal maxY = view->property("contentHeight").toReal() - view->height() + view->property("originY").toReal();
+        QVERIFY2(maxY > 20, "the chat list must scroll for this test");
+        view->setProperty("contentY", maxY);
+        settle();
+        const qreal y = view->property("contentY").toReal();
+        auto *chats = m_controller->chatList();
+        const QString bottom = chats->data(chats->index(chats->rowCount() - 1), ChatListModel::ChatIdRole).toString();
+        m_fake.control(u"InjectMessage"_s, {bottom, bottom, u"up you go"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(chats->data(chats->index(0), ChatListModel::ChatIdRole).toString(), bottom, Timeout);
+        settle();
+        QCOMPARE(view->property("contentY").toReal(), y);
+        m_controller->daemon()->setChatPinned(eve, true);
+        QTRY_VERIFY_WITH_TIMEOUT(chats->isPinned(eve), Timeout);
+        settle();
+        QCOMPARE(view->property("contentY").toReal(), y);
+        m_controller->daemon()->setChatPinned(eve, false);
+        QTRY_VERIFY_WITH_TIMEOUT(!chats->hasPinned(), Timeout);
+        m_window->resize(1280, 820);
+        settle();
     }
 
     void syncFromMac()
@@ -862,6 +902,7 @@ private Q_SLOTS:
             QVERIFY(f.open(QIODevice::WriteOnly));
             f.write(R"SH(#!/bin/sh
 echo "$@" > "$(dirname "$0")/args"
+if [ "$FAKE_IMSG_MODE" = slow ]; then exec sleep 30; fi
 sleep 1
 if [ "$FAKE_IMSG_MODE" = fail ]; then
     echo "ssh: connect to host mac.local port 22: Connection refused" >&2
@@ -904,11 +945,12 @@ echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"
         click(button);
         QTRY_VERIFY_WITH_TIMEOUT(sync->isRunning(), Timeout);
         QVERIFY(busy->isVisible());
-        QVERIFY(!button->isEnabled());
+        QVERIFY(button->isEnabled()); // a click stops it
         QVERIFY(!action->property("enabled").toBool());
+        QVERIFY(action->property("tooltip").toString().contains(u"Click to stop"_s));
         shoot(u"sync-from-mac"_s);
         QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, Timeout);
-        const QString summary = u"Synced from mac.local: 312 contacts (4 updated), 3 pins"_s;
+        const QString summary = u"Synced from mac.local: 312 contacts (3 updated, 1 removed), 3 pins"_s;
         QCOMPARE(finished.first().at(0).toBool(), true);
         QCOMPARE(finished.first().at(1).toString(), summary);
         QTRY_VERIFY_WITH_TIMEOUT(showsText(summary), Timeout); // the passive notification
@@ -938,6 +980,20 @@ echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"
         QCOMPARE(readArgs(), u"sync-mac --json -- me@other.local"_s);
         QCOMPARE(sync->lastSync(), last);
         QVERIFY(button->isEnabled());
+
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // Clicking the busy button stops a sync.
+        qputenv("FAKE_IMSG_MODE", "slow");
+        click(button);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isRunning() && busy->isVisible(), Timeout);
+        QTest::qWait(300);
+        click(button);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 3, Timeout);
+        QCOMPARE(finished.at(2).at(1).toString(), u"Sync from Mac stopped."_s);
+        QVERIFY(!sync->isRunning());
+        QVERIFY(!busy->isVisible());
+        QCOMPARE(sync->lastSync(), last);
 
         // Back to how the other tests expect it.
         QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));

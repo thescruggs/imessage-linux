@@ -16,7 +16,8 @@
   Pin / Unpin. The new Sync from Mac toolbar button (and tray menu entry)
   runs `imsg sync-mac --json` and reports the result ("Synced from
   mac.local: 312 contacts (4 updated), 3 pins", or the error) in a passive
-  notification; the tooltip shows the last sync. Settings → Sync from Mac
+  notification (clicking the busy button stops a sync); the tooltip
+  shows the last sync. Settings → Sync from Mac
   sets the Mac (default: the daemon's `mac_host`) and, for development
   builds, the `imsg` program (`KMESSAGES_IMSG` overrides it).
 * **`imsg sync-mac`: contacts and pins from your Mac in one go.** One ssh

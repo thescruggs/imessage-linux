@@ -841,6 +841,19 @@ class FakeDaemon(dbus.service.Object):
         self.send_file_delay_ms = int(ms)
 
     @dbus.service.method(CTRL, in_signature="s", out_signature="")
+    def PutChat(self, fields_json):
+        """Merge `fields_json` (Chat JSON fields, `id` required) into that chat,
+        creating it if new, and emit one ChatUpdated: several changes in one
+        event (unread + activity, pin + activity, a new pinned chat)."""
+        fields = json.loads(fields_json)
+        cid = fields["id"]
+        c = self.store.chats.setdefault(cid, {"id": cid, "participants": [{"uri": cid}], "display_name": None,
+                                              "is_group": False, "last_message_at": None, "unread_count": 0,
+                                              "pinned": False, "pin_order": None})
+        c.update(fields)
+        self.ChatUpdated(dumps(c))
+
+    @dbus.service.method(CTRL, in_signature="s", out_signature="")
     def SetMacHost(self, host):
         """`mac_host` in GetStatus ("" = unset)."""
         self.mac_host = str(host) or None
