@@ -73,7 +73,7 @@ struct Chat {
 };
 
 struct MessagePart {
-    enum class Type { Text, Attachment, Mention, Unsupported };
+    enum class Type { Text, Attachment, Mention, Unsupported, Link };
     Type type = Type::Text;
     QString text; ///< Text, Mention
     QString attachmentId; ///< Attachment
@@ -82,6 +82,13 @@ struct MessagePart {
     qint64 size = 0; ///< Attachment
     QString handle; ///< Mention
     QString description; ///< Unsupported
+    // Link (a link preview: the page's metadata as the sender fetched it)
+    QString url; ///< Link
+    QString title; ///< Link, empty = none
+    QString summary; ///< Link, empty = none
+    QString siteName; ///< Link, empty = unknown (show the URL's host)
+    QString imageAttachmentId; ///< Link: the preview image (an attachment without a part of its own), empty = none
+    QString iconAttachmentId; ///< Link: the site icon, empty = none
 };
 
 /// Attachment as seen by the UI (derived from an attachment part).
@@ -129,10 +136,17 @@ struct Message {
     QString service = QStringLiteral("imessage");
 
     bool isSms() const { return service == QLatin1String("sms"); }
+    /// Attachment parts, minus any a link preview refers to (those are
+    /// the preview card's image and icon).
     QList<Attachment> attachments() const;
+    /// The first link part (Messages shows one preview per message).
+    std::optional<MessagePart> link() const;
+    /// The text is nothing but the link's URL: the preview card replaces it.
+    bool isOnlyLink() const;
     /// Descriptions of parts we cannot render.
     QStringList unsupported() const;
-    /// One-line preview for the chat list / notifications.
+    /// One-line preview for the chat list / notifications (the link's
+    /// title when the text is only its URL).
     QString snippet() const;
 };
 

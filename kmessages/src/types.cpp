@@ -122,13 +122,35 @@ QString Reaction::methodKind() const
 
 QList<Attachment> Message::attachments() const
 {
+    QStringList linked;
+    for (const auto &p : parts) {
+        if (p.type == MessagePart::Type::Link) {
+            linked << p.imageAttachmentId << p.iconAttachmentId;
+        }
+    }
     QList<Attachment> out;
     for (const auto &p : parts) {
-        if (p.type == MessagePart::Type::Attachment) {
+        if (p.type == MessagePart::Type::Attachment && !linked.contains(p.attachmentId)) {
             out.append({p.attachmentId, p.mime, p.filename, p.size});
         }
     }
     return out;
+}
+
+std::optional<MessagePart> Message::link() const
+{
+    for (const auto &p : parts) {
+        if (p.type == MessagePart::Type::Link) {
+            return p;
+        }
+    }
+    return std::nullopt;
+}
+
+bool Message::isOnlyLink() const
+{
+    const auto l = link();
+    return l && !l->url.isEmpty() && text.trimmed() == l->url.trimmed();
 }
 
 QStringList Message::unsupported() const
@@ -147,8 +169,15 @@ QString Message::snippet() const
     if (unsent) {
         return i18n("This message was unsent");
     }
+    if (isOnlyLink()) {
+        const auto l = link();
+        return l->title.trimmed().isEmpty() ? l->url.trimmed() : l->title.simplified();
+    }
     if (!text.trimmed().isEmpty()) {
         return text.simplified();
+    }
+    if (const auto l = link()) {
+        return l->title.trimmed().isEmpty() ? l->url.trimmed() : l->title.simplified();
     }
     const auto atts = attachments();
     if (!atts.isEmpty()) {
@@ -411,6 +440,20 @@ std::optional<MessagePart> part(const QJsonObject &o, QString *error)
     } else if (type == "unsupported"_L1) {
         p.type = MessagePart::Type::Unsupported;
         p.description = o.value("description"_L1).toString();
+    } else if (type == "link"_L1) {
+        p.type = MessagePart::Type::Link;
+        // Everything but the URL may be missing or null (toString() of null = "").
+        p.url = o.value("url"_L1).toString();
+        p.title = o.value("title"_L1).toString();
+        p.summary = o.value("summary"_L1).toString();
+        p.siteName = o.value("site_name"_L1).toString();
+        p.imageAttachmentId = o.value("image_attachment_id"_L1).toString();
+        p.iconAttachmentId = o.value("icon_attachment_id"_L1).toString();
+        if (p.url.isEmpty()) {
+            // Nothing to show or open: like an unknown part.
+            p.type = MessagePart::Type::Unsupported;
+            p.description = type;
+        }
     } else {
         // Forward compatibility: an unknown part type is shown as unsupported.
         p.type = MessagePart::Type::Unsupported;

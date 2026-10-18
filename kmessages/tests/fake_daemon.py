@@ -99,6 +99,13 @@ def png_bytes(width=320, height=200):
             + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
+def link_part(mid, url, title, summary, site_name, image, icon):
+    """A `link` part; its image / icon are attachments without parts of their own."""
+    return {"type": "link", "url": url, "title": title, "summary": summary, "site_name": site_name,
+            "image_attachment_id": mid + ":link-image" if image else None,
+            "icon_attachment_id": mid + ":link-icon" if icon else None}
+
+
 def guid():
     return str(uuid.uuid4()).upper()
 
@@ -202,6 +209,16 @@ class Store:
         eve = "mailto:eve@example.org"
         self.chats[eve] = {"id": eve, "participants": [{"uri": eve, "display": "Eve Adams"}], "display_name": None,
                            "is_group": False, "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
+        # Link previews (before the rest, so Eve's snippet stays the app message):
+        # one message that is only a URL (image + icon), one with text (icon only).
+        url = "https://www.example.org/blog/plasma-release"
+        lm = self._msg(eve, eve, now - 10 * day, url)
+        lm["parts"].append(link_part(lm["id"], url, "Plasma: what's new this spring",
+                                     "Highlights of the release, with screenshots.", "Example Blog", True, True))
+        url = "https://cooking.example.net/pancakes"
+        lm = self._msg(eve, None, now - 10 * day + 5 * minute, "Saturday breakfast? " + url, from_me=True,
+                       delivery="read")
+        lm["parts"].append(link_part(lm["id"], url, "Fluffy pancakes", None, None, False, True))
         self._msg(eve, None, now - 9 * day, "Happy birthday! 🎉", from_me=True, delivery="read")
         self._msg(eve, eve, now - 9 * day + 30 * minute, "Thank you!!")
         self._msg(eve, None, now - 9 * day + 31 * minute, "", from_me=True, delivery="failed",
@@ -566,6 +583,13 @@ class FakeDaemon(dbus.service.Object):
         part = None
         if m is not None:
             part = next((p for p in m["parts"] if p.get("attachment_id") == attachment_id), None)
+            for p in m["parts"]:
+                if p.get("type") != "link":
+                    continue
+                if p.get("image_attachment_id") == attachment_id:
+                    part = {"filename": "link-image.png", "mime": "image/png", "_png": (480, 250)}
+                elif p.get("icon_attachment_id") == attachment_id:
+                    part = {"filename": "link-icon.png", "mime": "image/png", "_png": (64, 64)}
         if part is None:
             raise Error("NotFound", f"not found: attachment {attachment_id}")
         if m.get("_local"):
@@ -575,7 +599,8 @@ class FakeDaemon(dbus.service.Object):
         path = os.path.join(d, part["filename"])
         if not os.path.exists(path):
             with open(path, "wb") as f:
-                f.write(png_bytes() if part["mime"].startswith("image/") else b"%PDF-1.4\n% fake\n")
+                f.write(png_bytes(*part.get("_png", (320, 200))) if part["mime"].startswith("image/")
+                        else b"%PDF-1.4\n% fake\n")
         return path
 
     @dbus.service.method(IFACE, in_signature="s", out_signature="s")
@@ -697,6 +722,18 @@ class FakeDaemon(dbus.service.Object):
         """Incoming message from `sender` (a URI); returns its id."""
         self.chat(chat_id)
         m = self.store._msg(chat_id, sender, int(time.time() * 1000), text)
+        self.store.chats[chat_id]["unread_count"] += 1
+        self.announce_new(m)
+        return m["id"]
+
+    @dbus.service.method(CTRL, in_signature="ssssssbb", out_signature="s")
+    def InjectLink(self, chat_id, sender, text, url, title, site_name, image, icon):
+        """Incoming message with `text` (empty = just the URL) and a link
+        preview of `url` (empty title / site name = none; `image` / `icon`:
+        with those attachments); returns its id."""
+        self.chat(chat_id)
+        m = self.store._msg(chat_id, sender, int(time.time() * 1000), text or url)
+        m["parts"].append(link_part(m["id"], url, title or None, None, site_name or None, bool(image), bool(icon)))
         self.store.chats[chat_id]["unread_count"] += 1
         self.announce_new(m)
         return m["id"]

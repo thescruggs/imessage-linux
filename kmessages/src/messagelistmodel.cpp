@@ -110,6 +110,8 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {EffectRole, "effect"},
         {UnsupportedRole, "unsupported"},
         {IsSmsRole, "isSms"},
+        {LinkRole, "link"},
+        {LinkOnlyRole, "linkOnly"},
     };
 }
 
@@ -267,6 +269,43 @@ QVariantList MessageListModel::attachments(const Message &m) const
         };
     }
     return out;
+}
+
+QVariantMap MessageListModel::attachmentState(const QString &id) const
+{
+    if (id.isEmpty()) {
+        return {};
+    }
+    const QString path = m_paths.value(id);
+    return {
+        {u"id"_s, id},
+        {u"localPath"_s, path},
+        {u"downloading"_s, m_downloading.contains(id)},
+        {u"error"_s, m_downloadErrors.value(id)},
+    };
+}
+
+QVariantMap MessageListModel::link(const Message &m) const
+{
+    const auto l = m.link();
+    if (!l) {
+        return {};
+    }
+    const QUrl url(l->url.trimmed());
+    QString host = url.host();
+    if (host.startsWith("www."_L1)) {
+        host = host.mid(4);
+    }
+    return {
+        {u"url"_s, l->url.trimmed()},
+        {u"title"_s, l->title.trimmed()},
+        {u"summary"_s, l->summary.trimmed()},
+        {u"siteName"_s, l->siteName.trimmed()},
+        {u"host"_s, host},
+        {u"openable"_s, url.isValid() && (url.scheme() == "http"_L1 || url.scheme() == "https"_L1)},
+        {u"image"_s, attachmentState(l->imageAttachmentId)},
+        {u"icon"_s, attachmentState(l->iconAttachmentId)},
+    };
 }
 
 const Message *MessageListModel::findMessage(const QString &id) const
@@ -443,6 +482,10 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return m.unsupported();
     case IsSmsRole:
         return m.isSms();
+    case LinkRole:
+        return link(m);
+    case LinkOnlyRole:
+        return m.isOnlyLink();
     }
     return {};
 }
@@ -935,12 +978,17 @@ void MessageListModel::reloadAttachment(const QString &attachmentId)
 void MessageListModel::touchAttachment(const QString &attachmentId)
 {
     for (int i = 0; i < m_messages.size(); ++i) {
-        const auto atts = m_messages.at(i).attachments();
+        const auto &m = m_messages.at(i);
+        const auto atts = m.attachments();
         for (const auto &a : atts) {
             if (a.id == attachmentId) {
                 const auto idx = index(i);
                 Q_EMIT dataChanged(idx, idx, {AttachmentsRole});
             }
+        }
+        if (const auto l = m.link(); l && (l->imageAttachmentId == attachmentId || l->iconAttachmentId == attachmentId)) {
+            const auto idx = index(i);
+            Q_EMIT dataChanged(idx, idx, {LinkRole});
         }
     }
 }
@@ -961,6 +1009,15 @@ void MessageListModel::copyText(const QString &messageId)
     const Message *m = findMessage(messageId);
     if (m && QGuiApplication::clipboard()) {
         QGuiApplication::clipboard()->setText(m->text);
+    }
+}
+
+void MessageListModel::copyLink(const QString &messageId)
+{
+    const Message *m = findMessage(messageId);
+    const auto l = m ? m->link() : std::nullopt;
+    if (l && QGuiApplication::clipboard()) {
+        QGuiApplication::clipboard()->setText(l->url.trimmed());
     }
 }
 

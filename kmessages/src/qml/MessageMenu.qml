@@ -36,6 +36,13 @@ QQC2.Menu {
         onTriggered: App.messages.copyText(root.message.messageId)
     }
     QQC2.MenuItem {
+        text: i18n("Copy Link")
+        icon.name: "edit-copy"
+        visible: (root.message.link?.url ?? "").length > 0
+        height: visible ? implicitHeight : 0
+        onTriggered: App.messages.copyLink(root.message.messageId)
+    }
+    QQC2.MenuItem {
         text: i18n("Open Attachment")
         icon.name: "document-open"
         visible: root.message.hasAttachments === true

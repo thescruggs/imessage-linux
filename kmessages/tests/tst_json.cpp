@@ -247,6 +247,53 @@ private Q_SLOTS:
         QCOMPARE(m->snippet(), u"look at this"_s);
     }
 
+    void linkParts()
+    {
+        // A message that is only a URL, with the full preview.
+        const QString full = fixture("message_link.json");
+        QString err;
+        auto m = Json::parseMessage(full, &err);
+        QVERIFY2(m, qPrintable(err));
+        QCOMPARE(m->parts.at(1).type, MessagePart::Type::Link);
+        const auto l = m->link();
+        QVERIFY(l);
+        QCOMPARE(l->url, u"https://www.example.com/a"_s);
+        QCOMPARE(l->title, u"A page"_s);
+        QCOMPARE(l->summary, u"About a"_s);
+        QCOMPARE(l->siteName, u"Example"_s);
+        QCOMPARE(l->imageAttachmentId, u"L1:link-image"_s);
+        QCOMPARE(l->iconAttachmentId, u"L1:link-icon"_s);
+        QVERIFY(m->isOnlyLink());
+        QCOMPARE(m->snippet(), u"A page"_s);
+        // the preview's image is the card's, not an attachment of its own
+        const auto atts = m->attachments();
+        QCOMPARE(atts.size(), 1);
+        QCOMPARE(atts.first().id, u"L1:2"_s);
+
+        // Text around the URL, null fields, missing fields.
+        const QString sparse = fixture("message_link_sparse.json");
+        m = Json::parseMessage(sparse, &err);
+        QVERIFY2(m, qPrintable(err));
+        const auto l2 = m->link();
+        QVERIFY(l2);
+        QVERIFY(l2->title.isEmpty() && l2->summary.isEmpty() && l2->siteName.isEmpty());
+        QVERIFY(l2->imageAttachmentId.isEmpty() && l2->iconAttachmentId.isEmpty());
+        QVERIFY(!m->isOnlyLink());
+        QCOMPARE(m->snippet(), u"look https://x.example/b"_s);
+
+        // Only a URL, no title: the snippet is the URL.
+        m = Json::parseMessage(QString(sparse).replace(u"\"text\":\"look https://x.example/b\""_s, u"\"text\":\"https://x.example/b\""_s), &err);
+        QVERIFY2(m, qPrintable(err));
+        QVERIFY(m->isOnlyLink());
+        QCOMPARE(m->snippet(), u"https://x.example/b"_s);
+
+        // A link part without a URL degrades to an unsupported part.
+        m = Json::parseMessage(QString(sparse).replace(u"\"url\":\"https://x.example/b\","_s, QString()), &err);
+        QVERIFY2(m, qPrintable(err));
+        QVERIFY(!m->link());
+        QCOMPARE(m->unsupported(), QStringList{u"link"_s});
+    }
+
     void unsentMessageAndDefaults()
     {
         auto m = Json::parseMessage(fixture("message_unsent.json"));

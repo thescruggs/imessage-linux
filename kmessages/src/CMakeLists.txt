@@ -38,6 +38,7 @@ set(KMESSAGES_QML
     qml/ConversationPage.qml
     qml/MessageDelegate.qml
     qml/AttachmentView.qml
+    qml/LinkPreview.qml
     qml/ReactionChips.qml
     qml/TypingBubble.qml
     qml/Composer.qml

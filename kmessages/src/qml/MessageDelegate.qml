@@ -41,6 +41,8 @@ Item {
     required property string replyToSender
     required property string subject
     required property var unsupported
+    required property var link
+    required property bool linkOnly
 
     signal menuRequested(Item anchor)
     signal tapbackRequested(Item anchor)
@@ -58,7 +60,9 @@ Item {
     readonly property real sideMargin: Kirigami.Units.largeSpacing * 1.5
     readonly property real avatarGutter: App.messages.isGroup && !isFromMe ? Kirigami.Units.gridUnit * 1.5 + Kirigami.Units.smallSpacing : 0
     readonly property real maxBubbleWidth: Math.max(Kirigami.Units.gridUnit * 8, Math.min((width - sideMargin * 2 - avatarGutter) * 0.75, Kirigami.Units.gridUnit * 30))
-    readonly property string bodyText: hasText ? richText : (unsupported.length > 0 ? i18n("Unsupported message: %1", unsupported.join(", ")) : "")
+    readonly property bool hasLink: (link.url ?? "").length > 0
+    // A message that is only a URL shows the preview card instead (as Messages).
+    readonly property string bodyText: linkOnly ? "" : hasText ? richText : (unsupported.length > 0 ? i18n("Unsupported message: %1", unsupported.join(", ")) : "")
 
     width: ListView.view ? ListView.view.width : implicitWidth
     implicitHeight: column.implicitHeight
@@ -237,7 +241,7 @@ Item {
                     // Tail: a bubble-coloured block whose outer edge is carved
                     // by a background-coloured rounded block (classic CSS trick).
                     Rectangle {
-                        visible: root.lastInGroup && !root.isEmojiOnly && !root.overBackground
+                        visible: root.lastInGroup && !root.isEmojiOnly && !root.overBackground && !root.hasLink
                         width: 20
                         height: Math.min(25, bubble.height)
                         y: bubble.height - height
@@ -247,7 +251,7 @@ Item {
                         bottomRightRadius: root.isFromMe ? 0 : 16
                     }
                     Rectangle {
-                        visible: root.lastInGroup && !root.isEmojiOnly && !root.overBackground
+                        visible: root.lastInGroup && !root.isEmojiOnly && !root.overBackground && !root.hasLink
                         width: 26
                         height: Math.min(25, bubble.height)
                         y: bubble.height - height
@@ -302,6 +306,17 @@ Item {
 
                 }
 
+
+                LinkPreview {
+                    objectName: "linkPreview"
+                    visible: root.hasLink
+                    link: root.link
+                    cardColor: root.bubbleColor
+                    textColor: root.bubbleTextColor
+                    maxWidth: root.maxBubbleWidth
+                    Layout.alignment: root.isFromMe ? Qt.AlignRight : Qt.AlignLeft
+                    onMenuRequested: anchor => root.menuRequested(anchor)
+                }
 
                 QQC2.Label {
                     visible: root.edited

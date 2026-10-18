@@ -882,6 +882,64 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QTRY_VERIFY_WITH_TIMEOUT(failed, Timeout);
     }
 
+    void linkPreviews()
+    {
+        const QString eve = u"mailto:eve@example.org"_s;
+        auto client = connectedClient();
+        ChatListModel chats(client.get());
+        QTRY_COMPARE_WITH_TIMEOUT(chats.rowCount(), 4, Timeout);
+        auto msgs = loadedMessages(client.get(), &chats, eve);
+        QAbstractItemModelTester tester(msgs.get());
+
+        // only a URL: the card replaces the text; image + icon, no attachments
+        const int only = rowWithText(*msgs, u"https://www.example.org/blog/plasma-release"_s);
+        QVERIFY(only >= 0);
+        QVERIFY(roleOf(*msgs, only, MessageListModel::LinkOnlyRole).toBool());
+        auto link = roleOf(*msgs, only, MessageListModel::LinkRole).toMap();
+        QCOMPARE(link.value(u"url"_s).toString(), u"https://www.example.org/blog/plasma-release"_s);
+        QCOMPARE(link.value(u"title"_s).toString(), u"Plasma: what's new this spring"_s);
+        QCOMPARE(link.value(u"siteName"_s).toString(), u"Example Blog"_s);
+        QCOMPARE(link.value(u"host"_s).toString(), u"example.org"_s);
+        QVERIFY(link.value(u"openable"_s).toBool());
+        QVERIFY(roleOf(*msgs, only, MessageListModel::AttachmentsRole).toList().isEmpty());
+        QVERIFY(!roleOf(*msgs, only, MessageListModel::HasAttachmentsRole).toBool());
+        const QString imageId = link.value(u"image"_s).toMap().value(u"id"_s).toString();
+        QVERIFY(imageId.endsWith(u":link-image"_s));
+        QVERIFY(link.value(u"image"_s).toMap().value(u"localPath"_s).toString().isEmpty());
+
+        // downloading the image updates the card
+        QSignalSpy changed(msgs.get(), &QAbstractItemModel::dataChanged);
+        msgs->downloadAttachment(imageId);
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(roleOf(*msgs, only, MessageListModel::LinkRole).toMap().value(u"image"_s).toMap().value(u"localPath"_s).toString()),
+                                 Timeout);
+        bool linkRoleChanged = false;
+        for (const auto &args : changed) {
+            linkRoleChanged = linkRoleChanged || args.at(2).value<QList<int>>().contains(MessageListModel::LinkRole);
+        }
+        QVERIFY(linkRoleChanged);
+
+        // text around the URL: text stays, the card has an icon and no image
+        const int withText = rowWithText(*msgs, u"Saturday breakfast? https://cooking.example.net/pancakes"_s);
+        QVERIFY(withText >= 0);
+        QVERIFY(!roleOf(*msgs, withText, MessageListModel::LinkOnlyRole).toBool());
+        link = roleOf(*msgs, withText, MessageListModel::LinkRole).toMap();
+        QCOMPARE(link.value(u"host"_s).toString(), u"cooking.example.net"_s);
+        QVERIFY(link.value(u"siteName"_s).toString().isEmpty());
+        QVERIFY(link.value(u"image"_s).toMap().isEmpty());
+        QVERIFY(link.value(u"icon"_s).toMap().value(u"id"_s).toString().endsWith(u":link-icon"_s));
+
+        // other messages have no link
+        const int plain = rowWithText(*msgs, u"Thank you!!"_s);
+        QVERIFY(roleOf(*msgs, plain, MessageListModel::LinkRole).toMap().isEmpty());
+        QVERIFY(!roleOf(*msgs, plain, MessageListModel::LinkOnlyRole).toBool());
+
+        // chat list: a URL-only message shows the page title
+        m_fake.control(u"InjectLink"_s, {Bob, Bob, QString(), u"https://news.example.com/x"_s, u"Big news"_s, QString(), true, false});
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::SnippetRole).toString(), u"Big news"_s, Timeout);
+        m_fake.control(u"InjectLink"_s, {Bob, Bob, u"read this https://news.example.com/y"_s, u"https://news.example.com/y"_s, u"Other"_s, QString(), false, false});
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::SnippetRole).toString(), u"read this https://news.example.com/y"_s, Timeout);
+    }
+
     void sendFileSameNames()
     {
         // Two files called the same, both in flight: each message gets its own.

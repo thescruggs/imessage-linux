@@ -387,6 +387,21 @@ private Q_SLOTS:
         shoot(u"transcript-unverified"_s);
     }
 
+    void linkPreview()
+    {
+        const QString eve = u"mailto:eve@example.org"_s;
+        invoke("openChat", eve);
+        auto *msgs = m_controller->messages();
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->isLoaded() && msgs->chatId() == eve && msgs->rowCount() == 5, Timeout);
+        // two cards; the link-only message shows its card, not the bare URL
+        QTRY_COMPARE_WITH_TIMEOUT(visibleItems(u"linkPreview"_s).size(), 2, Timeout);
+        QTRY_COMPARE_WITH_TIMEOUT(visibleItems(u"linkPreviewImage"_s).size(), 1, Timeout);
+        QVERIFY(showsText(u"Plasma: what's new this spring"_s));
+        QVERIFY(showsText(u"Fluffy pancakes"_s));
+        QVERIFY(!showsText(u"https://www.example.org/blog/plasma-release"_s));
+        shoot(u"link-preview"_s);
+    }
+
     void olderPagesWhenContentFits()
     {
         // 7 messages in pages of 5: the first page fits the viewport, so no

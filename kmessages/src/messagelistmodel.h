@@ -75,6 +75,8 @@ public:
         EffectRole,
         UnsupportedRole,
         IsSmsRole, ///< a text message relayed by the iPhone (green bubble, no tapbacks / edit)
+        LinkRole, ///< the link preview (QVariantMap, see link()), empty map = none
+        LinkOnlyRole, ///< the text is just the link's URL: the card replaces it
     };
     Q_ENUM(Roles)
 
@@ -127,6 +129,8 @@ public:
     /// Download if needed, then open with the default application.
     Q_INVOKABLE void openAttachment(const QString &attachmentId);
     Q_INVOKABLE void copyText(const QString &messageId);
+    /// Copy the URL of the message's link preview.
+    Q_INVOKABLE void copyLink(const QString &messageId);
 
 Q_SIGNALS:
     void chatIdChanged();
@@ -170,6 +174,10 @@ private:
     QVariantList reactions(const Message &m) const;
     QString myReaction(const Message &m) const;
     QVariantList attachments(const Message &m) const;
+    /// url, title, summary, siteName, host, image / icon (each {id,
+    /// localPath, downloading, error} or an empty map).
+    QVariantMap link(const Message &m) const;
+    QVariantMap attachmentState(const QString &id) const;
     const Message *findMessage(const QString &id) const;
     static QString richText(const Message &m);
     static QString linkify(const QString &plain);
