@@ -4,11 +4,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use imessage_common::import::{ImportBatch, ImportResult};
-use imessage_common::model::{Attachment, ChatId, Handle, Message, MessageId, MessagePart, Reaction};
+use imessage_common::import::{ImportBatch, ImportLink, ImportResult};
+use imessage_common::model::{Attachment, AttachmentId, ChatId, Handle, Message, MessageId, MessagePart, Reaction};
 
 use super::{DaemonSignal, Hub, OpError, OpResult, safe_component};
 use crate::store::PurgeSummary;
+
+/// Largest link-preview archive (base64) we accept per message.
+pub const MAX_IMPORT_LINK_PAYLOAD: usize = 1 << 20;
 
 /// Upper bound per call; callers split larger imports into batches.
 pub const MAX_IMPORT_MESSAGES: usize = 2000;
@@ -61,6 +64,14 @@ fn validate(batch: &ImportBatch) -> OpResult<()> {
                 return Err(invalid(format!("attachment {}: source_path {p:?} is not absolute", a.id)));
             }
         }
+        if let Some(l) = &im.link {
+            if l.payload.len() > MAX_IMPORT_LINK_PAYLOAD {
+                return Err(invalid(format!("message {}: link preview payload too large", m.id)));
+            }
+            if let Some(p) = l.images.iter().flatten().find(|p| !Path::new(p).is_absolute()) {
+                return Err(invalid(format!("message {}: link image {p:?} is not absolute", m.id)));
+            }
+        }
     }
     Ok(())
 }
@@ -83,12 +94,17 @@ impl Hub {
         let mut copied: Vec<(MessageId, PathBuf)> = vec![];
         let mut without_file = 0u32;
         for im in batch.messages {
-            let m = im.message;
+            let mut m = im.message;
             if existing.contains(&m.id) {
                 rows.push((m, vec![]));
                 continue;
             }
             let mut atts = Vec::with_capacity(im.attachments.len());
+            if let Some(link) = &im.link {
+                let link_atts = self.import_link(&mut m, link).await;
+                copied.extend(link_atts.iter().filter_map(|a| a.local_path.as_ref()).map(|p| (m.id.clone(), PathBuf::from(p))));
+                atts.extend(link_atts);
+            }
             for a in im.attachments {
                 let filename = safe_component(&a.filename, "attachment");
                 let local_path = match &a.source_path {
@@ -160,6 +176,59 @@ impl Hub {
             result.reactions_orphaned
         );
         Ok(result)
+    }
+}
+
+/// The bytes of an imported link-preview file: a regular file (not a
+/// symlink) of at most [`convert::MAX_LINK_IMAGE_BYTES`].
+async fn read_link_image(path: &str) -> Option<Vec<u8>> {
+    let meta = tokio::fs::symlink_metadata(path).await.ok()?;
+    if !meta.is_file() || meta.len() > crate::engine::convert::MAX_LINK_IMAGE_BYTES as u64 {
+        return None;
+    }
+    tokio::fs::read(path).await.ok()
+}
+
+impl Hub {
+    /// Turn a Mac link preview into a `link` part on `m` (after its text;
+    /// the URL becomes the text of a message without one) and return its
+    /// image / icon rows, files written. An archive that cannot be read
+    /// leaves the message as it is (an empty one becomes "app message").
+    async fn import_link(&self, m: &mut Message, link: &ImportLink) -> Vec<Attachment> {
+        use base64::Engine as _;
+        use crate::engine::convert;
+        let parsed = base64::engine::general_purpose::STANDARD.decode(link.payload.trim()).ok().and_then(|b| convert::rich_link_from_archive(&b));
+        let Some(parsed) = parsed.filter(|_| !m.unsent) else {
+            if !m.unsent {
+                log::warn!("import: link preview of {} could not be read", m.id);
+            }
+            if m.parts.is_empty() && !m.unsent {
+                m.parts.push(MessagePart::Unsupported { description: "app message".into() });
+            }
+            return vec![];
+        };
+        let url = parsed.link_url().unwrap_or_default();
+        let mut atts = vec![];
+        let mut take = async |sub: &Option<(u64, String)>, id: AttachmentId, kind: &str| -> Option<AttachmentId> {
+            let (idx, mime) = sub.as_ref()?;
+            let path = link.images.get(usize::try_from(*idx).ok()?)?.as_deref()?;
+            let data = read_link_image(path).await?;
+            let mime = if mime.is_empty() { crate::linkpreview::image_info(&data).map(|(m, _, _)| m.to_string()).unwrap_or_default() } else { mime.clone() };
+            let a = convert::link_attachment(id, &m.id, kind, &mime, &data)?;
+            let id = a.id.clone();
+            atts.push(a);
+            Some(id)
+        };
+        let image_attachment_id = take(&parsed.image, AttachmentId::link_image(&m.id), "link-image").await;
+        let icon_attachment_id = take(&parsed.icon, AttachmentId::link_icon(&m.id), "link-icon").await;
+        m.parts.retain(|p| !matches!(p, MessagePart::Unsupported { .. } | MessagePart::Link { .. }));
+        if m.text.as_deref().is_none_or(|t| t.trim().is_empty()) {
+            m.parts.retain(|p| !matches!(p, MessagePart::Text { .. }));
+            m.parts.insert(0, MessagePart::Text { text: url.clone() });
+            m.text = Some(url.clone());
+        }
+        m.parts.push(MessagePart::Link { url, title: parsed.title, summary: parsed.summary, site_name: None, image_attachment_id, icon_attachment_id });
+        self.keep_link_files(atts).await
     }
 }
 

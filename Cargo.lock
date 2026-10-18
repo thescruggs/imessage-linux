@@ -2162,6 +2162,7 @@ dependencies = [
  "omnisette",
  "plist",
  "rand 0.8.8",
+ "reqwest",
  "rusqlite",
  "rustpush",
  "secret-service",

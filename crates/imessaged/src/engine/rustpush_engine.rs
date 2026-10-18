@@ -80,7 +80,7 @@ use liveness::{HANDLE_TIMEOUT, Liveness, Verdict, WATCHDOG_TICK};
 
 use super::supervise::{self, Backoff};
 use super::{convert, SentMessage};
-use super::{ChatTarget, Engine, EngineError, EngineEvent, EngineResult, FetchedProfile, LoginOutcome, ShareRef, EVENT_CHANNEL_CAPACITY};
+use super::{ChatTarget, Engine, EngineError, EngineEvent, EngineResult, FetchedProfile, LinkPreview, LoginOutcome, ShareRef, EVENT_CHANNEL_CAPACITY};
 use crate::config::DaemonConfig;
 use crate::keyring::StateKey;
 use crate::state::{SavedState, StateError, StateStore};
@@ -1840,6 +1840,19 @@ impl Engine for RustpushEngine {
             // "<part>:<start>:<length>" of the quoted message; whole first part.
             n.reply_part = Some("0:0:0".into());
         }
+        self.inner.send(chat, RpMessage::Message(n), None, true).await
+    }
+
+    async fn send_text_with_link(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, link: &LinkPreview) -> EngineResult<SentMessage> {
+        if text.is_empty() {
+            return Err(EngineError::InvalidInput("empty message".into()));
+        }
+        let mut n = NormalMessage::new(text.to_string(), MessageType::IMessage);
+        if let Some(r) = reply_to {
+            n.reply_guid = Some(r.0.clone());
+            n.reply_part = Some("0:0:0".into());
+        }
+        n.link_meta = Some(convert::link_meta(link));
         self.inner.send(chat, RpMessage::Message(n), None, true).await
     }
 

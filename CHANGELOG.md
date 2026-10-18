@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+* **Link previews (as Messages).** A link someone sends with a preview
+  now arrives as a card (title, site, image or icon) instead of plain
+  text, and a message that was only a preview no longer shows "app
+  message". When you send an iMessage with a link, the daemon fetches the
+  page first (5 s at most; Open Graph / Twitter card / `<title>`, the
+  site icon and image) and sends the preview with the text, so the other
+  side's iPhone or Mac shows the same card; on any failure the text goes
+  out alone. Text messages (SMS) get no preview. Privacy: the daemon
+  contacts the linked site when *you send* a link, never when you
+  receive one; turn it off with `link_previews = false` (or
+  `--no-link-previews`). New `link` message part on D-Bus (the image and
+  icon are ordinary attachments); `imsg messages` prints
+  `[link: <title> — <site>]`; `imsg import-mac` brings back the cards of
+  imported history. In kmessages the card sits under the text (or
+  replaces a bare URL), opens the link on click, shows the URL on hover
+  and has Copy Link in the message menu; the chat list shows the title
+  for a link-only message.
 * **Pinned conversations (daemon and CLI).** Chats can be pinned to the
   top of the chat list, locally (like Messages' pins; not synced to
   Apple): `imsg chat CHAT --pin [--position N]` / `--unpin` (pinning a

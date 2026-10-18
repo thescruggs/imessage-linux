@@ -14,7 +14,7 @@ use imessage_common::model::{
 use tokio::sync::broadcast;
 
 use super::{
-    ChatTarget, Engine, EngineError, EngineEvent, EngineResult, FetchedProfile, LoginOutcome, SentMessage, ShareRef, EVENT_CHANNEL_CAPACITY,
+    ChatTarget, Engine, EngineError, EngineEvent, EngineResult, FetchedProfile, LinkPreview, LoginOutcome, SentMessage, ShareRef, EVENT_CHANNEL_CAPACITY,
 };
 
 /// Fixed send timestamp (ms) reported by the mock.
@@ -28,6 +28,8 @@ pub enum MockCall {
     Logout,
     Register,
     SendText { chat: ChatTarget, text: String, reply_to: Option<MessageId> },
+    /// A link preview sent with the next `SendText` (recorded just before it).
+    LinkPreview { url: String, original_url: String, title: Option<String>, image_bytes: Option<usize>, icon_bytes: Option<usize> },
     SendAttachment { chat: ChatTarget, path: PathBuf, mime: String },
     React { chat: ChatTarget, message_id: MessageId, kind: ReactionKind, remove: bool },
     Edit { chat: ChatTarget, message_id: MessageId, new_text: String },
@@ -400,6 +402,17 @@ impl Engine for MockEngine {
     async fn send_text(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>) -> EngineResult<SentMessage> {
         self.record(MockCall::SendText { chat: chat.clone(), text: text.to_string(), reply_to: reply_to.cloned() })?;
         self.sent(chat, true)
+    }
+
+    async fn send_text_with_link(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, link: &LinkPreview) -> EngineResult<SentMessage> {
+        self.lock().calls.push(MockCall::LinkPreview {
+            url: link.url.clone(),
+            original_url: link.original_url.clone(),
+            title: link.title.clone(),
+            image_bytes: link.image.as_ref().map(|i| i.data.len()),
+            icon_bytes: link.icon.as_ref().map(|i| i.data.len()),
+        });
+        self.send_text(chat, text, reply_to).await
     }
 
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage> {

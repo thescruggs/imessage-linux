@@ -263,7 +263,7 @@ attachments). The daemon ignores `link_meta` today, so a link arrives as
 plain text with the card missing, and a message that is *only* a URL
 balloon shows "app message".
 
-1. **Model / store**: new part `{"type": "link", "url", "title", "summary",
+1. **[done 2026-10-18]** **Model / store**: new part `{"type": "link", "url", "title", "summary",
    "site_name", "image_attachment_id", "icon_attachment_id"}`
    (`MessagePart::Link`); images and icons are stored as ordinary
    attachment rows and files under `attachments/` (`inline`, no download
@@ -271,11 +271,11 @@ balloon shows "app message".
    `parts` is JSON in the store (schema unchanged; schema version 6 only
    if a backfill is needed). `Message.text` keeps the URL so search,
    snippets and the CLI keep working.
-2. **Receive** (`convert.rs`): `link_meta` → a `link` part after the text
+2. **[done 2026-10-18]** **Receive** (`convert.rs`): `link_meta` → a `link` part after the text
    part(s), its image/icon bytes → attachments. A URL-balloon with no text
    gets the URL as text from `LPLinkMetadata.url`. Unparseable metadata →
    today's behaviour, logged once per message.
-3. **Send** (`Engine::send_text`): when the text contains a URL (first
+3. **[done 2026-10-18]** **Send** (`Engine::send_text`): when the text contains a URL (first
    `http(s)://` token, as Messages previews only the first), the daemon
    fetches it (reqwest, 5 s, ≤ 2 MB, HTML only, follow ≤ 3 redirects,
    our own User-Agent; a small Open Graph / Twitter-card / `<title>` parser,
@@ -292,7 +292,7 @@ balloon shows "app message".
    working for SMS (no preview: MMS does not carry it).
    Privacy note in docs: the daemon contacts the linked site when *you*
    send a link, never when you receive one.
-4. **kmessages**: a `LinkPreview.qml` card below the text in the bubble
+4. **[done 2026-10-18]** **kmessages**: a `LinkPreview.qml` card below the text in the bubble
    (image on top when present, else icon + title, title bold, site name or
    host under it, as Messages), clickable (opens the URL), hover shows the
    full URL, context menu "Copy link"; for a bubble whose text is just the
@@ -301,14 +301,46 @@ balloon shows "app message".
    snippet: the title when the text is only the URL. Composer: nothing to
    show while typing (Messages shows the preview after send; a pre-send
    preview is a later nicety).
-5. **CLI**: `imsg messages` prints `[link: <title> — <host>]` after the text;
+5. **[done 2026-10-18]** **CLI**: `imsg messages` prints `[link: <title> — <host>]` after the text;
    `--json` carries the part.
-6. **Mac import**: `chat.db` keeps the balloon in `message.payload_data`
+6. **[done 2026-10-18]** **Mac import**: `chat.db` keeps the balloon in `message.payload_data`
    (the same `RichLink` archive); the export script adds it to the tar and
    the import turns it into the `link` part, so old conversations get their
    cards back. Fake daemon: `InjectLink` for tests; a `link-preview`
    screenshot; convert tests for receive (with and without text), send tests
    with a local HTTP server fixture (OG tags, redirect, timeout, non-HTML).
+
+   As built (all six steps, 2026-10-18): part `MessagePart::Link { url,
+   title, summary, site_name, image_attachment_id, icon_attachment_id }`;
+   image / icon are inline attachment rows `<id>:link-image` /
+   `<id>:link-icon` (no attachment part; the pump writes their files when
+   the message is stored, `DownloadAttachment` works as for any inline
+   attachment); schema unchanged. Receive: `convert::link_from_meta` (URL,
+   else originalURL; bad indexes, empty or > 8 MiB images dropped, the card
+   kept). Send: `linkpreview.rs` (reqwest 0.11 already in the tree;
+   one 5 s deadline for page + image + icon, ≤ 3 redirects checked by a
+   custom policy, `text/html` / XHTML only, ≤ 2 MiB, stops at `</head>`,
+   own tolerant head scanner). **No re-encoding**: the `image` crate is
+   not a dependency of imessaged (the plan assumed it was), so a JPEG/PNG
+   ≤ 1 MiB is sent as is and anything else is skipped; icons must be
+   ≤ 256 px (sizes read from the PNG / JPEG header). Extra: no previews for
+   localhost / `*.local` / single-label / private-IP hosts (also as a
+   redirect target), so an internal page's title never goes to the
+   recipient. `Engine::send_text_with_link` (default: text alone); the
+   mock records `MockCall::LinkPreview`. Config `link_previews`
+   (`--link-previews BOOL`, `--no-link-previews`,
+   `IMESSAGED_LINK_PREVIEWS`); a bare `Hub` has previews off, the daemon
+   sets them from the config. Mac import: the exporter adds
+   `payload_data` (base64) and the hidden preview files (`link_file`);
+   `imsg` passes them on as `ImportMessage.link` and the **daemon**
+   decodes the archive (rustpush's `KeyedArchive`, read leniently by
+   `convert::rich_link_from_archive`), so `imsg` stays free of rustpush
+   (`cargo tree -p imsg -e normal`). The substitute index is taken as the
+   position among the message's hidden attachments in `chat.db` ROWID
+   order (not verified against a real Mac export yet). kmessages:
+   `LinkPreview.qml`, roles `link` / `linkOnly`, "Copy Link" lives in the
+   message menu (so tapbacks / reply stay reachable from the card); fake
+   daemon seeds two link messages in Eve's chat and has `InjectLink`.
 
 Order: D (CLI first, then the button) together with A's daemon part, then
 A's app part, E, B, C. Release as 0.1.13.

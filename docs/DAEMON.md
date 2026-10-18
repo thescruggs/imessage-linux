@@ -261,6 +261,7 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `other_handles` | `--other-handle` (repeatable) / `IMESSAGED_OTHER_HANDLES` (comma-separated) | `[]` |
 | `sms_relay_number` | `--sms-relay-number` / `IMESSAGED_SMS_RELAY_NUMBER` | unset = the first phone number in `other_handles`; the iPhone number text messages are relayed through (must be a phone number) |
 | `mac_host` | `--mac-host` / `IMESSAGED_MAC_HOST` | unset; the ssh destination of your Mac (`mac.local`, `me@mac.local`, a `Host` alias) for `imsg sync-mac` and kmessages' "Sync from Mac". Only reported (`GetStatus.mac_host`); the daemon never connects to it. A value starting with `-` or containing spaces or shell characters fails startup. `imsg doctor` suggests the host your ssh `anisette_command` reaches |
+| `link_previews` | `--link-previews BOOL` / `--no-link-previews` / `IMESSAGED_LINK_PREVIEWS` | `true`; fetch a preview of the first link in an iMessage you send and send it with the text (see [Link previews](#link-previews)). The daemon then contacts the linked site when you send; never when you receive |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
 
@@ -450,6 +451,75 @@ devices. Incoming messages whose conversation lists only our own handles
 the sender). The stored chat lists that handle as its participant. A
 target with several of our handles and nobody else is rejected
 (`InvalidInput`); groups need at least one other participant.
+
+### Link previews
+
+Messages never lets the receiver fetch anything: the **sender** fetches
+the page's title, summary, icon and image and sends them with the text
+as a `com.apple.messages.URLBalloonProvider` balloon (`RichLink` →
+`LPLinkMetadata` + image attachments); every device shows the same card.
+rustpush parses the balloon (`NormalMessage.link_meta`) and packs one on
+send.
+
+**Receive** (`convert.rs`): `link_meta` becomes a `link` part after the
+text parts (URL from `URL`, else `originalURL`; title / summary trimmed);
+the image and icon bytes the balloon's substitutes index become inline
+attachment rows `<id>:link-image` / `<id>:link-icon` (an index outside
+the balloon's attachments, empty data or more than 8 MiB: left out, the
+card stays). The pump writes their files under `attachments/` right
+after storing the message (no network: the bytes are in the locator). A
+balloon without text gets the URL as its text. A balloon rustpush could
+not parse (it logs "Error parsing url preview") keeps the old behaviour:
+the text alone, or "app message" for an empty one; we log a warning once
+per message when the app is the URL balloon. Nothing is fetched for a
+received link.
+
+**Send** (`hub.rs` → `linkpreview.rs` → `Engine::send_text_with_link`):
+with `link_previews` on, `SendText` (iMessage only: `SendTextAs` with
+`sms`, and any send that goes out as a text message, carry no preview;
+MMS has no such balloon) takes the first `http(s)://` token of the text
+(trailing punctuation and unbalanced closing brackets dropped) and, before
+sending, fetches it with reqwest: one **5 s deadline** for everything,
+at most 3 redirects, User-Agent `imessage-linux/<version>`, only
+`text/html` / `application/xhtml+xml`, at most 2 MiB read (it stops at
+`</head>`). A small tolerant scanner reads the head (no HTML crate:
+unquoted / single-quoted attributes, any case, comments, scripts and
+styles skipped, character references decoded): title from `og:title`,
+`twitter:title`, `<title>`; summary from `og:description`,
+`twitter:description`, `<meta name=description>`; image from
+`og:image(:secure_url|:url)`, `twitter:image`; `og:site_name`; icon from
+`apple-touch-icon(-precomposed)`, else PNG / JPEG `rel=icon` (never
+`.ico` / SVG); relative URLs against `<base href>` or the final URL.
+The image is downloaded if at most 5 MiB and the icon must be at most
+256 px a side. The daemon has no image codec (the `image` crate is not a
+dependency), so images are **not re-encoded**: a JPEG or PNG of at most
+1 MiB is sent as is, anything else is left out (the card then shows the
+icon and title). A preview needs a title or an image. The text and the
+balloon go out in **one** message (`LPLinkMetadata` with `URL` = the
+final URL, `originalURL` = the URL as typed, `imageMetadata.size`
+`"{w, h}"`, version 1; image first, icon second in the attachments). Any
+failure (timeout, error status, not HTML, nothing found) sends the text
+alone, as Messages does when offline; the log line names only the host.
+The stored row gets the same `link` part (plus `site_name`) and the
+image / icon files, so our own bubble shows the card.
+
+Hosts that are `localhost`, `*.local`, `*.localhost`, `*.internal`, a
+single label, or a loopback / private / link-local / CGNAT IP literal
+are never fetched (also not as a redirect target): a preview of an
+internal page would send its title to the recipient. Names that resolve
+to private addresses are not checked.
+
+**Privacy.** With `link_previews` on, the daemon contacts the linked
+site when **you send** a link (the site sees your IP address and our
+User-Agent, as with a Mac); it never contacts anything for a link you
+**receive**. Turn it off with `link_previews = false` or
+`--no-link-previews`.
+
+**Mac import.** `imsg import-mac` passes `chat.db`'s `payload_data` of
+URL balloons (the same `RichLink` archive) and the hidden preview files
+to `ImportMessages`, where the daemon decodes it (rustpush's
+`KeyedArchive`, read leniently) into the same `link` part, so imported
+history gets its cards back.
 
 ### Shared names and photos (CloudKit)
 
@@ -771,6 +841,8 @@ pub trait Engine: Send + Sync {
     async fn handles(&self) -> Vec<Handle>;
     async fn send_text(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>) -> EngineResult<SentMessage>;
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage>;
+    // send_text plus a link preview in the same message (default: the text alone)
+    async fn send_text_with_link(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, link: &LinkPreview) -> EngineResult<SentMessage>;
     // Text messages (default impls: iMessage → the above, Sms → Unsupported)
     async fn send_text_via(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, service: Service) -> EngineResult<SentMessage>;
     async fn send_attachment_via(&self, chat: &ChatTarget, path: &Path, mime: &str, service: Service) -> EngineResult<SentMessage>;

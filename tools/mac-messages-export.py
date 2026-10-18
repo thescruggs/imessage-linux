@@ -17,14 +17,21 @@ Output (tar on stdout, nothing else; diagnostics go to stderr):
         {"type": "chat", ...}         every chat that has a message in range
         {"type": "message", ...}      messages in range, oldest first
     attachments/<guid>/<file name>    attachment files referenced by messages
+                                      (and a link preview's image / icon)
 
 Records stay close to chat.db (raw Apple dates, raw handle ids, raw
 associated_message_type); `imsg` maps them to the daemon's model. Message
 text comes from `message.text`, or, when that is NULL (most rows on recent
 macOS), from the NSString inside the `attributedBody` typedstream.
+
+Link previews (`balloon` = com.apple.messages.URLBalloonProvider) carry
+`payload_data` (the RichLink keyed archive, base64) and their hidden
+preview files (`link_file: true`, in chat.db order: the archive's image
+and icon indexes point into that list).
 """
 
 import argparse
+import base64
 import io
 import json
 import os
@@ -36,6 +43,10 @@ import urllib.parse
 
 APPLE_EPOCH = 978307200  # 2001-01-01T00:00:00Z in Unix seconds
 DB = os.path.expanduser("~/Library/Messages/chat.db")
+URL_BALLOON = "com.apple.messages.URLBalloonProvider"
+# Link-preview archives and their image files are small; skip odd ones.
+MAX_LINK_PAYLOAD = 512 * 1024
+MAX_LINK_FILE = 8 * 1024 * 1024
 
 
 def parse_args():
@@ -144,7 +155,7 @@ def export(args):
                m.subject, m.service, m.item_type, m.group_action_type, m.associated_message_guid, m.associated_message_type,
                m.balloon_bundle_id, m.expressive_send_style_id, m.is_sent, m.is_delivered, m.error,
                m.destination_caller_id, m.cache_has_attachments, h.id AS handle,
-               %s, %s, %s, %s
+               %s, %s, %s, %s, %s
           FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id
          WHERE m.date >= ?
          ORDER BY m.date, m.ROWID
@@ -154,6 +165,7 @@ def export(args):
             opt(mcols, "date_edited"),
             opt(mcols, "date_retracted"),
             opt(mcols, "associated_message_emoji"),
+            opt(mcols, "payload_data"),
         ),
         (since,),
     ).fetchall()
@@ -203,7 +215,7 @@ def export(args):
         )
 
     max_bytes = int(args.max_attachment_mb * 1024 * 1024)
-    counters = {"text_decode_failures": 0, "attachments_missing": 0, "attachments_too_large": 0, "attachments_included": 0}
+    counters = {"text_decode_failures": 0, "attachments_missing": 0, "attachments_too_large": 0, "attachments_included": 0, "link_previews": 0}
     files = []  # (arcname, path)
     messages = []
     for r in rows:
@@ -215,6 +227,11 @@ def export(args):
                 source = "decode_failed"
         elif text is None:
             source = "none"
+        is_link = r["balloon_bundle_id"] == URL_BALLOON
+        payload = None
+        if is_link and r["payload_data"] is not None and len(r["payload_data"]) <= MAX_LINK_PAYLOAD:
+            payload = base64.b64encode(bytes(r["payload_data"])).decode("ascii")
+            counters["link_previews"] += 1
         attachments = []
         for a in atts_of.get(r["rowid"], []):
             rec = {
@@ -229,7 +246,17 @@ def export(args):
                 "missing": None,
             }
             path = os.path.expanduser(a["filename"]) if a["filename"] else None
-            if a["hide_attachment"]:
+            if a["hide_attachment"] and payload is not None:
+                # A link preview's image / icon (the archive indexes them).
+                rec["link_file"] = True
+                if path and os.path.isfile(path) and os.path.getsize(path) <= MAX_LINK_FILE and not args.no_files:
+                    rec["total_bytes"] = os.path.getsize(path)
+                    arc = "attachments/%s/%s" % (a["guid"].replace("/", "_"), os.path.basename(path).replace("/", "_") or "link")
+                    rec["path"] = arc
+                    files.append((arc, path))
+                else:
+                    rec["missing"] = "not_downloaded" if not args.no_files else "not_requested"
+            elif a["hide_attachment"]:
                 # Link-preview payloads and the like: not shown as attachments.
                 rec["missing"] = "hidden"
             elif args.no_files:
@@ -275,6 +302,7 @@ def export(args):
                 "associated_emoji": r["associated_message_emoji"],
                 "thread_originator_guid": r["thread_originator_guid"],
                 "balloon": r["balloon_bundle_id"],
+                "payload_data": payload,
                 "effect": r["expressive_send_style_id"],
                 "is_sent": bool(r["is_sent"]),
                 "is_delivered": bool(r["is_delivered"]),

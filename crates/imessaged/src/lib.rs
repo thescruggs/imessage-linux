@@ -7,5 +7,6 @@ pub mod dbus;
 pub mod engine;
 pub mod hub;
 pub mod keyring;
+pub mod linkpreview;
 pub mod state;
 pub mod store;

@@ -73,7 +73,7 @@ fails during an interactive `Login`, the call fails at once with
 | `GetHandleProfile` | `handle s` | `s` | The name and photo `handle` shared with us: [HandleProfile](#handleprofile) JSON, or `null` (nothing shared, not fetched yet, or stopped). `InvalidHandle` for a bad handle. |
 | `ListMessages` | `chat_id s`, `before_cursor s`, `limit u` | `s` | [MessagePage](#messagepage) JSON. `before_cursor` `""` = newest page; pass the previous page's `next_cursor` to page back. |
 | `Search` | `query s`, `limit u` | `s` | JSON array of [Message](#message), newest first. Case-insensitive (ASCII) substring match on text and subject; `%`/`_` are literal; unsent messages excluded. |
-| `SendText` | `chat_id_or_empty s`, `participants_json s`, `text s`, `reply_to s` | `s` | [SentMessage](#sentmessage) JSON. Either a chat id, or `""` plus a JSON array of handles (`["bob@example.com"]`; 2+ handles = a new or existing group; our own handles are not counted as recipients). A single one of our own handles is a note to self: sent from that handle, delivered to our other devices. `reply_to` = message id or `""`. The new row is stored and announced with `MessageReceived` (`is_from_me: true`) before the call returns. |
+| `SendText` | `chat_id_or_empty s`, `participants_json s`, `text s`, `reply_to s` | `s` | [SentMessage](#sentmessage) JSON. Either a chat id, or `""` plus a JSON array of handles (`["bob@example.com"]`; 2+ handles = a new or existing group; our own handles are not counted as recipients). A single one of our own handles is a note to self: sent from that handle, delivered to our other devices. `reply_to` = message id or `""`. The new row is stored and announced with `MessageReceived` (`is_from_me: true`) before the call returns. With the daemon's `link_previews` on, an iMessage whose text contains an `http(s)` link waits up to 5 s while the daemon fetches the page, then goes out with the preview (and the stored row gets a `link` part); see docs/DAEMON.md, "Link previews". |
 | `SendFile` | `chat_id_or_empty s`, `participants_json s`, `path s`, `mime s` | `s` | [SentMessage](#sentmessage). `path` must be an absolute path to a regular file readable by the daemon; `mime` `""` = `application/octet-stream`. |
 | `SendTextAs` | `chat_id_or_empty s`, `participants_json s`, `text s`, `reply_to s`, `service s` | `s` | `SendText` over a chosen service: `""` / `"auto"` = as `SendText` (below), `"imessage"`, or `"sms"` = a text message through the user's iPhone ([Text Message Forwarding](#text-message-forwarding)); `InvalidInput` for anything else. SMS goes to phone numbers only, needs forwarding `active` or `requested` (`Unsupported` otherwise) and carries no `reply_to`. |
 | `SendFileAs` | `chat_id_or_empty s`, `participants_json s`, `path s`, `mime s`, `service s` | `s` | `SendFile` over a chosen service (`"sms"` = MMS). |
@@ -263,7 +263,10 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
     {"type": "attachment", "attachment_id": "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0:1",
      "mime": "image/jpeg", "filename": "IMG_0001.jpeg", "size": 183422},
     {"type": "mention", "handle": "mailto:carol@example.com", "text": "Carol"},
-    {"type": "unsupported", "description": "app message"}
+    {"type": "unsupported", "description": "app message"},
+    {"type": "link", "url": "https://example.com/story", "title": "A story", "summary": "What happened",
+     "site_name": null, "image_attachment_id": "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0:link-image",
+     "icon_attachment_id": null}
   ],
   "subject": null,
   "reply_to": null,
@@ -295,6 +298,19 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
   replaces the old). `kind` is a string for the classic tapbacks and
   `{"emoji": "…"}` for emoji reactions.
 * `text` concatenates the text and mention parts; `null` if none.
+* `link`: a link preview (Messages' URL balloon), after the text parts.
+  Only `url` is always there; `title`, `summary`, `site_name` (from the
+  page's `og:site_name`; only on previews this daemon fetched, else show
+  the URL's host) and the attachment ids may be `null` or missing. The
+  image and icon are ordinary inline attachments of the message, ids
+  `<message id>:link-image` / `<message id>:link-icon`, with **no**
+  `attachment` part of their own (clients that list attachments skip
+  them); `DownloadAttachment` returns their files at once (the daemon
+  writes them when the message arrives). The message's `text` keeps the
+  URL: a balloon sent without text gets the URL as `text` (and a text
+  part), so search, snippets and the CLI keep working. The sender built
+  the preview; the daemon never fetches anything for a received link
+  (see docs/DAEMON.md, "Link previews").
 * An unsent message keeps its id/sender/time with `text: null`,
   `parts: []`, `unsent: true`.
 
@@ -371,7 +387,9 @@ the minted `group:<GUID>` chat id is learned.
   "messages": [
     {"message": { /* Message */ },
      "attachments": [{"id": "<message id>:1", "mime": "image/heic", "filename": "IMG_1.HEIC", "size": 1234,
-                      "source_path": "/home/me/.cache/imsg/import/…/IMG_1.HEIC"}]}
+                      "source_path": "/home/me/.cache/imsg/import/…/IMG_1.HEIC"}],
+     "link": {"payload": "<base64 RichLink keyed archive>",
+              "images": ["/home/me/.cache/imsg/import/…/x.pluginPayloadAttachment", null]}}
   ],
   "reactions": [
     {"message_id": "<target message id>", "reaction": {"kind": "love", "sender": {"uri": "mailto:me@example.com"}, "added": true},
@@ -398,6 +416,14 @@ bad value. Processing, in one store transaction:
   is stored); `source_path` (absolute, readable by the daemon) is copied
   to `$STATE_DIR/attachments/<id>/<filename>` like a `SendFile` copy; a
   missing or unreadable file is logged and the row stored without one;
+  an optional `link` (a Mac link preview: `chat.db`'s `payload_data`
+  base64, at most 1 MiB, and the message's hidden preview files in
+  `chat.db` order, absolute paths or `null`) is decoded into a `link`
+  part after the text, its image / icon (the archive's indexes into
+  `images`; regular files up to 8 MiB) stored as inline attachments with
+  their files copied; the URL becomes the text of a message without
+  one; an unreadable archive is logged and an otherwise empty message
+  becomes `unsupported` ("app message");
 * **reactions** are applied in order when their target message exists
   (same rules as received tapbacks: one per sender, newer `at` wins),
   else counted as orphaned and dropped.

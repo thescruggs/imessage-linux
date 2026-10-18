@@ -13,7 +13,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 
-use imessage_common::import::{ImportAttachment, ImportBatch, ImportMessage, ImportReaction, ImportResult};
+use imessage_common::import::{ImportAttachment, ImportBatch, ImportLink, ImportMessage, ImportReaction, ImportResult};
 use imessage_common::model::{AttachmentId, Chat, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind, Service};
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +83,10 @@ pub struct AttachmentRec {
     /// Why not: `not_downloaded`, `too_large`, `hidden`, `not_requested`.
     #[serde(default)]
     pub missing: Option<String>,
+    /// A link preview's image or icon (hidden in Messages; the preview
+    /// archive indexes these, in order).
+    #[serde(default)]
+    pub link_file: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -122,6 +126,10 @@ pub struct MessageRec {
     pub thread_originator_guid: Option<String>,
     #[serde(default)]
     pub balloon: Option<String>,
+    /// A link preview's `RichLink` keyed archive (base64), for
+    /// `balloon` = [`URL_BALLOON`].
+    #[serde(default)]
+    pub payload_data: Option<String>,
     #[serde(default)]
     pub effect: Option<String>,
     #[serde(default)]
@@ -220,7 +228,12 @@ pub struct Stats {
     /// Rows in chats, or from senders, that have no valid iMessage address
     /// (contact names, `urn:biz:` business chats, ...).
     pub skipped_invalid: usize,
+    /// Messages with a link preview (the daemon decodes it into a card).
+    pub link_previews: usize,
 }
+
+/// Messages' link-preview balloon.
+pub const URL_BALLOON: &str = "com.apple.messages.URLBalloonProvider";
 
 #[derive(Debug, Clone, Default)]
 pub struct Converted {
@@ -544,7 +557,24 @@ pub fn convert(records: Vec<Record>, stage: &Path, opts: &ConvertOptions) -> Con
         }
         let (mut parts, attachments) =
             if unsent { (vec![], vec![]) } else { build_parts(m.text.as_deref().unwrap_or(""), atts, &id) };
-        if parts.is_empty() && !unsent {
+        // A link preview: the daemon decodes the archive (rustpush's keyed
+        // archive reader lives there) into a `link` part with its images.
+        let link = match (m.balloon.as_deref(), m.payload_data.as_deref()) {
+            (Some(URL_BALLOON), Some(payload)) if !unsent && !payload.trim().is_empty() => {
+                out.stats.link_previews += 1;
+                Some(ImportLink {
+                    payload: payload.to_string(),
+                    images: m
+                        .attachments
+                        .iter()
+                        .filter(|a| a.link_file)
+                        .map(|a| a.path.as_deref().and_then(|p| staged_file(stage, p)).map(|p| p.to_string_lossy().into_owned()))
+                        .collect(),
+                })
+            }
+            _ => None,
+        };
+        if parts.is_empty() && !unsent && link.is_none() {
             if m.balloon.is_some() {
                 parts.push(MessagePart::Unsupported { description: "app message".into() });
             } else {
@@ -595,7 +625,7 @@ pub fn convert(records: Vec<Record>, stage: &Path, opts: &ConvertOptions) -> Con
         if chat.display_name.is_some() {
             c.display_name = chat.display_name.clone();
         }
-        out.messages.push(ImportMessage { message, attachments });
+        out.messages.push(ImportMessage { message, attachments, link });
     }
     out.messages.sort_by_key(|m| m.message.sent_at);
     out.reactions.sort_by_key(|r| r.at);
@@ -804,6 +834,7 @@ fn print_stats(s: &Stats) {
         "skipped:      {} system, {} without chat, {} SMS/RCS, {} without a valid address, {} other",
         s.skipped_system, s.skipped_no_chat, s.skipped_sms, s.skipped_invalid, s.skipped_other
     );
+    println!("link previews: {}", s.link_previews);
     println!("text decoding failures: {}", s.text_decode_failures);
 }
 
@@ -1041,6 +1072,7 @@ mod tests {
                 skipped_sms: 0,
                 skipped_other: 0,
                 skipped_invalid: 0,
+                link_previews: 0,
             }
         );
         // messages oldest first
@@ -1048,6 +1080,56 @@ mod tests {
 
         let c2 = convert(records, stage.path(), &ConvertOptions { imessage_only: true, ..opts });
         assert_eq!(c2.stats.skipped_sms, 1);
+    }
+
+    /// A URL balloon: the archive and its preview files go to the daemon
+    /// (which decodes them); no "app message" placeholder, no attachment
+    /// parts for the hidden files.
+    #[test]
+    fn link_previews_are_passed_on() {
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("attachments/L1")).unwrap();
+        std::fs::write(stage.path().join("attachments/L1/x.pluginPayloadAttachment"), b"img").unwrap();
+        let mut only = msg_rec("l1", 1, Some("bob@example.com"), false, 10, "");
+        only.text = None;
+        only.balloon = Some(URL_BALLOON.into());
+        only.payload_data = Some("YnBsaXN0".into());
+        only.attachments = vec![
+            AttachmentRec { hidden: true, link_file: true, path: Some("attachments/L1/x.pluginPayloadAttachment".into()), ..Default::default() },
+            AttachmentRec { hidden: true, link_file: true, missing: Some("not_downloaded".into()), ..Default::default() },
+            AttachmentRec { hidden: true, link_file: true, path: Some("../escape".into()), ..Default::default() },
+        ];
+        let mut texted = msg_rec("l2", 1, Some("bob@example.com"), false, 11, "see https://example.com");
+        texted.balloon = Some(URL_BALLOON.into());
+        texted.payload_data = Some("YnBsaXN0".into());
+        let mut no_payload = msg_rec("l3", 1, Some("bob@example.com"), false, 12, "");
+        no_payload.text = None;
+        no_payload.balloon = Some(URL_BALLOON.into());
+        let records = vec![
+            chat_rec(1, 45, "bob@example.com", None, &["bob@example.com"]),
+            Record::Message(Box::new(only)),
+            Record::Message(Box::new(texted)),
+            Record::Message(Box::new(no_payload)),
+        ];
+        let c = convert(records, stage.path(), &ConvertOptions::default());
+        assert_eq!(c.stats.link_previews, 2);
+        let l1 = &c.messages[0];
+        assert!(l1.message.parts.is_empty() && l1.attachments.is_empty(), "{:?}", l1.message.parts);
+        let link = l1.link.as_ref().unwrap();
+        assert_eq!(link.payload, "YnBsaXN0");
+        assert_eq!(link.images.len(), 3);
+        assert!(link.images[0].as_deref().unwrap().ends_with("attachments/L1/x.pluginPayloadAttachment"));
+        assert_eq!((link.images[1].as_deref(), link.images[2].as_deref()), (None, None));
+        let l2 = &c.messages[1];
+        assert_eq!(l2.message.text.as_deref(), Some("see https://example.com"));
+        assert!(l2.link.as_ref().unwrap().images.is_empty());
+        // no archive: as before
+        assert_eq!(c.messages[2].message.parts, vec![MessagePart::Unsupported { description: "app message".into() }]);
+        assert!(c.messages[2].link.is_none());
+        // the batch JSON carries it
+        let j = serde_json::to_value(&batches(&c)[0]).unwrap();
+        assert_eq!(j["messages"][0]["link"]["payload"], "YnBsaXN0");
+        assert!(j["messages"][2].get("link").is_none());
     }
 
     #[test]

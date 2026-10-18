@@ -273,6 +273,16 @@ impl AttachmentId {
     pub fn for_part(message: &MessageId, part: usize) -> AttachmentId {
         AttachmentId(format!("{}:{}", message.0, part))
     }
+
+    /// The image of a message's link preview.
+    pub fn link_image(message: &MessageId) -> AttachmentId {
+        AttachmentId(format!("{}:link-image", message.0))
+    }
+
+    /// The site icon of a message's link preview.
+    pub fn link_icon(message: &MessageId) -> AttachmentId {
+        AttachmentId(format!("{}:link-icon", message.0))
+    }
 }
 
 impl fmt::Display for AttachmentId {
@@ -402,6 +412,52 @@ pub enum MessagePart {
     Mention { handle: String, text: String },
     /// Something we can't render (app balloon object, etc.).
     Unsupported { description: String },
+    /// A link preview (Messages' URL balloon): the page's metadata as the
+    /// sender fetched it. The image and icon are ordinary (inline)
+    /// attachments of the message, ids `<message id>:link-image` /
+    /// `<message id>:link-icon`, with no attachment part of their own.
+    /// The message's text keeps the URL.
+    Link {
+        url: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        summary: Option<String>,
+        /// `og:site_name`; `None` when unknown (then show the URL's host).
+        #[serde(default)]
+        site_name: Option<String>,
+        #[serde(default)]
+        image_attachment_id: Option<AttachmentId>,
+        #[serde(default)]
+        icon_attachment_id: Option<AttachmentId>,
+    },
+}
+
+/// The host of an `http(s)` URL, lower-cased, without `www.`, user info or
+/// port (`https://www.Example.com:8443/a` -> `example.com`); what link
+/// previews show when the page names no site. `None` if `url` has no host.
+pub fn link_host(url: &str) -> Option<String> {
+    let rest = url.trim().split_once("://").map(|(_, r)| r)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = if host.starts_with('[') {
+        host.split_inclusive(']').next().unwrap_or(host)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+impl MessagePart {
+    /// The attachments a `link` part refers to (its image and icon).
+    pub fn link_attachment_ids(&self) -> Vec<&AttachmentId> {
+        match self {
+            MessagePart::Link { image_attachment_id, icon_attachment_id, .. } => image_attachment_id.iter().chain(icon_attachment_id.iter()).collect(),
+            _ => vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -728,6 +784,35 @@ mod tests {
         assert_eq!(serde_json::from_str::<SmsForwarding>("{}").unwrap(), SmsForwarding::default());
         let s = ProfilesStatus { state: ProfilesState::NeedsLogin, detail: None };
         assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"state":"needs_login"}"#);
+        let m = MessageId::new("m1");
+        let l = MessagePart::Link {
+            url: "https://example.com/a".into(),
+            title: Some("A".into()),
+            summary: None,
+            site_name: None,
+            image_attachment_id: Some(AttachmentId::link_image(&m)),
+            icon_attachment_id: None,
+        };
+        let j = serde_json::to_string(&l).unwrap();
+        assert_eq!(
+            j,
+            r#"{"type":"link","url":"https://example.com/a","title":"A","summary":null,"site_name":null,"image_attachment_id":"M1:link-image","icon_attachment_id":null}"#
+        );
+        assert_eq!(serde_json::from_str::<MessagePart>(&j).unwrap(), l);
+        // only url is required
+        let min: MessagePart = serde_json::from_str(r#"{"type":"link","url":"https://x.y"}"#).unwrap();
+        assert!(matches!(&min, MessagePart::Link { url, title: None, .. } if url == "https://x.y"));
+        assert_eq!(l.link_attachment_ids(), vec![&AttachmentId("M1:link-image".into())]);
+        assert!(min.link_attachment_ids().is_empty());
+    }
+
+    #[test]
+    fn link_hosts() {
+        assert_eq!(link_host("https://www.Example.com:8443/a?b#c").as_deref(), Some("example.com"));
+        assert_eq!(link_host("http://user:pw@news.site.org").as_deref(), Some("news.site.org"));
+        assert_eq!(link_host("https://[::1]:80/x").as_deref(), Some("[::1]"));
+        assert_eq!(link_host("example.com"), None);
+        assert_eq!(link_host("https:///x"), None);
     }
 
     #[test]

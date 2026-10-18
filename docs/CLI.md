@@ -161,12 +161,15 @@ A page of messages, oldest first (`--reverse`: newest first). Each message
 shows time, sender (`me` for your own; `(unverified)` when the sender's key
 could not be verified), text, reactions (`❤️2 👍1`), `[edited]`, `(unsent)`,
 delivery state of your own messages (`[sent]`, `[delivered]`, `[read]`,
-`[FAILED]`), `[SMS]` for a text message relayed by your iPhone, attachments with their ids, the message id and the
+`[FAILED]`), `[SMS]` for a text message relayed by your iPhone, a link
+preview after the text as `[link: <title> — <site>]` (the page's site
+name, else the URL's host; `[link: <site>]` without a title), attachments with their ids, the message id and the
 reply-to id. When older messages exist, the command for the next page is
 printed on stderr (`--before CURSOR`). Times: today `14:03`, last week
 `Tue 14:03`, this year `Mar 05 14:03`, else `2025-03-05 14:03` (local time).
 
-`--json`: the `MessagePage` JSON unchanged (not reversed).
+`--json`: the `MessagePage` JSON unchanged (not reversed); a link
+preview is a `{"type": "link", …}` part (docs/DBUS.md).
 
 ### `send TO TEXT... [--reply-to MSG_ID] [--sms | --imessage]`
 
@@ -400,8 +403,12 @@ left) stays a group. Text comes from `message.text`
 or, when that is NULL (most rows on recent macOS), from the NSString in
 `attributedBody`; rows whose text cannot be decoded are imported with
 attachments only and counted as "text decoding failures". Attachments
-keep their place relative to the text; hidden link-preview payloads are
-dropped. Tapbacks (`associated_message_type` 2000-2006 / 3000-3006) are
+keep their place relative to the text. Link previews
+(`com.apple.messages.URLBalloonProvider` balloons) come back as cards:
+the exporter adds the message's `payload_data` (the `RichLink` archive,
+base64) and its hidden preview files, and the daemon decodes them into a
+`link` part with the image and icon (counted as "link previews"); other
+hidden payloads are dropped. Tapbacks (`associated_message_type` 2000-2006 / 3000-3006) are
 applied to their target message; a target outside the imported range or
 missing from the store counts as orphaned. Group events (renames,
 membership changes) and other system rows are skipped; the chats carry

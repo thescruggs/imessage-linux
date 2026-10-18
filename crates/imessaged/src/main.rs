@@ -64,6 +64,15 @@ struct Args {
     #[arg(long, env = "IMESSAGED_MAC_HOST")]
     mac_host: Option<String>,
 
+    /// Fetch link previews for links you send (default true; the daemon
+    /// then contacts the linked site when you send, never on receive).
+    #[arg(long, env = "IMESSAGED_LINK_PREVIEWS", conflicts_with = "no_link_previews")]
+    link_previews: Option<bool>,
+
+    /// Same as `--link-previews false`.
+    #[arg(long)]
+    no_link_previews: bool,
+
     /// Do not serve the D-Bus API (headless / tests). Messages are still
     /// received and stored.
     #[arg(long)]
@@ -86,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
             other_handles: (!args.other_handles.is_empty()).then_some(args.other_handles),
             sms_relay_number: args.sms_relay_number,
             mac_host: args.mac_host,
+            link_previews: if args.no_link_previews { Some(false) } else { args.link_previews },
         },
     )?;
 
@@ -108,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(n) = cfg.sms_number() {
         log::info!("SMS relay number (Text Message Forwarding): {n}");
     }
+    log::info!("link previews for sent links: {}", if cfg.link_previews { "on" } else { "off" });
     // M-C: judge the filter env_logger actually uses (RUST_LOG wins).
     let effective = config::effective_log_filter(std::env::var("RUST_LOG").ok(), &cfg.log_level);
     if !config::filter_quiets_protocol_crates(&effective) {

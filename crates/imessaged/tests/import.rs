@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use imessage_common::import::{ImportAttachment, ImportBatch, ImportMessage, ImportReaction};
+use imessage_common::import::{ImportAttachment, ImportBatch, ImportLink, ImportMessage, ImportReaction};
 use imessage_common::model::{AttachmentId, Chat, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind};
 use imessaged::config::DaemonConfig;
 use imessaged::daemon::Daemon;
@@ -66,7 +66,7 @@ fn batch(photo: &std::path::Path) -> ImportBatch {
     ImportBatch {
         chats: vec![chat(&bob, &[BOB], None), chat(&team, &[BOB, "tel:+15550001111"], Some("Team"))],
         messages: vec![
-            ImportMessage { message: msg("IMP-1", &bob, BOB, 1_000, "hello from the mac", false), attachments: vec![] },
+            ImportMessage { message: msg("IMP-1", &bob, BOB, 1_000, "hello from the mac", false), attachments: vec![], link: None },
             ImportMessage {
                 message: with_photo,
                 attachments: vec![ImportAttachment {
@@ -76,8 +76,9 @@ fn batch(photo: &std::path::Path) -> ImportBatch {
                     size: 4,
                     source_path: Some(photo.to_string_lossy().into_owned()),
                 }],
+                link: None,
             },
-            ImportMessage { message: msg("IMP-3", &team, "tel:+15550001111", 3_000, "team news", false), attachments: vec![] },
+            ImportMessage { message: msg("IMP-3", &team, "tel:+15550001111", 3_000, "team news", false), attachments: vec![], link: None },
         ],
         reactions: vec![
             ImportReaction { message_id: MessageId::new("IMP-3"), reaction: Reaction { kind: ReactionKind::Love, sender: Handle::new(ME), added: true }, at: 3_500 },
@@ -146,6 +147,80 @@ async fn import_twice_inserts_once_without_message_signals() {
     running.shutdown().await.unwrap();
 }
 
+/// A Mac link preview (the `RichLink` archive from `payload_data`, built
+/// here with rustpush's own serialization) becomes a `link` part with its
+/// image copied; the URL is the text of a balloon without text; an
+/// unreadable archive leaves "app message".
+#[tokio::test]
+async fn import_link_previews() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let img = staging.path().join("hero.pluginPayloadAttachment");
+    std::fs::write(&img, b"\xFF\xD8\xFFjpeg").unwrap();
+    let icon = staging.path().join("icon.pluginPayloadAttachment");
+    std::fs::write(&icon, b"\x89PNGicon").unwrap();
+    let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), Arc::new(MockEngine::new())).with_store(store(dir.path())).start().await.unwrap();
+    let hub = running.hub();
+    let preview = imessaged::engine::LinkPreview {
+        url: "https://example.com/story".into(),
+        original_url: "https://example.com/story".into(),
+        title: Some("A Story".into()),
+        summary: Some("About things".into()),
+        image: Some(imessaged::engine::LinkImage { data: vec![1], mime: "image/jpeg".into(), width: 600, height: 315, source_url: String::new() }),
+        icon: Some(imessaged::engine::LinkImage { data: vec![2], mime: "image/png".into(), width: 64, height: 64, source_url: String::new() }),
+        ..Default::default()
+    };
+    let payload = base64::engine::general_purpose::STANDARD.encode(imessaged::engine::convert::rich_link_archive(&preview).unwrap());
+    let bob = ChatId::direct(BOB);
+    let mut url_only = msg("LINK-1", &bob, BOB, 1_000, "", false);
+    url_only.text = None;
+    url_only.parts.clear();
+    let with_text = msg("LINK-2", &bob, ME, 2_000, "read this https://example.com/story", true);
+    let mut broken = msg("LINK-3", &bob, BOB, 3_000, "", false);
+    broken.text = None;
+    broken.parts.clear();
+    let link = |images: Vec<Option<String>>| Some(ImportLink { payload: payload.clone(), images });
+    let paths = vec![Some(img.to_string_lossy().into_owned()), Some(icon.to_string_lossy().into_owned())];
+    let b = ImportBatch {
+        chats: vec![chat(&bob, &[BOB], None)],
+        messages: vec![
+            ImportMessage { message: url_only, attachments: vec![], link: link(paths.clone()) },
+            ImportMessage { message: with_text, attachments: vec![], link: link(vec![None]) },
+            ImportMessage { message: broken, attachments: vec![], link: Some(ImportLink { payload: "bm90IGEgcGxpc3Q=".into(), images: vec![] }) },
+        ],
+        reactions: vec![],
+    };
+    let r = hub.import_messages(b).await.unwrap();
+    assert_eq!((r.inserted, r.attachments, r.attachments_without_file), (3, 2, 0));
+    let st = running.store().unwrap();
+    let get = |id: &'static str| {
+        let st = st.clone();
+        async move { st.call(move |s| s.get_message(&MessageId::new(id))).await.unwrap().unwrap() }
+    };
+    let m = get("LINK-1").await;
+    assert_eq!(m.text.as_deref(), Some("https://example.com/story"));
+    let [MessagePart::Text { text }, MessagePart::Link { url, title, summary, image_attachment_id: Some(i), icon_attachment_id: Some(c), .. }] = &m.parts[..] else { panic!("{:?}", m.parts) };
+    assert_eq!((text.as_str(), url.as_str(), title.as_deref(), summary.as_deref()), ("https://example.com/story", "https://example.com/story", Some("A Story"), Some("About things")));
+    std::fs::remove_file(&img).unwrap();
+    let path = hub.download_attachment(&i.0).await.unwrap();
+    assert!(std::path::Path::new(&path).starts_with(hub.attachments_dir()), "{path}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"\xFF\xD8\xFFjpeg");
+    assert_eq!(std::fs::read(hub.download_attachment(&c.0).await.unwrap()).unwrap(), b"\x89PNGicon");
+    // with text: text kept, card after it; the image file was not available
+    let m = get("LINK-2").await;
+    assert_eq!(m.text.as_deref(), Some("read this https://example.com/story"));
+    assert!(matches!(&m.parts[..], [MessagePart::Text { .. }, MessagePart::Link { image_attachment_id: None, icon_attachment_id: None, .. }]), "{:?}", m.parts);
+    // unreadable archive
+    let m = get("LINK-3").await;
+    assert_eq!(m.parts, vec![MessagePart::Unsupported { description: "app message".into() }]);
+    // validation: relative image paths are refused
+    let mut bad = ImportBatch::default();
+    bad.messages.push(ImportMessage { message: msg("LINK-4", &bob, BOB, 4_000, "x", false), attachments: vec![], link: link(vec![Some("rel/path".into())]) });
+    assert!(matches!(hub.import_messages(bad).await, Err(OpError::InvalidInput(_))));
+    running.shutdown().await.unwrap();
+}
+
 /// A message the daemon already has live is left exactly as it is.
 #[tokio::test]
 async fn existing_live_message_is_not_overwritten() {
@@ -168,8 +243,8 @@ async fn existing_live_message_is_not_overwritten() {
     let b = ImportBatch {
         chats: vec![chat(&bob, &[BOB], None)],
         messages: vec![
-            ImportMessage { message: msg("LIVE-1", &bob, BOB, 5_000, "mac text", false), attachments: vec![] },
-            ImportMessage { message: msg("OLD-1", &bob, BOB, 4_000, "older", false), attachments: vec![] },
+            ImportMessage { message: msg("LIVE-1", &bob, BOB, 5_000, "mac text", false), attachments: vec![], link: None },
+            ImportMessage { message: msg("OLD-1", &bob, BOB, 4_000, "older", false), attachments: vec![], link: None },
         ],
         reactions: vec![
             // on the live message: announced
@@ -211,7 +286,7 @@ async fn invalid_batches_store_nothing() {
     let stray = ImportAttachment { id: AttachmentId("IMP-9:0".into()), mime: "image/png".into(), filename: "x.png".into(), size: 1, source_path: None };
     let b = ImportBatch {
         chats: vec![],
-        messages: vec![ImportMessage { message: msg("IMP-9", &bob, BOB, 1, "x", false), attachments: vec![stray] }],
+        messages: vec![ImportMessage { message: msg("IMP-9", &bob, BOB, 1, "x", false), attachments: vec![stray], link: None }],
         reactions: vec![],
     };
     assert!(matches!(hub.import_messages(b).await, Err(OpError::InvalidInput(_))));
@@ -219,7 +294,7 @@ async fn invalid_batches_store_nothing() {
     let att = AttachmentId::for_part(&m.id, 0);
     m.parts.push(MessagePart::Attachment { attachment_id: att.clone(), mime: "a/b".into(), filename: "f".into(), size: 1 });
     let rel = ImportAttachment { id: att, mime: "a/b".into(), filename: "f".into(), size: 1, source_path: Some("relative/f".into()) };
-    let b = ImportBatch { chats: vec![], messages: vec![ImportMessage { message: m, attachments: vec![rel] }], reactions: vec![] };
+    let b = ImportBatch { chats: vec![], messages: vec![ImportMessage { message: m, attachments: vec![rel], link: None }], reactions: vec![] };
     assert!(matches!(hub.import_messages(b).await, Err(OpError::InvalidInput(_))));
     let st = running.store().unwrap();
     assert!(st.call(|s| s.list_chats(10, 0)).await.unwrap().is_empty());
@@ -229,7 +304,7 @@ async fn invalid_batches_store_nothing() {
     let att = AttachmentId::for_part(&m.id, 1);
     m.parts.push(MessagePart::Attachment { attachment_id: att.clone(), mime: "a/b".into(), filename: "f".into(), size: 1 });
     let gone = ImportAttachment { id: att, mime: "a/b".into(), filename: "f".into(), size: 1, source_path: Some("/nonexistent/imsg-test/f".into()) };
-    let b = ImportBatch { chats: vec![], messages: vec![ImportMessage { message: m, attachments: vec![gone] }], reactions: vec![] };
+    let b = ImportBatch { chats: vec![], messages: vec![ImportMessage { message: m, attachments: vec![gone], link: None }], reactions: vec![] };
     let r = hub.import_messages(b).await.unwrap();
     assert_eq!((r.inserted, r.chats_created, r.attachments, r.attachments_without_file), (1, 1, 0, 1));
     running.shutdown().await.unwrap();
@@ -280,7 +355,7 @@ async fn invalid_ids_and_handles_reject_the_batch() {
             }
         }
     };
-    let one = |chats: Vec<Chat>, m: Message| ImportBatch { chats, messages: vec![ImportMessage { message: m, attachments: vec![] }], reactions: vec![] };
+    let one = |chats: Vec<Chat>, m: Message| ImportBatch { chats, messages: vec![ImportMessage { message: m, attachments: vec![], link: None }], reactions: vec![] };
     reject(one(vec![chat(&raw, &[], None)], msg("V-1", &short, "tel:46339", 1, "x", false)), "46339(smsft)").await;
     reject(one(vec![], msg("V-2", &raw, "tel:46339", 1, "x", false)), "46339(smsft)").await;
     let mut tagged = chat(&short, &[], None);
@@ -369,7 +444,7 @@ async fn empty_group_snapshot_is_not_announced() {
     let ghost = ChatId::group("7A1B2C3D-0000-4000-8000-000000000002");
     let b = ImportBatch {
         chats: vec![chat(&ghost, &[], None), chat(&bob, &[BOB], None)],
-        messages: vec![ImportMessage { message: msg("IMP-20", &bob, BOB, 1_000, "hi", false), attachments: vec![] }],
+        messages: vec![ImportMessage { message: msg("IMP-20", &bob, BOB, 1_000, "hi", false), attachments: vec![], link: None }],
         reactions: vec![],
     };
     let r = running.hub().import_messages(b).await.unwrap();

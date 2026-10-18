@@ -19,7 +19,8 @@ use imessage_common::model::{
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
-use crate::engine::{ChatTarget, Engine, EngineError, LoginOutcome, SentMessage, MAX_ATTACHMENT_BYTES, MAX_BACKGROUND_BYTES};
+use crate::engine::{convert, ChatTarget, Engine, EngineError, LinkPreview, LoginOutcome, SentMessage, MAX_ATTACHMENT_BYTES, MAX_BACKGROUND_BYTES};
+use crate::linkpreview::FetchOptions;
 use crate::store::{MessagePage, StoreError, StoreHandle, StoreUpdate};
 
 /// Typing indicators are cleared after this long without a refresh.
@@ -190,6 +191,27 @@ fn copy_private(src: &Path, dest: &Path) -> std::io::Result<()> {
     result
 }
 
+/// Write `data` to `dest` atomically (temp file in `dest`'s directory, mode
+/// 0600, `fsync`, rename).
+fn write_private(dest: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
+    let tmp = dir.join(format!(".{name}.tmp-{}-{:08x}", std::process::id(), rand::random::<u32>()));
+    let result = (|| {
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        out.write_all(data)?;
+        out.sync_all()?;
+        drop(out);
+        std::fs::rename(&tmp, dest)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Membership of `key` in an in-flight set, released on drop (so a task
 /// that panics cannot leave its key claimed forever).
 struct InFlight<K: std::hash::Hash + Eq> {
@@ -241,6 +263,9 @@ pub struct Hub {
     reachability: Mutex<HashMap<String, (bool, Instant)>>,
     /// `mac_host` from the configuration (reported in `GetStatus`).
     mac_host: Mutex<Option<String>>,
+    /// Link previews for links we send (`link_previews` setting); `None` =
+    /// off (the default for a bare `Hub`; the daemon turns them on).
+    link_previews: Mutex<Option<FetchOptions>>,
 }
 
 impl Hub {
@@ -259,7 +284,32 @@ impl Hub {
             stop: watch::channel(false).0,
             reachability: Mutex::new(HashMap::new()),
             mac_host: Mutex::new(None),
+            link_previews: Mutex::new(None),
         })
+    }
+
+    /// Fetch link previews for links we send with these options (`None` =
+    /// off).
+    pub fn set_link_previews(&self, opts: Option<FetchOptions>) {
+        *self.link_previews.lock().unwrap_or_else(|p| p.into_inner()) = opts;
+    }
+
+    /// The preview for the first link in `text`, if previews are on and the
+    /// fetch works out; any failure is logged (host only) and means none.
+    async fn link_preview(&self, text: &str) -> Option<LinkPreview> {
+        let opts = self.link_previews.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
+        let url = crate::linkpreview::first_url(text)?;
+        let host = imessage_common::model::link_host(&url).unwrap_or_default();
+        match crate::linkpreview::fetch(&url, &opts).await {
+            Ok(p) => {
+                log::info!("link preview for {host}: title {}, image {}, icon {}", p.title.is_some(), p.image.is_some(), p.icon.is_some());
+                Some(p)
+            }
+            Err(e) => {
+                log::info!("no link preview for {host}: {e}");
+                None
+            }
+        }
     }
 
     /// The `mac_host` setting `GetStatus` reports.
@@ -888,14 +938,52 @@ impl Hub {
         let service = self.choose_service(&target, service).await;
         // Text messages carry no reply reference.
         let reply_to = reply_to.filter(|_| service == Service::Imessage);
-        let r = self.engine.send_text_via(&target, text, reply_to.as_ref(), service).await;
-        let sent = match r {
-            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.send_text_via(&target, text, reply_to.as_ref(), service).await?,
+        // Text messages (MMS) cannot carry a preview.
+        let link = if service == Service::Imessage { self.link_preview(text).await } else { None };
+        let send = || async {
+            match &link {
+                Some(l) => self.engine.send_text_with_link(&target, text, reply_to.as_ref(), l).await,
+                None => self.engine.send_text_via(&target, text, reply_to.as_ref(), service).await,
+            }
+        };
+        let sent = match send().await {
+            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => send().await?,
             r => r?,
         };
-        let msg = self.outgoing(&sent, vec![MessagePart::Text { text: text.to_string() }], reply_to);
-        self.record_outgoing(&target, msg, vec![]).await?;
+        let mut parts = vec![MessagePart::Text { text: text.to_string() }];
+        let mut atts = vec![];
+        if let Some((part, link_atts)) = link.as_ref().and_then(|l| convert::link_for_sent(&sent.id, l)) {
+            parts.push(part);
+            atts = self.keep_link_files(link_atts).await;
+        }
+        let msg = self.outgoing(&sent, parts, reply_to);
+        self.record_outgoing(&target, msg, atts).await?;
         Ok(sent)
+    }
+
+    /// Write link-preview images (inline attachments) to
+    /// `state_dir/attachments/<id>/<filename>` and point the rows at them; a
+    /// row whose file cannot be written keeps its locator (the file is made
+    /// on the first `DownloadAttachment`).
+    pub(crate) async fn keep_link_files(&self, mut atts: Vec<Attachment>) -> Vec<Attachment> {
+        for a in &mut atts {
+            let Some(data) = convert::inline_bytes(&a.mmcs) else { continue };
+            let dir = self.attachments_dir().join(safe_component(&a.id.0, "attachment"));
+            let dest = dir.join(safe_component(&a.filename, "attachment"));
+            let d = dest.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                crate::state::ensure_private_dir(&dir)?;
+                write_private(&d, &data)
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|r| r);
+            match r {
+                Ok(()) => a.local_path = Some(dest.to_string_lossy().into_owned()),
+                Err(e) => log::warn!("link preview {}: cannot write the file ({e})", a.id),
+            }
+        }
+        atts
     }
 
     pub async fn send_file(self: &Arc<Self>, target: ChatTarget, path: &str, mime: &str) -> OpResult<SentMessage> {

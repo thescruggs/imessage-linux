@@ -221,6 +221,127 @@ async fn login_then_two_factor() {
     h.shutdown().await;
 }
 
+/// One canned HTML page (and a PNG at `/i.png`) on 127.0.0.1; returns the
+/// page URL.
+fn serve_page(html: &'static str) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/page", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match conn.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let (ctype, body): (&str, Vec<u8>) = if String::from_utf8_lossy(&req).starts_with("GET /i.png") {
+                let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\x04\xb0\0\0\x02\x76\x08\x06\0\0\0".to_vec();
+                png.resize(64, 0);
+                ("image/png", png)
+            } else {
+                ("text/html", html.as_bytes().to_vec())
+            };
+            let _ = write!(conn, "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = conn.write_all(&body);
+        }
+    });
+    url
+}
+
+/// `SendText` with a link: the daemon fetches the page, sends the preview
+/// with the text, and stores a `link` part with the image on our row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_text_with_link_preview() {
+    let Some(h) = Harness::logged_in().await else { return };
+    let url = serve_page(r#"<head><meta property="og:title" content="A Page"><meta property="og:image" content="/i.png"></head>"#);
+    let text = format!("look at {url} please");
+    // a bare Hub has previews off; the daemon's are on but refuse 127.0.0.1
+    let sent = h.call_json("SendText", &(BOB, "", text.as_str(), "")).await;
+    assert!(!h.mock.calls().iter().any(|c| matches!(c, MockCall::LinkPreview { .. })), "private address fetched");
+    let page = h.call_json("ListMessages", &(BOB, "", 50u32)).await;
+    assert_eq!(page["messages"][0]["parts"].as_array().unwrap().len(), 1, "{}", page);
+    assert_eq!(page["messages"][0]["id"], sent["id"]);
+
+    let hub = h.running.as_ref().unwrap().hub();
+    hub.set_link_previews(Some(imessaged::linkpreview::FetchOptions { allow_private_hosts: true, ..Default::default() }));
+    let sent = h.call_json("SendText", &(BOB, "", text.as_str(), "")).await;
+    let id = sent["id"].as_str().unwrap().to_string();
+    let calls = h.mock.calls();
+    let i = calls.iter().position(|c| matches!(c, MockCall::LinkPreview { .. })).expect("preview sent");
+    let MockCall::LinkPreview { url: u, original_url, title, image_bytes, icon_bytes } = &calls[i] else { unreachable!() };
+    assert_eq!((u.as_str(), original_url.as_str(), title.as_deref(), *image_bytes, *icon_bytes), (url.as_str(), url.as_str(), Some("A Page"), Some(64), None));
+    assert!(matches!(&calls[i + 1], MockCall::SendText { text: t, .. } if *t == text), "text and preview in one message");
+    let page = h.call_json("ListMessages", &(BOB, "", 50u32)).await;
+    let m = page["messages"].as_array().unwrap().iter().find(|m| m["id"] == id.as_str()).unwrap().clone();
+    assert_eq!(m["text"], text.as_str());
+    let link = &m["parts"][1];
+    assert_eq!(link["type"], "link");
+    assert_eq!(link["url"], url.as_str());
+    assert_eq!(link["title"], "A Page");
+    assert_eq!(link["image_attachment_id"], format!("{id}:link-image").as_str());
+    assert!(link["icon_attachment_id"].is_null());
+    let path: String = h.p.call("DownloadAttachment", &(format!("{id}:link-image"),)).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap().len(), 64);
+    assert!(path.starts_with(h.dir.path().join("attachments").to_str().unwrap()));
+    h.shutdown().await;
+}
+
+/// A received link preview: the image is written under attachments/
+/// without a `DownloadAttachment`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn received_link_preview_files() {
+    let Some(h) = Harness::logged_in().await else { return };
+    let mut received = h.p.receive_signal("MessageReceived").await.unwrap();
+    let id = MessageId::new("11111111-2222-4333-8444-555555555555");
+    let att = imessaged::engine::convert::link_attachment(AttachmentId::link_image(&id), &id, "link-image", "image/jpeg", b"JPEG").unwrap();
+    let message = Message {
+        id: id.clone(),
+        chat_id: ChatId::direct(BOB),
+        sender: Handle::new(BOB),
+        sent_at: 10,
+        text: Some("https://example.com/".into()),
+        parts: vec![
+            MessagePart::Text { text: "https://example.com/".into() },
+            MessagePart::Link {
+                url: "https://example.com/".into(),
+                title: Some("Example".into()),
+                summary: None,
+                site_name: None,
+                image_attachment_id: Some(att.id.clone()),
+                icon_attachment_id: None,
+            },
+        ],
+        subject: None,
+        reply_to: None,
+        is_from_me: false,
+        delivery: DeliveryState::Delivered,
+        edited: false,
+        unsent: false,
+        reactions: vec![],
+        effect: None,
+        verified: true,
+        service: Default::default(),
+    };
+    h.mock.inject(EngineEvent::MessageReceived { message, chat: bob_chat(10), attachments: vec![att] });
+    let (_, mj): (String, String) = next_signal(&mut received, |(_, m): &(String, String)| json(m)["id"] == id.0.as_str()).await;
+    assert_eq!(json(&mj)["parts"][1]["title"], "Example");
+    let dir = h.dir.path().join("attachments").join(format!("{}_link-image", id.0));
+    let file = dir.join("link-image.jpg");
+    for _ in 0..50 {
+        if file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(file.exists(), "{file:?}");
+    assert!(h.mock.calls().iter().any(|c| matches!(c, MockCall::DownloadAttachment { dest } if *dest == file)));
+    h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_text_round_trip_and_signal() {
     let Some(h) = Harness::start().await else { return };

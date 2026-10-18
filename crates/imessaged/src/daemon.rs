@@ -100,6 +100,7 @@ impl Daemon {
         }
         let hub = Hub::new(self.engine.clone(), self.store.clone(), self.cfg.state_dir.clone(), self.typing_timeout);
         hub.set_mac_host(self.cfg.mac_host.clone());
+        hub.set_link_previews(self.cfg.link_previews.then(crate::linkpreview::FetchOptions::default));
         hub.delete_empty_groups().await;
         hub.seed_engine_chats().await;
         let conn = match &self.bus {
@@ -243,13 +244,29 @@ async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
         EngineEvent::ChatIcon { chat_id, icon: Some(_), .. } => Some(chat_id.clone()),
         _ => None,
     };
+    // A link preview's image and icon came inline: write their files now.
+    let link_files: Vec<String> = match &ev {
+        EngineEvent::MessageReceived { message, .. } => message.parts.iter().flat_map(|p| p.link_attachment_ids()).map(|id| id.0.clone()).collect(),
+        _ => vec![],
+    };
     match store.call(move |s| s.apply_event(&ev)).await {
         Ok(updates) => {
             // Only a background the store took (not a redelivery, an older
             // change or an oversized one) is worth a download.
             let fetch_background = fetch_background.filter(|_| !updates.is_empty());
             let fetch_icon = fetch_icon.filter(|_| !updates.is_empty());
+            let new_message = updates.iter().any(|u| matches!(u, crate::store::StoreUpdate::NewMessage(_)));
             hub.publish(updates).await;
+            if new_message && !link_files.is_empty() {
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    for id in link_files {
+                        if let Err(e) = hub.download_attachment(&id).await {
+                            log::warn!("link preview {id}: cannot write the file: {e}");
+                        }
+                    }
+                });
+            }
             if let Some(chat_id) = fetch_background {
                 hub.spawn_background_fetch(chat_id);
             }

@@ -26,6 +26,9 @@
 //! mac_host          = "mac.local"                  # ssh destination of your Mac for
 //!                     # `imsg sync-mac` (contacts, pins); only reported
 //!                     # in GetStatus, the daemon never connects to it
+//! link_previews     = true                         # fetch a preview (title, image) of the first
+//!                     # link in an iMessage you send, as Messages does; the
+//!                     # daemon contacts that site when you send, never on receive
 //! ```
 //!
 //! **Logging and privacy.** The default filter ([`DEFAULT_LOG_LEVEL`]) keeps
@@ -163,6 +166,7 @@ pub struct FileConfig {
     pub other_handles: Option<Vec<String>>,
     pub sms_relay_number: Option<String>,
     pub mac_host: Option<String>,
+    pub link_previews: Option<bool>,
 }
 
 impl FileConfig {
@@ -194,6 +198,7 @@ pub struct Overrides {
     pub other_handles: Option<Vec<String>>,
     pub sms_relay_number: Option<String>,
     pub mac_host: Option<String>,
+    pub link_previews: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +233,10 @@ pub struct DaemonConfig {
     /// alias) for `imsg sync-mac`. The daemon only reports it
     /// (`GetStatus.mac_host`); it never connects to it. `None` = unset.
     pub mac_host: Option<String>,
+    /// Fetch a link preview for the first `http(s)` URL in an iMessage we
+    /// send and send it with the text (Messages' URL balloon). The daemon
+    /// then contacts that site; it never fetches anything on receive.
+    pub link_previews: bool,
 }
 
 impl DaemonConfig {
@@ -244,6 +253,7 @@ impl DaemonConfig {
             other_handles: vec![],
             sms_relay_number: None,
             mac_host: None,
+            link_previews: true,
         }
     }
 
@@ -288,6 +298,9 @@ impl DaemonConfig {
         if let Some(v) = over.mac_host.or(file.mac_host) {
             let v = v.trim();
             c.mac_host = (!v.is_empty()).then(|| v.to_string());
+        }
+        if let Some(v) = over.link_previews.or(file.link_previews) {
+            c.link_previews = v;
         }
         c
     }
@@ -372,6 +385,7 @@ mod tests {
         assert_eq!(c.key_provider, KeyProviderKind::Auto);
         assert_eq!(c.log_level, DEFAULT_LOG_LEVEL);
         assert!(c.store_credentials);
+        assert!(c.link_previews);
         assert_eq!(c.hwconfig_path(), PathBuf::from("/s/hwconfig.plist"));
         assert_eq!(c.state_path(), PathBuf::from("/s/state.enc"));
         assert_eq!(c.id_cache_path(), PathBuf::from("/s/id_cache.plist"));
@@ -398,6 +412,7 @@ mod tests {
             other_handles: None,
             sms_relay_number: None,
             mac_host: None,
+            link_previews: None,
         };
         let c = DaemonConfig::resolve("/s".into(), f, o);
         assert_eq!(c.anisette_url, "http://localhost:6969");
@@ -406,6 +421,10 @@ mod tests {
         assert!(!c.store_credentials);
         let f = FileConfig::parse("store_credentials = false").unwrap();
         assert!(!DaemonConfig::resolve("/s".into(), f, Overrides::default()).store_credentials);
+        let f = FileConfig::parse("link_previews = false").unwrap();
+        assert!(!DaemonConfig::resolve("/s".into(), f.clone(), Overrides::default()).link_previews);
+        let o = Overrides { link_previews: Some(true), ..Default::default() };
+        assert!(DaemonConfig::resolve("/s".into(), f, o).link_previews);
     }
 
     /// B1: the protocol crates log message bodies, push tokens and GSA

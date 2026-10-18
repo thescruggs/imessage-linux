@@ -6,12 +6,12 @@ use imessage_common::model::{
     Reaction, ReactionKind, ReadReceipt, Service, TypingEvent,
 };
 use rustpush::{
-    Attachment as RpAttachment, AttachmentType, ConversationData, IndexedMessagePart, MMCSFile, Message as RpMessage, MessageInst,
+    Attachment as RpAttachment, AttachmentType, ConversationData, IndexedMessagePart, LinkMeta, MMCSFile, Message as RpMessage, MessageInst,
     MessagePart as RpMessagePart, MessageParts, MessageType, NormalMessage, ReactMessageType, Reaction as RpReaction,
     SetTranscriptBackgroundMessage, ShareProfileMessage, SharedPoster,
 };
 
-use super::{BackgroundRef, EngineEvent, IconRef, PosterTags, ShareRef};
+use super::{BackgroundRef, EngineEvent, IconRef, LinkImage, LinkPreview, PosterTags, ShareRef};
 
 fn is_mine(handle: &str, my_handles: &[String]) -> bool {
     let n = Handle::normalize(handle);
@@ -230,6 +230,15 @@ pub fn attachment_from_locator(s: &str) -> Result<RpAttachment, LocatorError> {
     Ok(plist::from_bytes(l.plist.as_bytes())?)
 }
 
+/// The bytes of an inline attachment's locator; `None` for an MMCS one
+/// (or an unreadable locator).
+pub fn inline_bytes(locator: &str) -> Option<Vec<u8>> {
+    match attachment_from_locator(locator).ok()?.a_type {
+        AttachmentType::Inline(d) => Some(d),
+        _ => None,
+    }
+}
+
 /// Convert message parts. Returns (model parts, attachments, text).
 pub fn convert_parts(message_id: &MessageId, parts: &MessageParts) -> (Vec<MessagePart>, Vec<Attachment>, Option<String>) {
     let mut out = Vec::new();
@@ -271,9 +280,246 @@ pub fn convert_parts(message_id: &MessageId, parts: &MessageParts) -> (Vec<Messa
     (out, atts, text)
 }
 
+/// The balloon id of Messages' link previews.
+pub const URL_BALLOON: &str = "com.apple.messages.URLBalloonProvider";
+
+/// Largest link-preview image or icon we keep from a message (the sender
+/// already scaled them; Apple's are well under 1 MiB).
+pub const MAX_LINK_IMAGE_BYTES: usize = 8 << 20;
+
+/// A link-preview text field, or `None` for an empty one (or the keyed
+/// archive's `$null`).
+fn link_text(s: Option<&str>) -> Option<String> {
+    s.map(str::trim).filter(|t| !t.is_empty() && *t != "$null").map(str::to_string)
+}
+
+/// The URL a link preview is for: `URL`, else `originalURL`.
+pub fn link_url(meta: &rustpush::LPLinkMetadata) -> Option<String> {
+    [meta.url.clone(), meta.original_url.clone()].into_iter().flatten().map(Into::<String>::into).map(|u| u.trim().to_string()).find(|u| !u.is_empty())
+}
+
+/// File extension for a link-preview image's MIME type.
+fn image_ext_for(mime: &str) -> &'static str {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/heic" => "heic",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
+
+/// An inline attachment row for link-preview bytes (`id` is
+/// [`AttachmentId::link_image`] / [`AttachmentId::link_icon`]); `None`
+/// for empty or oversized data.
+pub fn link_attachment(id: AttachmentId, message_id: &MessageId, kind: &str, mime: &str, data: &[u8]) -> Option<Attachment> {
+    if data.is_empty() || data.len() > MAX_LINK_IMAGE_BYTES {
+        return None;
+    }
+    let mime = if mime.trim().is_empty() { "image/jpeg".to_string() } else { mime.trim().to_ascii_lowercase() };
+    let filename = format!("{kind}.{}", image_ext_for(&mime));
+    let a = RpAttachment {
+        a_type: AttachmentType::Inline(data.to_vec()),
+        part: 0,
+        uti_type: uti_for_mime(&mime).to_string(),
+        mime: mime.clone(),
+        name: filename.clone(),
+        iris: false,
+    };
+    Some(Attachment { id, message_id: message_id.clone(), mime, filename, size: data.len() as u64, local_path: None, mmcs: attachment_locator(&a) })
+}
+
+/// A received link preview as a `link` part plus its image / icon as
+/// inline attachments. `None` if it names no URL. An image or icon whose
+/// index points outside the balloon's attachments is left out.
+pub fn link_from_meta(message_id: &MessageId, meta: &LinkMeta) -> Option<(MessagePart, Vec<Attachment>)> {
+    let url = link_url(&meta.data)?;
+    let mut atts = Vec::new();
+    let mut pick = |sub: Option<&rustpush::RichLinkImageAttachmentSubstitute>, id: AttachmentId, kind: &str| -> Option<AttachmentId> {
+        let sub = sub?;
+        let Some(data) = usize::try_from(sub.rich_link_image_attachment_substitute_index).ok().and_then(|i| meta.attachments.get(i)) else {
+            log::debug!("link preview in {message_id}: {kind} index {} out of range ({} attachment(s))", sub.rich_link_image_attachment_substitute_index, meta.attachments.len());
+            return None;
+        };
+        let a = link_attachment(id, message_id, kind, &sub.mime_type, data)?;
+        let id = a.id.clone();
+        atts.push(a);
+        Some(id)
+    };
+    let image_attachment_id = pick(meta.data.image.as_ref(), AttachmentId::link_image(message_id), "link-image");
+    let icon_attachment_id = pick(meta.data.icon.as_ref(), AttachmentId::link_icon(message_id), "link-icon");
+    let part = MessagePart::Link {
+        url,
+        title: link_text(meta.data.title.as_deref()),
+        summary: link_text(meta.data.summary.as_deref()),
+        site_name: None,
+        image_attachment_id,
+        icon_attachment_id,
+    };
+    Some((part, atts))
+}
+
+fn ns_url(url: &str) -> rustpush::NSURL {
+    rustpush::NSURL { base: "$null".into(), relative: url.to_string() }
+}
+
+/// What rustpush sends as the URL balloon for `p`: `LPLinkMetadata` (title,
+/// summary, URL, original URL, image and icon with their sizes) plus the
+/// image bytes it indexes (image first, then icon).
+pub fn link_meta(p: &LinkPreview) -> LinkMeta {
+    use rustpush::{LPIconMetadata, LPImageMetadata, LPLinkMetadata, RichLinkImageAttachmentSubstitute};
+    let mut attachments: Vec<Vec<u8>> = Vec::new();
+    let mut add = |img: &LinkImage| {
+        attachments.push(img.data.clone());
+        RichLinkImageAttachmentSubstitute { mime_type: img.mime.clone(), rich_link_image_attachment_substitute_index: (attachments.len() - 1) as u64 }
+    };
+    let image = p.image.as_ref().map(&mut add);
+    let icon = p.icon.as_ref().map(&mut add);
+    let original = if p.original_url.is_empty() { &p.url } else { &p.original_url };
+    LinkMeta {
+        data: LPLinkMetadata {
+            image_metadata: p.image.as_ref().map(|i| LPImageMetadata { size: format!("{{{}, {}}}", i.width, i.height), url: ns_url(if i.source_url.is_empty() { &p.url } else { &i.source_url }), version: 1 }),
+            version: 1,
+            icon_metadata: p.icon.as_ref().map(|i| LPIconMetadata { url: ns_url(if i.source_url.is_empty() { &p.url } else { &i.source_url }), version: 1 }),
+            original_url: Some(ns_url(original)),
+            url: Some(ns_url(&p.url)),
+            title: p.title.clone(),
+            summary: p.summary.clone(),
+            image,
+            icon,
+            images: None,
+            icons: None,
+            is_incomplete: None,
+            uses_activity_pub: None,
+            is_encoded_for_local_use: None,
+            collaboration_type: None,
+            specialization2: None,
+        },
+        attachments,
+    }
+}
+
+/// The `link` part (and image / icon attachments) for our own row of a
+/// message sent with `p`: the same thing the recipient's device gets,
+/// plus the site name.
+pub fn link_for_sent(message_id: &MessageId, p: &LinkPreview) -> Option<(MessagePart, Vec<Attachment>)> {
+    let (mut part, atts) = link_from_meta(message_id, &link_meta(p))?;
+    if let MessagePart::Link { site_name, .. } = &mut part {
+        *site_name = p.site_name.clone();
+    }
+    Some((part, atts))
+}
+
+/// rustpush's `RichLink` (the URL balloon payload's root object), which
+/// it does not export.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "$class", rename = "RichLink")]
+pub struct RichLinkArchive {
+    pub rich_link_metadata: rustpush::LPLinkMetadata,
+    #[serde(default)]
+    pub rich_link_is_placeholder: bool,
+}
+
+/// The URL balloon payload for `p` as rustpush builds it on send: the
+/// `RichLink` keyed archive (binary plist), also what Messages keeps in
+/// `chat.db` (`payload_data`). For fixtures and tests.
+pub fn rich_link_archive(p: &LinkPreview) -> Result<Vec<u8>, String> {
+    let value = plist::to_value(&RichLinkArchive { rich_link_metadata: link_meta(p).data, rich_link_is_placeholder: false }).map_err(|e| e.to_string())?;
+    let archived = rustpush::KeyedArchive::archive_item(value).map_err(|e| e.to_string())?;
+    let mut bin = Vec::new();
+    plist::to_writer_binary(&mut bin, &archived).map_err(|e| e.to_string())?;
+    Ok(bin)
+}
+
+/// A link preview read from a keyed archive the lenient way (the Mac's
+/// `chat.db` `payload_data`): only the fields we show.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ArchivedLink {
+    pub url: Option<String>,
+    pub original_url: Option<String>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    /// `(attachment index, MIME type)`.
+    pub image: Option<(u64, String)>,
+    pub icon: Option<(u64, String)>,
+}
+
+impl ArchivedLink {
+    pub fn link_url(&self) -> Option<String> {
+        self.url.clone().or_else(|| self.original_url.clone())
+    }
+}
+
+/// Read a `RichLink` keyed archive (as Messages keeps it in `chat.db`'s
+/// `payload_data`, the same archive the URL balloon carries) without
+/// insisting on every field's type, unlike rustpush's own `LPLinkMetadata`.
+/// `None` if it is not a keyed archive or names no URL.
+pub fn rich_link_from_archive(data: &[u8]) -> Option<ArchivedLink> {
+    use plist::Value;
+    // rustpush's expander indexes and unwraps freely; a malformed archive
+    // must not take the daemon down.
+    let root = std::panic::catch_unwind(|| rustpush::KeyedArchive::expand(data).ok().and_then(|mut m| m.remove("root"))).ok().flatten()?;
+    fn text(v: Option<&Value>) -> Option<String> {
+        let s = match v? {
+            Value::String(s) => s.clone(),
+            Value::Dictionary(d) => text(d.get("NS.string"))?,
+            _ => return None,
+        };
+        let s = s.trim();
+        (!s.is_empty() && s != "$null").then(|| s.to_string())
+    }
+    fn url(v: Option<&Value>) -> Option<String> {
+        match v? {
+            Value::Dictionary(d) if d.contains_key("NS.relative") => {
+                let rel = text(d.get("NS.relative"))?;
+                Some(match url(d.get("NS.base")) {
+                    Some(base) => url::Url::parse(&base).and_then(|b| b.join(&rel)).map(|u| u.to_string()).unwrap_or(rel),
+                    None => rel,
+                })
+            }
+            other => text(Some(other)),
+        }
+    }
+    fn sub(v: Option<&Value>) -> Option<(u64, String)> {
+        let d = v?.as_dictionary()?;
+        let i = d.get("richLinkImageAttachmentSubstituteIndex")?.as_unsigned_integer()?;
+        Some((i, text(d.get("MIMEType")).unwrap_or_default()))
+    }
+    let d = root.as_dictionary()?;
+    let m = d.get("richLinkMetadata").and_then(Value::as_dictionary).unwrap_or(d);
+    let link = ArchivedLink {
+        url: url(m.get("URL")),
+        original_url: url(m.get("originalURL")),
+        title: text(m.get("title")),
+        summary: text(m.get("summary")),
+        image: sub(m.get("image")),
+        icon: sub(m.get("icon")),
+    };
+    link.link_url().is_some().then_some(link)
+}
+
 fn normal_to_message(inst: &MessageInst, n: &NormalMessage, chat_id: ChatId, my_handles: &[String]) -> (Message, Vec<Attachment>) {
     let id = MessageId::new(&inst.id);
-    let (mut parts, atts, text) = convert_parts(&id, &n.parts);
+    let (mut parts, mut atts, mut text) = convert_parts(&id, &n.parts);
+    match n.link_meta.as_ref().map(|m| link_from_meta(&id, m)) {
+        Some(Some((link, link_atts))) => {
+            // A balloon without text: the URL is the text (as Messages).
+            if text.is_none()
+                && let MessagePart::Link { url, .. } = &link
+            {
+                parts.retain(|p| !matches!(p, MessagePart::Text { .. }));
+                parts.insert(0, MessagePart::Text { text: url.clone() });
+                text = Some(url.clone());
+            }
+            parts.push(link);
+            atts.extend(link_atts);
+        }
+        Some(None) => log::warn!("link preview in {id} names no URL; ignored"),
+        None if n.app.as_ref().is_some_and(|a| a.bundle_id == URL_BALLOON) => log::warn!("link preview in {id} could not be read; shown without it"),
+        None => {}
+    }
     if n.app.is_some() && parts.is_empty() {
         parts.push(MessagePart::Unsupported { description: "app message".into() });
     }
@@ -1143,6 +1389,128 @@ mod tests {
         assert_eq!(r.poster.as_ref().map(|t| t.message_tag.clone()), Some(vec![3]));
         let back = share_message(&r);
         assert_eq!((back.cloud_kit_record_key.as_str(), back.poster.is_none()), ("REC5", true));
+    }
+
+    fn lp(url: Option<&str>, title: Option<&str>, image: Option<u64>, icon: Option<u64>) -> rustpush::LPLinkMetadata {
+        let sub = |i: u64, m: &str| rustpush::RichLinkImageAttachmentSubstitute { mime_type: m.into(), rich_link_image_attachment_substitute_index: i };
+        rustpush::LPLinkMetadata {
+            image_metadata: None,
+            version: 1,
+            icon_metadata: None,
+            original_url: url.map(|u| rustpush::NSURL { base: "$null".into(), relative: format!("{u}?orig") }),
+            url: url.map(|u| rustpush::NSURL { base: "$null".into(), relative: u.into() }),
+            title: title.map(String::from),
+            summary: Some("  ".into()),
+            image: image.map(|i| sub(i, "image/jpeg")),
+            icon: icon.map(|i| sub(i, "image/png")),
+            images: None,
+            icons: None,
+            is_incomplete: None,
+            uses_activity_pub: None,
+            is_encoded_for_local_use: None,
+            collaboration_type: None,
+            specialization2: None,
+        }
+    }
+
+    fn link_msg(text: &str, data: rustpush::LPLinkMetadata, atts: Vec<Vec<u8>>) -> RpMessage {
+        let mut n = NormalMessage::new(text.into(), MessageType::IMessage);
+        n.link_meta = Some(LinkMeta { data, attachments: atts });
+        RpMessage::Message(n)
+    }
+
+    fn received(m: RpMessage) -> (Message, Vec<Attachment>) {
+        let ev = convert_incoming(&inst(BOB, Some(conv(&[BOB, ME], None, None)), m), &mine()).events;
+        let [EngineEvent::MessageReceived { message, attachments, .. }] = &ev[..] else { panic!("{ev:?}") };
+        (message.clone(), attachments.clone())
+    }
+
+    /// A received URL balloon: a `link` part after the text, its image and
+    /// icon as inline attachments.
+    #[test]
+    fn link_previews_received() {
+        const URL: &str = "https://example.com/story";
+        let id = "1B2C3D4E-0000-4000-8000-000000000001";
+        // with text, image and icon
+        let (m, atts) = received(link_msg(&format!("look {URL}"), lp(Some(URL), Some(" Story "), Some(1), Some(0)), vec![b"ICON".to_vec(), b"JPEGDATA".to_vec()]));
+        assert_eq!(m.text.as_deref(), Some("look https://example.com/story"));
+        assert_eq!(m.parts.len(), 2);
+        let MessagePart::Link { url, title, summary, site_name, image_attachment_id, icon_attachment_id } = &m.parts[1] else { panic!("{:?}", m.parts) };
+        assert_eq!((url.as_str(), title.as_deref(), summary.as_deref(), site_name.as_deref()), (URL, Some("Story"), None, None));
+        assert_eq!(image_attachment_id.as_ref().unwrap().0, format!("{id}:link-image"));
+        assert_eq!(icon_attachment_id.as_ref().unwrap().0, format!("{id}:link-icon"));
+        assert_eq!(atts.len(), 2);
+        let img = &atts[0];
+        assert_eq!((img.mime.as_str(), img.filename.as_str(), img.size), ("image/jpeg", "link-image.jpg", 8));
+        let back = attachment_from_locator(&img.mmcs).unwrap();
+        assert!(matches!(&back.a_type, AttachmentType::Inline(d) if d == b"JPEGDATA"));
+        assert_eq!((atts[1].filename.as_str(), atts[1].mime.as_str()), ("link-icon.png", "image/png"));
+
+        // only a URL balloon, no text: the URL becomes the text; no image
+        let (m, atts) = received(link_msg("", lp(Some(URL), None, None, None), vec![]));
+        assert_eq!(m.text.as_deref(), Some(URL));
+        assert!(matches!(&m.parts[..], [MessagePart::Text { text }, MessagePart::Link { title: None, image_attachment_id: None, icon_attachment_id: None, .. }] if text == URL), "{:?}", m.parts);
+        assert!(atts.is_empty());
+
+        // only originalURL
+        let mut d = lp(None, Some("T"), None, None);
+        d.original_url = Some(rustpush::NSURL { base: "$null".into(), relative: "https://o.example/".into() });
+        let (m, _) = received(link_msg("", d, vec![]));
+        assert!(matches!(&m.parts[1], MessagePart::Link { url, .. } if url == "https://o.example/"));
+
+        // bad indexes: the image / icon are left out, the card stays
+        let (m, atts) = received(link_msg(URL, lp(Some(URL), Some("T"), Some(5), Some(u64::MAX)), vec![b"x".to_vec()]));
+        assert!(matches!(&m.parts[1], MessagePart::Link { image_attachment_id: None, icon_attachment_id: None, .. }));
+        assert!(atts.is_empty());
+        // empty image bytes: left out too
+        let (m, _) = received(link_msg(URL, lp(Some(URL), Some("T"), Some(0), None), vec![vec![]]));
+        assert!(matches!(&m.parts[1], MessagePart::Link { image_attachment_id: None, .. }));
+
+        // no URL at all: no card (text kept)
+        let (m, atts) = received(link_msg("hi", lp(None, Some("T"), Some(0), None), vec![b"x".to_vec()]));
+        assert_eq!((m.parts.len(), atts.len()), (1, 0));
+    }
+
+    /// The balloon we send round-trips through rustpush's keyed archive
+    /// and back into the same part (what the recipient's device decodes).
+    #[test]
+    fn link_previews_sent() {
+        let p = LinkPreview {
+            url: "https://example.com/final".into(),
+            original_url: "https://example.com/r".into(),
+            title: Some("Title".into()),
+            summary: Some("Sum".into()),
+            site_name: Some("Example".into()),
+            image: Some(LinkImage { data: b"IMG".to_vec(), mime: "image/jpeg".into(), width: 1200, height: 630, source_url: "https://example.com/i.jpg".into() }),
+            icon: Some(LinkImage { data: b"ICO".to_vec(), mime: "image/png".into(), width: 180, height: 180, source_url: String::new() }),
+        };
+        let meta = link_meta(&p);
+        assert_eq!(meta.attachments, vec![b"IMG".to_vec(), b"ICO".to_vec()]);
+        assert_eq!(meta.data.image.as_ref().unwrap().rich_link_image_attachment_substitute_index, 0);
+        assert_eq!(meta.data.icon.as_ref().unwrap().rich_link_image_attachment_substitute_index, 1);
+        assert_eq!(meta.data.image_metadata.as_ref().unwrap().size, "{1200, 630}");
+        let orig: String = meta.data.original_url.clone().unwrap().into();
+        assert_eq!(orig, "https://example.com/r");
+        // archive as rustpush does on send, expand as it does on receive
+        let archived = rustpush::KeyedArchive::archive_item(plist::to_value(&RichLinkArchive { rich_link_metadata: meta.data.clone(), rich_link_is_placeholder: true }).unwrap()).unwrap();
+        let mut bin = Vec::new();
+        plist::to_writer_binary(&mut bin, &archived).unwrap();
+        let back: RichLinkArchive = plist::from_value(&rustpush::KeyedArchive::expand_root(&bin).unwrap()).unwrap();
+        let mid = MessageId::new("abc");
+        let (part, atts) = link_from_meta(&mid, &LinkMeta { data: back.rich_link_metadata, attachments: meta.attachments.clone() }).unwrap();
+        let MessagePart::Link { url, title, summary, site_name, image_attachment_id, icon_attachment_id } = &part else { panic!() };
+        assert_eq!((url.as_str(), title.as_deref(), summary.as_deref(), site_name.as_deref()), ("https://example.com/final", Some("Title"), Some("Sum"), None));
+        assert_eq!((image_attachment_id.as_ref().unwrap().0.as_str(), icon_attachment_id.as_ref().unwrap().0.as_str()), ("ABC:link-image", "ABC:link-icon"));
+        assert_eq!(atts.len(), 2);
+        // our own row keeps the site name
+        let (part, _) = link_for_sent(&mid, &p).unwrap();
+        assert!(matches!(part, MessagePart::Link { site_name: Some(s), .. } if s == "Example"));
+        // the Mac's chat.db form of the same archive
+        let parsed = rich_link_from_archive(&bin).unwrap();
+        assert_eq!(parsed.url.as_deref(), Some("https://example.com/final"));
+        assert_eq!(parsed.title.as_deref(), Some("Title"));
+        assert_eq!((parsed.image, parsed.icon), (Some((0, "image/jpeg".to_string())), Some((1, "image/png".to_string()))));
+        assert!(rich_link_from_archive(b"not a plist").is_none());
     }
 
     #[test]

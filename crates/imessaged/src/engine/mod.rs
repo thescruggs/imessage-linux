@@ -212,6 +212,51 @@ impl std::fmt::Debug for IconRef {
     }
 }
 
+/// A link preview to send with a message (built by the daemon's fetcher,
+/// `crate::linkpreview`): what Messages packs into its URL balloon.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct LinkPreview {
+    /// The page's URL (after redirects, or `og:url`).
+    pub url: String,
+    /// The URL as it appears in the message text.
+    pub original_url: String,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    /// `og:site_name` (not part of Apple's metadata; kept on our own row).
+    pub site_name: Option<String>,
+    pub image: Option<LinkImage>,
+    pub icon: Option<LinkImage>,
+}
+
+/// An image of a [`LinkPreview`], ready to send.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct LinkImage {
+    pub data: Vec<u8>,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    /// Where it was fetched from.
+    pub source_url: String,
+}
+
+impl std::fmt::Debug for LinkImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkImage").field("bytes", &self.data.len()).field("mime", &self.mime).field("width", &self.width).field("height", &self.height).finish()
+    }
+}
+
+impl std::fmt::Debug for LinkPreview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkPreview")
+            .field("url", &self.url)
+            .field("title", &self.title)
+            .field("site_name", &self.site_name)
+            .field("image", &self.image)
+            .field("icon", &self.icon)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything the engine reports asynchronously.
 ///
 /// `at` fields are ms since epoch from the message that caused the event
@@ -298,6 +343,13 @@ pub trait Engine: Send + Sync {
 
     async fn send_text(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>) -> EngineResult<SentMessage>;
     async fn send_attachment(&self, chat: &ChatTarget, path: &Path, mime: &str) -> EngineResult<SentMessage>;
+    /// [`Engine::send_text`] (iMessage) with a link preview in the same
+    /// message (Messages' URL balloon). Engines that cannot send one send
+    /// the text alone.
+    async fn send_text_with_link(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, link: &LinkPreview) -> EngineResult<SentMessage> {
+        let _ = link;
+        self.send_text(chat, text, reply_to).await
+    }
     /// [`Engine::send_text`] over `service`: `Sms` sends a text message
     /// through the user's iPhone (Text Message Forwarding), to phone
     /// numbers only. Engines without SMS support refuse it.

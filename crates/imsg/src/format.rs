@@ -352,6 +352,14 @@ pub fn message(m: &Message, st: Style, now: &DateTime<impl TimeZone<Offset: std:
             head.push_str(l);
         }
     }
+    if !m.unsent {
+        for p in &m.parts {
+            if let MessagePart::Link { url, title, site_name, .. } = p {
+                head.push(' ');
+                head.push_str(&st.cyan(&link_label(url, title.as_deref(), site_name.as_deref())));
+            }
+        }
+    }
     if let Some(s) = &m.subject {
         head.push_str(&st.dim(&format!("  (subject: {s})")));
     }
@@ -380,7 +388,7 @@ pub fn message(m: &Message, st: Style, now: &DateTime<impl TimeZone<Offset: std:
             MessagePart::Unsupported { description } => {
                 let _ = writeln!(out, "{indent}{}", st.dim(&format!("[unsupported: {description}]")));
             }
-            MessagePart::Text { .. } | MessagePart::Mention { .. } => {}
+            MessagePart::Text { .. } | MessagePart::Mention { .. } | MessagePart::Link { .. } => {}
         }
     }
     let mut meta = format!("id {}", m.id);
@@ -392,6 +400,17 @@ pub fn message(m: &Message, st: Style, now: &DateTime<impl TimeZone<Offset: std:
     }
     let _ = writeln!(out, "{indent}{}", st.dim(&meta));
     out
+}
+
+/// `[link: <title> — <host>]` for a link preview (the site name when the
+/// page gave one, else the URL's host; `[link: <host>]` without a title).
+pub fn link_label(url: &str, title: Option<&str>, site_name: Option<&str>) -> String {
+    let site = site_name.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).or_else(|| imessage_common::model::link_host(url)).unwrap_or_else(|| url.trim().to_string());
+    let title = title.map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|t| !t.is_empty());
+    match title {
+        Some(t) => format!("[link: {} — {site}]", truncate(&t, 80)),
+        None => format!("[link: {site}]"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +616,27 @@ mod tests {
         assert_eq!(s, "09:05 [mailto:bob@example.com] me: (unsent)  [read]\n      id AAAA\n");
         // no escape codes without colour, some with
         assert!(!s.contains('\x1b'));
+        // a link preview follows the text
+        let mut m = msg();
+        m.text = Some("see https://www.example.com/a".into());
+        m.reactions.clear();
+        m.edited = false;
+        m.reply_to = None;
+        m.parts = vec![
+            MessagePart::Text { text: "see https://www.example.com/a".into() },
+            MessagePart::Link {
+                url: "https://www.example.com/a".into(),
+                title: Some("An  Example\npage".into()),
+                summary: Some("s".into()),
+                site_name: None,
+                image_attachment_id: Some(AttachmentId("AAAA:link-image".into())),
+                icon_attachment_id: None,
+            },
+        ];
+        let s = message(&m, Style::PLAIN, &now(), false);
+        assert_eq!(s, "09:05 bob@example.com: see https://www.example.com/a [link: An Example page — example.com]\n      id AAAA\n");
+        assert_eq!(link_label("https://x.org/", None, Some(" X News ")), "[link: X News]");
+        assert_eq!(link_label("https://x.org/", Some("T"), None), "[link: T — x.org]");
         assert!(message(&m, Style { color: true }, &now(), false).contains('\x1b'));
     }
 

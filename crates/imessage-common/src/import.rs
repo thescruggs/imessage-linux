@@ -31,6 +31,23 @@ pub struct ImportMessage {
     pub message: Message,
     #[serde(default)]
     pub attachments: Vec<ImportAttachment>,
+    /// A link preview as the Mac stores it; the daemon turns it into a
+    /// `link` part (and its image / icon attachments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<ImportLink>,
+}
+
+/// A Mac link preview (`chat.db` `message.payload_data` of a
+/// `com.apple.messages.URLBalloonProvider` balloon).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportLink {
+    /// The `RichLink` keyed archive, base64 (standard alphabet).
+    pub payload: String,
+    /// The message's hidden link-preview files in `chat.db` order (the
+    /// archive's image / icon indexes point into this list): absolute
+    /// paths the daemon can read, `None` where the file was not available.
+    #[serde(default)]
+    pub images: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
