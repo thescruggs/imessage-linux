@@ -110,12 +110,12 @@ chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
    emitted as for other chat changes. Local only (not synced to Apple;
    Messages in iCloud pin sync is CloudKit and out of scope).
 2. **CLI**: `imsg chat CHAT --pin / --unpin`, `imsg chats` marks pinned rows
-   (📌 / `pinned` column in `--json`). `imsg import-mac HOST --pins`
-   reads the pinning plist over the existing ssh path (as
-   `--backgrounds` does; `plutil -convert xml1 -o -` on the Mac), maps
-   each entry to a chat id (handle → 1:1 `mailto:`/`tel:` id; group GUID
-   → `group:` id), reports unknown ones, `--dry-run` supported; order is
-   kept.
+   (📌 / `pinned` column in `--json`). Pins come from the Mac through the
+   sync in section D (the pinning plist, each entry mapped to a chat id:
+   handle → 1:1 `mailto:`/`tel:` id, group GUID → `group:` id; unknown
+   ones reported; order kept). Pinning in kmessages is local; the next
+   sync from the Mac wins for entries the Mac has, and keeps local-only pins
+   (so pinning here is not undone by a sync).
 3. **kmessages**: `ChatListModel` sorts pinned chats first by `pin_order`,
    then the rest by time as now; a "Pinned" section header (Kirigami
    `ListSectionHeader`) when any exist; `ChatListDelegate` gets a context
@@ -173,7 +173,46 @@ Typing `snake` offers 🐍, like macOS's inline emoji replacement.
 4. Tests: model ranking; a screenshot with the popup open; the composer
    test types "snake" and checks the suggestion and insertion.
 
-Order: A (daemon+CLI first, then the app), B, C. Release as 0.1.13.
+### D. "Sync from Mac" button: contacts, photos, pins (and backgrounds)
+
+Today contacts arrive through `tools/mac-contacts-export.sh` (bash wrapper
+around a Python script that runs on the Mac over one ssh connection and
+streams a tar of vCards with photos back into `~/.local/share/kpeoplevcard/`),
+and `imsg import-mac HOST --backgrounds` uses the same shape (embedded
+Python over ssh, tar back). The sync unifies them behind one command and one
+button.
+
+1. **CLI** `imsg sync-mac [HOST] [--contacts] [--pins] [--backgrounds]
+   [--dry-run]` (default: contacts + pins). One ssh round trip: the
+   embedded script collects the Contacts database export (ported from
+   `mac-contacts-export.sh`, same vCard output and `mac-<uid>.vcf` naming,
+   photos embedded), `~/Library/Preferences/com.apple.messages.pinning.plist`
+   (`plutil -convert xml1 -o -`), and optionally the backgrounds records,
+   into one tar. On Linux: write/replace the `mac-*.vcf` files (KPeople picks
+   them up live), apply pins through `SetChatPinned`/`ReorderPins`, run the
+   existing backgrounds plan. Prints a summary (contacts written/removed,
+   pins applied/unknown, backgrounds). `HOST` defaults to a new daemon
+   setting `mac_host` (`imessaged` config / `GetStatus.mac_host`), prefilled
+   at `imsg doctor` time from the ssh host in `anisette_command` when that is
+   an ssh command. `mac-contacts-export.sh` becomes a thin wrapper that calls
+   `imsg sync-mac --contacts` (kept for the README).
+2. **kmessages**: a "Sync from Mac" toolbar button next to "New message"
+   (icon `view-refresh`, tooltip with the host and the last sync time) runs
+   `imsg sync-mac` through `QProcess` (imsg is installed with the app;
+   `KMESSAGES_IMSG` env / Settings path override for development), with a
+   busy indicator on the button, a passive notification with the summary
+   or the error (ssh not reachable, Full Disk Access missing: the script's
+   messages are passed through), and the Mac host editable in Settings
+   (defaults to the daemon's `mac_host`). Also `Tools > Sync from Mac` in
+   the menu. The last sync time lives in the app's KConfig. Group photos
+   and shared names already come from iCloud and need no sync.
+3. **Tests**: the Rust side like `import-mac` (tar fixture → vCards, pins
+   mapping, dry run); kmessages tests with a fake `imsg` script on `PATH`
+   that prints a summary (button busy state, notification, failure path).
+   Docs: README "Contacts" and "Install", CLI.md `sync-mac`, KMESSAGES.md.
+
+Order: D (CLI first, then the button) together with A's daemon part, then
+A's app part, B, C. Release as 0.1.13.
 
 ## Non-goals / known limits
 
