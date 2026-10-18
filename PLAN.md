@@ -89,7 +89,7 @@ independent **Fable** review agent audits the diff for correctness, security
 repeats until the reviewer has no blocking findings and `cargo test` /
 `cmake --build` pass.
 
-## Next (planned 2026-10-17, not started): kmessages pinned chats, keyboard, emoji suggestions
+## Next (planned 2026-10-17, in progress): kmessages pinned chats, keyboard, emoji suggestions
 
 Three features requested for kmessages, in the order they should be built.
 Each is its own PR-sized step with tests, docs and a changelog line; the
@@ -103,19 +103,24 @@ pins in `~/Library/Preferences/com.apple.messages.pinning.plist`
 chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
 "favorite" flag in vCards, so pins are the source of truth, like on the Mac.
 
-1. **Daemon / store** (`crates/imessaged`): `chats.pinned_at INTEGER` and
+1. **[done 2026-10-18]** **Daemon / store** (`crates/imessaged`): `chats.pinned_at INTEGER` and
    `chats.pin_order INTEGER` (migration 0006). `Chat` JSON gains
    `pinned: bool`, `pin_order: int|null`. D-Bus `SetChatPinned(chat_id,
    pinned, order)` and `ReorderPins(chat_ids_json)`; `ChatUpdated` is
    emitted as for other chat changes. Local only (not synced to Apple;
    Messages in iCloud pin sync is CloudKit and out of scope).
-2. **CLI**: `imsg chat CHAT --pin / --unpin`, `imsg chats` marks pinned rows
+2. **[done 2026-10-18]** **CLI**: `imsg chat CHAT --pin / --unpin` (and `--position N`), `imsg chats` marks pinned rows
    (📌 / `pinned` column in `--json`). Pins come from the Mac through the
    sync in section D (the pinning plist, each entry mapped to a chat id:
    handle → 1:1 `mailto:`/`tel:` id, group GUID → `group:` id; unknown
    ones reported; order kept). Pinning in kmessages is local; the next
    sync from the Mac wins for entries the Mac has, and keeps local-only pins
-   (so pinning here is not undone by a sync).
+   (so pinning here is not undone by a sync). As built: `imsg` remembers
+   which pins the last sync took from the Mac
+   (`~/.local/state/imsg/mac-pins.json`), so a chat the Mac unpinned is
+   unpinned here too, while pins made here stay; group pins that are not a
+   GUID (`chat123…`) are looked up in the Mac's `chat.db` and mapped like
+   the history import.
 3. **kmessages**: `ChatListModel` sorts pinned chats first by `pin_order`,
    then the rest by time as now; a "Pinned" section header (Kirigami
    `ListSectionHeader`) when any exist; `ChatListDelegate` gets a context
@@ -181,8 +186,8 @@ and `imsg import-mac HOST --backgrounds` uses the same shape (embedded
 Python over ssh, tar back). The sync unifies them behind one command and one
 button.
 
-1. **CLI** `imsg sync-mac [HOST] [--contacts] [--pins] [--backgrounds]
-   [--dry-run]` (default: contacts + pins). One ssh round trip: the
+1. **[done 2026-10-18]** **CLI** `imsg sync-mac [HOST] [--contacts] [--pins] [--backgrounds]
+   [--dry-run]` (default: contacts + pins; also `--json`, `--contacts-dir`). One ssh round trip: the
    embedded script collects the Contacts database export (ported from
    `mac-contacts-export.sh`, same vCard output and `mac-<uid>.vcf` naming,
    photos embedded), `~/Library/Preferences/com.apple.messages.pinning.plist`
@@ -195,6 +200,12 @@ button.
    at `imsg doctor` time from the ssh host in `anisette_command` when that is
    an ssh command. `mac-contacts-export.sh` becomes a thin wrapper that calls
    `imsg sync-mac --contacts` (kept for the README).
+   As built: the Mac side is `tools/mac-sync-export.py` (contacts code
+   ported unchanged, output byte-identical; `mac-backgrounds-export.py`
+   embedded for `--backgrounds`), one `sync.json` reports each part or
+   its error; only changed vCards are rewritten; `imsg doctor` suggests
+   `mac_host` (it does not write config.toml). The wrapper falls back to
+   running the exporter itself when `imsg` is not installed.
 2. **kmessages**: a "Sync from Mac" toolbar button next to "New message"
    (icon `view-refresh`, tooltip with the host and the last sync time) runs
    `imsg sync-mac` through `QProcess` (imsg is installed with the app;
