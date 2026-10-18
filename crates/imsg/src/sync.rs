@@ -78,6 +78,10 @@ pub struct SectionMeta {
     pub file: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Pins: chat.db could not be read to look group pins up (so some may
+    /// be `unknown` this time).
+    #[serde(default)]
+    pub lookup_error: Option<String>,
 }
 
 /// A pin that is not an address, as chat.db has it.
@@ -183,6 +187,10 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// are never touched. Nothing at all changes when the Mac sent no
 /// contacts. A dry run only counts.
 pub fn apply_contacts(staged: &Path, dir: &Path, photos: u64, dry_run: bool) -> anyhow::Result<ContactsOutcome> {
+    // read_dir follows a symlink a tar member could have made `contacts`.
+    if staged.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+        anyhow::bail!("{}: not a plain directory in the export; {} left unchanged", staged.display(), dir.display());
+    }
     let new = files_named(staged, exported_name).map_err(|e| anyhow::anyhow!("{}: {e}", staged.display()))?;
     if new.is_empty() {
         anyhow::bail!("no contacts received from the Mac; {} left unchanged", dir.display());
@@ -282,9 +290,34 @@ pub struct PinPlan {
     pub kept_local: Vec<String>,
     /// Pinned by an earlier sync, no longer pinned on the Mac.
     pub unpin: Vec<String>,
-    /// The chats the Mac pins (for the state file).
+    /// Pinned by an earlier sync and not among the Mac's mapped pins, but
+    /// kept: some Mac pin could not be mapped this time (or chat.db could
+    /// not be read), so it may still be one of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kept_unmapped: Vec<String>,
+    /// Why the Mac could not look group pins up in chat.db, if it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lookup_error: Option<String>,
+    /// The chats the Mac pins, in order.
     #[serde(skip)]
     pub mac_ids: Vec<ChatId>,
+    /// What the state file records as "pinned because the Mac pinned it":
+    /// Mac pins that were not pinned here before the sync (or already came
+    /// from the Mac), plus `kept_unmapped`. A chat the user pinned here
+    /// before the Mac did stays the user's pin.
+    #[serde(skip)]
+    pub state_ids: Vec<ChatId>,
+}
+
+/// The Mac's side of a pin sync.
+#[derive(Debug, Clone, Default)]
+pub struct MacPins {
+    /// `pD.pP`, in order.
+    pub pins: Vec<String>,
+    /// chat.db rows for the pins that are not addresses.
+    pub pin_chats: Vec<PinChatRec>,
+    /// chat.db could not be read for that lookup.
+    pub lookup_error: Option<String>,
 }
 
 impl PinPlan {
@@ -298,16 +331,11 @@ impl PinPlan {
 /// chats pinned here that the Mac does not pin stay pinned after them,
 /// unless they are pinned only because an earlier sync copied them from
 /// the Mac (`last_mac`) and the Mac has unpinned them since. Pins that
-/// map to no chat of the daemon are reported, not created.
-pub(crate) fn plan_pins(
-    pins: &[String],
-    pin_chats: &[PinChatRec],
-    me: &Me,
-    our: Option<&str>,
-    known: &BTreeSet<ChatId>,
-    current: &[ChatId],
-    last_mac: &[ChatId],
-) -> PinPlan {
+/// map to no chat of the daemon are reported, not created. When any Mac
+/// pin cannot be mapped (or chat.db could not be read), nothing an earlier
+/// sync pinned is unpinned: it may be that pin.
+pub(crate) fn plan_pins(mac: &MacPins, me: &Me, our: Option<&str>, known: &BTreeSet<ChatId>, current: &[ChatId], last_mac: &[ChatId]) -> PinPlan {
+    let (pins, pin_chats) = (&mac.pins, &mac.pin_chats);
     let mut plan = PinPlan::default();
     for pin in pins {
         let mut row = PinRow { pin: pin.clone(), chat_id: None, result: String::new(), detail: String::new() };
@@ -327,14 +355,23 @@ pub(crate) fn plan_pins(
         }
         plan.mac.push(row);
     }
+    plan.lookup_error = mac.lookup_error.clone();
+    let uncertain = mac.lookup_error.is_some() || plan.mac.iter().any(|r| r.result == "unknown");
+    let mut kept = vec![];
     for c in current.iter().filter(|c| !plan.mac_ids.contains(c)) {
-        if last_mac.contains(c) {
-            plan.unpin.push(c.0.clone());
-        } else {
+        if !last_mac.contains(c) {
             plan.kept_local.push(c.0.clone());
+        } else if uncertain {
+            plan.kept_unmapped.push(c.0.clone());
+        } else {
+            plan.unpin.push(c.0.clone());
+            continue;
         }
+        kept.push(c.0.clone());
     }
-    plan.order = plan.mac_ids.iter().map(|c| c.0.clone()).chain(plan.kept_local.iter().cloned()).collect();
+    plan.state_ids = plan.mac_ids.iter().filter(|c| !current.contains(c) || last_mac.contains(c)).cloned().collect();
+    plan.state_ids.extend(plan.kept_unmapped.iter().map(|c| ChatId(c.clone())));
+    plan.order = plan.mac_ids.iter().map(|c| c.0.clone()).chain(kept).collect();
     plan
 }
 
@@ -349,12 +386,17 @@ fn pins_state_path() -> PathBuf {
     imessage_common::paths::imsg_state_dir().join(PINS_STATE_FILE)
 }
 
-fn load_pins_state() -> Vec<ChatId> {
-    std::fs::read(pins_state_path())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<PinsState>(&b).ok())
+/// The chats the last sync from `host` pinned because that Mac had them;
+/// none after a sync from another host (or none yet).
+fn pins_state_for(raw: Option<&[u8]>, host: &str) -> Vec<ChatId> {
+    raw.and_then(|b| serde_json::from_slice::<PinsState>(b).ok())
+        .filter(|s| s.host == host)
         .map(|s| s.chats.into_iter().map(ChatId).collect())
         .unwrap_or_default()
+}
+
+fn load_pins_state(host: &str) -> Vec<ChatId> {
+    pins_state_for(std::fs::read(pins_state_path()).ok().as_deref(), host)
 }
 
 fn save_pins_state(host: &str, ids: &[ChatId]) -> anyhow::Result<()> {
@@ -436,7 +478,24 @@ fn pick_host(arg: Option<String>, mac_host: Option<String>, anisette_host: Optio
     Ok(h)
 }
 
+/// Runs the sync. With `--json`, a failure before the parts are applied
+/// (no host, daemon down, ssh / tar failure, no `sync.json`) is printed
+/// as `{"host": …, "error": "…"}` on stdout too (exit code as without
+/// `--json`), so a caller has one thing to parse.
 pub async fn run(args: SyncArgs, state_dir: &Path, ctx: &Ctx) -> anyhow::Result<u8> {
+    let mut host = args.host.clone();
+    let r = run_inner(args, state_dir, ctx, &mut host).await;
+    match r {
+        Err(e) if ctx.json => {
+            let code = e.downcast_ref::<CliError>().map(|c| c.code).unwrap_or(exit::ERROR);
+            println!("{}", serde_json::json!({ "host": host, "error": format!("{e:#}") }));
+            Ok(code)
+        }
+        other => other,
+    }
+}
+
+async fn run_inner(args: SyncArgs, state_dir: &Path, ctx: &Ctx, host_out: &mut Option<String>) -> anyhow::Result<u8> {
     let (want_contacts, want_pins, want_backgrounds) = args.sections();
     // Pins and backgrounds go through the daemon; contacts only need it
     // for `mac_host`.
@@ -452,6 +511,7 @@ pub async fn run(args: SyncArgs, state_dir: &Path, ctx: &Ctx) -> anyhow::Result<
     };
     let anisette_host = crate::local::anisette_command(state_dir).and_then(|c| imessage_common::ssh::host_of_command(&c));
     let host = pick_host(args.host.clone(), daemon.as_ref().and_then(|d| d.mac_host.clone()), anisette_host)?;
+    *host_out = Some(host.clone());
     let contacts_dir = args.contacts_dir.clone().unwrap_or_else(imessage_common::paths::kpeople_vcard_dir);
 
     let run_id = format!("sync-{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), std::process::id());
@@ -540,24 +600,29 @@ async fn apply(
     Ok(s)
 }
 
+/// The exported `pins.plist` (a regular file at the stage's top, not a
+/// symlink a tar member could plant), parsed.
+fn read_pins_file(stage: &Path, f: &str) -> anyhow::Result<Vec<String>> {
+    let path = stage.join("pins.plist");
+    if f != "pins.plist" || !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+        anyhow::bail!("{f}: not in the export");
+    }
+    parse_pins(&std::fs::read(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?)
+}
+
 async fn apply_pins(args: &SyncArgs, host: &str, stage: &Path, meta: &SyncMeta, d: &DaemonView) -> anyhow::Result<PinPlan> {
     let pins = match meta.pins.as_ref().and_then(|m| m.file.as_deref()) {
-        Some(f) => {
-            let path = stage.join("pins.plist");
-            if f != "pins.plist" || !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
-                anyhow::bail!("{f}: not in the export");
-            }
-            parse_pins(&std::fs::read(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?)?
-        }
+        Some(f) => read_pins_file(stage, f)?,
         None => vec![], // no pinning preferences on the Mac: nothing pinned there
     };
+    let mac = MacPins { pins, pin_chats: meta.pin_chats.clone(), lookup_error: meta.pins.as_ref().and_then(|m| m.lookup_error.clone()) };
     let chats = d.client.all_chats().await?;
     let known: BTreeSet<ChatId> = chats.iter().map(|c| c.id.clone()).collect();
     let mut pinned: Vec<&imessage_common::model::Chat> = chats.iter().filter(|c| c.pinned).collect();
     pinned.sort_by_key(|c| (c.pin_order.unwrap_or(u32::MAX), c.id.0.clone()));
     let current: Vec<ChatId> = pinned.iter().map(|c| c.id.clone()).collect();
     let me = Me::new(&d.my_handles, std::iter::empty());
-    let mut plan = plan_pins(&pins, &meta.pin_chats, &me, d.our.as_deref(), &known, &current, &load_pins_state());
+    let mut plan = plan_pins(&mac, &me, d.our.as_deref(), &known, &current, &load_pins_state(host));
     if args.dry_run {
         plan.mac.iter_mut().filter(|r| r.result == "pinned").for_each(|r| r.result = "would-pin".into());
         return Ok(plan);
@@ -568,7 +633,7 @@ async fn apply_pins(args: &SyncArgs, host: &str, stage: &Path, meta: &SyncMeta, 
         }
         d.client.reorder_pins(&plan.order).await?;
     }
-    save_pins_state(host, &plan.mac_ids)?;
+    save_pins_state(host, &plan.state_ids)?;
     Ok(plan)
 }
 
@@ -625,6 +690,12 @@ fn summary_text(s: &Summary, quiet: bool) -> String {
                 }
                 for u in &p.unpin {
                     let _ = writeln!(out, "  {u}  {}", would("unpinned", "unpinned"));
+                }
+                if let Some(e) = &p.lookup_error {
+                    let _ = writeln!(out, "  (the Mac's chat.db could not be read to look group pins up: {e})");
+                }
+                for k in &p.kept_unmapped {
+                    let _ = writeln!(out, "  {k}  kept (could not be mapped this time)");
                 }
             }
         }
@@ -745,39 +816,101 @@ mod tests {
             ids(&["tel:+12055550100", "mailto:bob@example.com", "mailto:carol@example.com", "mailto:dave@example.com", "mailto:erin@example.com"])
                 .into_iter()
                 .collect();
-        let pins: Vec<String> =
-            ["mailto:bob@example.com", "+1 (205) 555-0100", "2055550100", "frank@example.com", "x!"].iter().map(|s| s.to_string()).collect();
+        let mac = |p: &[&str]| MacPins { pins: p.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let pins = mac(&["mailto:bob@example.com", "+1 (205) 555-0100", "2055550100", "frank@example.com"]);
         // carol: pinned locally; dave: pinned by the last sync, unpinned on the Mac since; bob: pinned here too
         let current = ids(&["mailto:carol@example.com", "mailto:bob@example.com", "mailto:dave@example.com"]);
         let last = ids(&["mailto:dave@example.com", "mailto:bob@example.com"]);
-        let p = plan_pins(&pins, &[], &me, None, &known, &current, &last);
+        let p = plan_pins(&pins, &me, None, &known, &current, &last);
         let results: Vec<(&str, &str)> = p.mac.iter().map(|r| (r.pin.as_str(), r.result.as_str())).collect();
         assert_eq!(
             results,
-            [
-                ("mailto:bob@example.com", "pinned"),
-                ("+1 (205) 555-0100", "pinned"),
-                ("2055550100", "duplicate"),
-                ("frank@example.com", "not-in-daemon"),
-                ("x!", "unknown")
-            ]
+            [("mailto:bob@example.com", "pinned"), ("+1 (205) 555-0100", "pinned"), ("2055550100", "duplicate"), ("frank@example.com", "not-in-daemon")]
         );
         assert_eq!(p.order, ["mailto:bob@example.com", "tel:+12055550100", "mailto:carol@example.com"]);
         assert_eq!(p.kept_local, ["mailto:carol@example.com"]);
         assert_eq!(p.unpin, ["mailto:dave@example.com"]);
+        assert!(p.kept_unmapped.is_empty());
         assert_eq!(p.mac_ids, ids(&["mailto:bob@example.com", "tel:+12055550100"]));
+        assert_eq!(p.state_ids, ids(&["mailto:bob@example.com", "tel:+12055550100"]));
         assert!(p.changes(&current));
         // applying it again changes nothing
         let after = ids(&["mailto:bob@example.com", "tel:+12055550100", "mailto:carol@example.com"]);
-        let again = plan_pins(&pins, &[], &me, None, &known, &after, &p.mac_ids);
+        let again = plan_pins(&pins, &me, None, &known, &after, &p.state_ids);
         assert!(!again.changes(&after));
         assert_eq!(again.order, p.order);
         // the Mac pins nothing: only the synced pins go
-        let none = plan_pins(&[], &[], &me, None, &known, &after, &p.mac_ids);
+        let none = plan_pins(&mac(&[]), &me, None, &known, &after, &p.state_ids);
         assert_eq!(
             (none.order.clone(), none.unpin.clone()),
             (vec!["mailto:carol@example.com".to_string()], vec!["mailto:bob@example.com".to_string(), "tel:+12055550100".to_string()])
         );
+
+        // M2: a chat pinned here before the Mac pinned it stays the user's pin
+        let current = ids(&["mailto:carol@example.com"]);
+        let p = plan_pins(&mac(&["carol@example.com", "bob@example.com"]), &me, None, &known, &current, &[]);
+        assert_eq!(p.order, ["mailto:carol@example.com", "mailto:bob@example.com"]);
+        assert_eq!(p.state_ids, ids(&["mailto:bob@example.com"]), "carol was the user's pin before");
+        let later = plan_pins(&mac(&[]), &me, None, &known, &ids(&["mailto:carol@example.com", "mailto:bob@example.com"]), &p.state_ids);
+        assert_eq!((later.unpin.clone(), later.order.clone()), (vec!["mailto:bob@example.com".to_string()], vec!["mailto:carol@example.com".to_string()]));
+        // a Mac pin already recorded as the Mac's stays recorded
+        let p = plan_pins(&mac(&["bob@example.com"]), &me, None, &known, &ids(&["mailto:bob@example.com"]), &ids(&["mailto:bob@example.com"]));
+        assert_eq!(p.state_ids, ids(&["mailto:bob@example.com"]));
+    }
+
+    /// M1: a group pin that cannot be mapped this time (chat.db unreadable,
+    /// or an unknown pin) never unpins what an earlier sync pinned.
+    #[test]
+    fn unmapped_pins_keep_synced_pins() {
+        let me = Me::new(&["mailto:me@example.com".into()], std::iter::empty());
+        let known: BTreeSet<ChatId> = ids(&["group:X", "mailto:bob@example.com"]).into_iter().collect();
+        let current = ids(&["group:X", "mailto:bob@example.com"]);
+        let last = ids(&["group:X", "mailto:bob@example.com"]);
+        let m = MacPins { pins: vec!["chat123".into()], pin_chats: vec![], lookup_error: None };
+        let p = plan_pins(&m, &me, None, &known, &current, &last);
+        assert_eq!(p.mac[0].result, "unknown");
+        assert!(p.unpin.is_empty(), "{p:?}");
+        assert_eq!(p.kept_unmapped, ["group:X", "mailto:bob@example.com"]);
+        assert_eq!(p.order, ["group:X", "mailto:bob@example.com"]);
+        assert!(!p.changes(&current));
+        assert_eq!(p.state_ids, last, "still the Mac's for the next sync");
+        let t = summary_text(&Summary { host: "m".into(), dry_run: false, contacts: None, pins: Some(Section::Ok(p)), backgrounds: None }, false);
+        assert!(t.contains("group:X  kept (could not be mapped this time)"), "{t}");
+        // the lookup failed on the Mac: same, and reported
+        let m = MacPins { pins: vec!["bob@example.com".into()], pin_chats: vec![], lookup_error: Some("database is locked".into()) };
+        let p = plan_pins(&m, &me, None, &known, &current, &last);
+        assert!(p.unpin.is_empty());
+        assert_eq!(p.kept_unmapped, ["group:X"]);
+        assert_eq!(serde_json::to_value(&p).unwrap()["lookup_error"], "database is locked");
+        // both mapped fine: group:X goes
+        let m = MacPins { pins: vec!["bob@example.com".into()], ..Default::default() };
+        assert_eq!(plan_pins(&m, &me, None, &known, &current, &last).unpin, ["group:X"]);
+    }
+
+    #[test]
+    fn pins_state_is_per_host() {
+        let raw = br#"{"host":"mac.local","chats":["mailto:bob@example.com"]}"#;
+        assert_eq!(pins_state_for(Some(raw), "mac.local"), ids(&["mailto:bob@example.com"]));
+        assert!(pins_state_for(Some(raw), "other.local").is_empty(), "another Mac: no previous sync");
+        assert!(pins_state_for(None, "mac.local").is_empty());
+        assert!(pins_state_for(Some(b"junk"), "mac.local").is_empty());
+    }
+
+    #[test]
+    fn pins_file_must_be_a_plain_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let xml =
+            b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>pD</key><dict><key>pP</key><array><string>a@b.c</string></array></dict></dict></plist>";
+        let outside = tmp.path().join("outside.plist");
+        std::fs::write(&outside, xml).unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::os::unix::fs::symlink(&outside, stage.join("pins.plist")).unwrap();
+        assert!(read_pins_file(&stage, "pins.plist").unwrap_err().to_string().contains("not in the export"));
+        std::fs::remove_file(stage.join("pins.plist")).unwrap();
+        std::fs::write(stage.join("pins.plist"), xml).unwrap();
+        assert_eq!(read_pins_file(&stage, "pins.plist").unwrap(), ["a@b.c"]);
+        assert!(read_pins_file(&stage, "../outside.plist").is_err());
     }
 
     #[test]
@@ -821,6 +954,15 @@ mod tests {
         assert!(apply_contacts(&empty, &dir, 0, false).unwrap_err().to_string().contains("left unchanged"));
         assert!(apply_contacts(&tmp.path().join("missing"), &dir, 0, false).is_err());
         assert!(dir.join("mac-A.vcf").exists());
+        // a `contacts` symlinked to a directory outside the stage is refused
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("mac-Z.vcf"), "Z").unwrap();
+        let linked = tmp.path().join("stage2/contacts");
+        std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        assert!(apply_contacts(&linked, &dir, 0, false).unwrap_err().to_string().contains("not a plain directory"));
+        assert!(!dir.join("mac-Z.vcf").exists() && dir.join("mac-A.vcf").exists());
         // a new folder is created
         let fresh = tmp.path().join("new/kpeoplevcard");
         assert_eq!(apply_contacts(&staged, &fresh, 0, false).unwrap().written, 3);

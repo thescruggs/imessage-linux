@@ -239,7 +239,8 @@ impl Daemon1 {
     }
 
     /// Pin (`pinned`) or unpin a chat, locally. `order`: position among
-    /// the pins, 0 = first; negative = last. -> the updated Chat JSON.
+    /// the pins, 0 = first; negative = last for a new pin, where it is for
+    /// an already pinned one. -> the updated Chat JSON.
     async fn set_chat_pinned(&self, chat_id: &str, pinned: bool, order: i32) -> Result<String> {
         let order = u32::try_from(order).ok();
         Ok(to_json(&self.hub.set_chat_pinned(chat_id, pinned, order).await?))

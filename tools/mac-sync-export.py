@@ -17,11 +17,14 @@ Sections (each only when asked for; one failing does not stop the others):
                  (JPEG, at most 256 px, shrunk with sips), named
                  contacts/mac-<uid>.vcf. Same output as the former
                  tools/mac-contacts-export.sh.
-  --pins         ~/Library/Preferences/com.apple.messages.pinning.plist as
-                 XML (`plutil -convert xml1`), the pinned conversations in
-                 order (pD.pP: phone numbers, email addresses, group chat
-                 ids). Pins that are not an address are looked up in
-                 chat.db (best effort) so the receiving side can map them.
+  --pins         the pinning preferences as XML (`defaults export
+                 com.apple.messages.pinning`, else ~/Library/Preferences/
+                 com.apple.messages.pinning.plist via `plutil -convert
+                 xml1`), the pinned conversations in order (pD.pP: phone
+                 numbers, email addresses, group chat ids). Pins that are
+                 not an address are looked up in chat.db so the receiving
+                 side can map them; if chat.db cannot be read that is
+                 reported as pins.lookup_error.
   --backgrounds  the chats' transcript backgrounds, exactly as
                  tools/mac-backgrounds-export.py writes them.
 
@@ -243,23 +246,29 @@ def export_contacts(tar, ab):
 # ---------------------------------------------------------------------------
 
 def pinning_xml(path):
-    """The pinning preferences as an XML plist: `plutil -convert xml1` of
-    the file, else `defaults export` (cfprefsd's current copy), else
-    plistlib (no plutil, e.g. in tests). None if there are none."""
-    if os.path.isfile(path):
+    """The pinning preferences as an XML plist, or None if there are none:
+    `defaults export` first (cfprefsd's current copy; the file on disk may
+    not be flushed yet), only for the real preferences file; else
+    `plutil -convert xml1` of the file; else plistlib (no plutil, e.g. in
+    tests)."""
+    if path == PINNING:
         try:
-            return subprocess.run(["plutil", "-convert", "xml1", "-o", "-", path], check=True,
-                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
-        except (OSError, subprocess.CalledProcessError):
+            out = subprocess.run(["defaults", "export", PINNING_DOMAIN, "-"], check=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+            p = plistlib.loads(out) if out else None
+            if isinstance(p, dict) and "pD" in p:
+                return out
+        except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException, ValueError):
             pass
-        with open(path, "rb") as f:
-            return plistlib.dumps(plistlib.load(f), fmt=plistlib.FMT_XML)
-    try:
-        out = subprocess.run(["defaults", "export", PINNING_DOMAIN, "-"], check=True,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
-        return out or None
-    except (OSError, subprocess.CalledProcessError):
+    if not os.path.isfile(path):
         return None
+    try:
+        return subprocess.run(["plutil", "-convert", "xml1", "-o", "-", path], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    with open(path, "rb") as f:
+        return plistlib.dumps(plistlib.load(f), fmt=plistlib.FMT_XML)
 
 
 def pin_list(xml):
@@ -278,10 +287,12 @@ def looks_like_address(s):
 def pin_chats(db_path, pins):
     """chat.db rows for pins that are not an address (group chat ids),
     with their participants, so they can be mapped like the history
-    import does. Best effort: [] when chat.db cannot be read."""
+    import does. Returns (rows, error): error says why chat.db could not
+    be read (then rows is [] and the receiving side must not take an
+    unmapped pin as "not pinned any more")."""
     wanted = [p for p in pins if not looks_like_address(p)]
     if not wanted:
-        return []
+        return [], None
     try:
         db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(db_path), uri=True)
         out = []
@@ -298,10 +309,10 @@ def pin_chats(db_path, pins):
                 (rowid,))]
             out.append({"pin": pin, "rowid": rowid, "chat_identifier": ident or "", "style": style or 0,
                         "display_name": name or None, "group_id": gid or None, "participants": parts})
-        return out
+        return out, None
     except sqlite3.Error as e:
         sys.stderr.write("mac-sync-export: cannot look pinned group chats up in %s: %s\n" % (db_path, e))
-        return []
+        return [], "%s: %s (give the ssh session Full Disk Access)" % (type(e).__name__, e)
 
 
 def export_pins(tar, pinning, db_path):
@@ -310,7 +321,11 @@ def export_pins(tar, pinning, db_path):
         return {"count": 0, "file": None}, []
     pins = pin_list(xml)
     add_bytes(tar, "pins.plist", xml)
-    return {"count": len(pins), "file": "pins.plist"}, pin_chats(db_path, pins)
+    rows, error = pin_chats(db_path, pins)
+    meta = {"count": len(pins), "file": "pins.plist"}
+    if error:
+        meta["lookup_error"] = error
+    return meta, rows
 
 
 # ---------------------------------------------------------------------------

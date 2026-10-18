@@ -791,8 +791,9 @@ impl Store {
     }
 
     /// Pin (`pinned`) or unpin a chat. A pin goes to position `order`
-    /// among the pins (0 = first; `None` or past the end = last), the
-    /// others move down; pinning an already pinned chat moves it. Pin
+    /// among the pins (0 = first; past the end = last), the others move
+    /// down; `None` = last for a new pin, while an already pinned chat
+    /// stays where it is (only an explicit `order` moves it). Pin
     /// orders are renumbered 0, 1, 2, ... Returns a `ChatUpdated` for
     /// every chat whose pin state or position changed (none if nothing
     /// did). `NotFound` for an unknown chat.
@@ -801,9 +802,15 @@ impl Store {
             let was: Option<Option<i64>> = tx.query_row("SELECT pinned_at FROM chats WHERE id = ?1", params![id.0], |r| r.get(0)).optional()?;
             let Some(was) = was else { return Err(StoreError::NotFound(format!("chat {id}"))) };
             let before = pin_state(tx)?;
-            let mut ids: Vec<ChatId> = pinned_ids(tx)?.into_iter().filter(|p| p != id).collect();
+            let all = pinned_ids(tx)?;
+            let old_pos = all.iter().position(|p| p == id);
+            let mut ids: Vec<ChatId> = all.into_iter().filter(|p| p != id).collect();
             if pinned {
-                let at = order.map_or(ids.len(), |o| (o as usize).min(ids.len()));
+                let at = match (order, old_pos) {
+                    (Some(o), _) => (o as usize).min(ids.len()),
+                    (None, Some(p)) => p, // already pinned: stays where it is
+                    (None, None) => ids.len(),
+                };
                 ids.insert(at, id.clone());
                 if was.is_none() {
                     tx.execute("UPDATE chats SET pinned_at = ?2 WHERE id = ?1", params![id.0, now_ms()])?;

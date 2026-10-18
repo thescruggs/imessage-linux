@@ -603,9 +603,12 @@ class FakeDaemon(dbus.service.Object):
     def SetChatPinned(self, chat_id, pinned, order):
         self.log("SetChatPinned", chat_id, bool(pinned), int(order))
         self.chat(chat_id)
-        ids = [i for i in self.pinned_ids() if i != chat_id]
+        old = self.pinned_ids()
+        ids = [i for i in old if i != chat_id]
         if pinned:
-            ids.insert(len(ids) if order < 0 else min(int(order), len(ids)), chat_id)
+            # negative order: last for a new pin, where it is for a pinned chat
+            at = old.index(chat_id) if order < 0 and chat_id in old else len(ids) if order < 0 else min(int(order), len(ids))
+            ids.insert(at, chat_id)
         self.apply_pins(ids)
         return dumps(self.chat(chat_id))
 
@@ -616,6 +619,8 @@ class FakeDaemon(dbus.service.Object):
             first = json.loads(chat_ids_json) if chat_ids_json.strip() else []
         except ValueError as e:
             raise Error("InvalidInput", f"chat_ids_json: {e}")
+        if not isinstance(first, list) or not all(isinstance(i, str) for i in first):
+            raise Error("InvalidInput", "chat_ids_json: expected a JSON array of strings")
         for cid in first:
             self.chat(cid)
         first = list(dict.fromkeys(first))

@@ -924,6 +924,9 @@ fn pins() {
     // the same again: no change, no signal
     assert!(s.set_chat_pinned(&dave, true, Some(2)).unwrap().is_empty());
     assert!(s.set_chat_pinned(&dave, true, None).unwrap().is_empty());
+    // no order on an already pinned chat: it stays where it is (bob is in the middle)
+    assert!(s.set_chat_pinned(&bob, true, None).unwrap().is_empty());
+    assert_eq!(order(&s)[1].0, BOB);
     // unpin the middle one: the rest close up
     let u = s.set_chat_pinned(&bob, false, None).unwrap();
     assert_eq!(changed(&u), vec![BOB.to_string(), "tel:+15551234567".to_string()]);

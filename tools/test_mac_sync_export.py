@@ -200,10 +200,16 @@ class Pins(unittest.TestCase):
                                               "display_name": "Team", "group_id": "ABCD-0000-1111",
                                               "participants": ["bob@example.com", "carol@example.com"]}])
 
+    def test_unreadable_chat_db_is_reported(self):
+        os.remove(os.path.join(self.tmp.name, "Library", "Messages", "chat.db"))
+        meta, files = run_export(self.tmp.name, pins=True)
+        self.assertEqual(meta["pin_chats"], [])
+        self.assertIn("lookup_error", meta["pins"])
+        self.assertEqual(meta["pins"]["count"], 5)
+        self.assertIn("pins.plist", files)
+
     def test_no_pins_file(self):
         meta, files = run_export(self.tmp.name, pins=True, pinning=os.path.join(self.tmp.name, "nope.plist"))
-        if mse.shutil.which("defaults"):
-            self.skipTest("on a Mac `defaults export` answers")
         self.assertEqual(meta["pins"], {"count": 0, "file": None})
         self.assertNotIn("pins.plist", files)
 

@@ -482,8 +482,8 @@ impl Client {
         parse("chat", self.proxy.import_chat_background(chat_id, path).await.map_err(map_zbus)?)
     }
 
-    /// `SetChatPinned`: `order` = position among the pins (0 = first),
-    /// `None` = last.
+    /// `SetChatPinned`: `order` = position among the pins (0 = first);
+    /// `None` = last for a new pin, unchanged for a pinned one.
     pub async fn set_chat_pinned(&self, chat_id: &str, pinned: bool, order: Option<u32>) -> Result<Json<Chat>> {
         let order = order.and_then(|o| i32::try_from(o).ok()).unwrap_or(-1);
         parse("chat", self.proxy.set_chat_pinned(chat_id, pinned, order).await.map_err(map_zbus)?)

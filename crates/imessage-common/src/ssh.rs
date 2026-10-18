@@ -72,5 +72,8 @@ mod tests {
         assert_eq!(h("printf '{}'"), None);
         assert_eq!(h("ssh -F cfg"), None);
         assert_eq!(h("ssh 'quoted host' x"), None);
+        // Quoting is not interpreted: an option value with spaces is
+        // explicitly unsupported (no host rather than a wrong one).
+        assert_eq!(h("ssh -o ProxyCommand=\"ssh -W %h:%p jump\" mac.local x"), None);
     }
 }

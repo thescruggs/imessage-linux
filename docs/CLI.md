@@ -300,7 +300,8 @@ background (id, version, who set it, the image file), the group photo's
 file and the participants' shared photos.
 
 `--pin` pins the chat to the top of the chat list (kmessages shows pinned
-chats first), as the last pin or at `--position N` (1 = first); `--unpin`
+chats first), as the last pin or at `--position N` (1 = first; without
+it an already pinned chat stays where it is); `--unpin`
 unpins it. Pins are local to this computer (the daemon's
 `SetChatPinned`); [`sync-mac`](#sync-mac-host---contacts---pins---backgrounds---dry-run)
 copies the Mac's. They print `pinned <id>` / `unpinned <id>`; `--json`
@@ -520,8 +521,9 @@ touched. If the Mac sends no contacts, nothing changes. The contacts part
 works without the daemon (given `HOST`).
 
 **Pins.** The Mac's pinned conversations
-(`~/Library/Preferences/com.apple.messages.pinning.plist`, `pD.pP`,
-converted with `plutil -convert xml1`), in order. Each is mapped to the
+(`defaults export com.apple.messages.pinning`, else
+`~/Library/Preferences/com.apple.messages.pinning.plist` converted with
+`plutil -convert xml1`; `pD.pP`), in order. Each is mapped to the
 daemon's chat: a phone number or email address is the 1:1 chat
 (`tel:+1…` / `mailto:…`; bare national numbers get `+1`, as in
 `import-mac`), a group chat id is looked up in the Mac's `chat.db` and
@@ -529,11 +531,17 @@ mapped like the history import (`group:<GROUP_ID>`), a group GUID is
 `group:<GUID>`. Pins whose chat the daemon does not have are reported
 (`not-in-daemon`, not created), as are pins that cannot be mapped
 (`unknown`). The Mac's pins then come first, in its order; chats you
-pinned here that the Mac does not pin stay pinned after them; a chat that
-an earlier sync pinned because the Mac had it, and that the Mac no longer
-pins, is unpinned. (`imsg` remembers which pins came from the Mac in
-`~/.local/state/imsg/mac-pins.json`.) Applied with `SetChatPinned` /
-`ReorderPins`; nothing is sent to Apple.
+pinned here that the Mac does not pin stay pinned after them (also when
+the Mac pinned them later: a chat you pinned here first stays your pin); a
+chat that an earlier sync pinned because the Mac had it, and that the Mac
+no longer pins, is unpinned, except while some Mac pin cannot be mapped
+(`unknown`) or the Mac's `chat.db` could not be read to look group pins up
+(`lookup_error`): then such chats are kept ("kept (could not be mapped
+this time)", `kept_unmapped`) rather than risk unpinning a pin the Mac
+still has. `imsg` remembers which pins came from the Mac, and from which
+host, in `~/.local/state/imsg/mac-pins.json`; a sync from another host
+starts afresh (nothing is unpinned on its first run). Applied with
+`SetChatPinned` / `ReorderPins`; nothing is sent to Apple.
 
 **Backgrounds.** As [`import-mac --backgrounds`](#import-mac-host---backgrounds---chat-chat---create---max-total-mb-mb---dry-run)
 without `--chat` / `--create` (chats the daemon does not have are
@@ -556,11 +564,18 @@ pins         3 on the Mac: 2 pinned, 1 not found; 1 local pin(s) kept, 0 unpinne
 Exit code 1 when a requested part failed (e.g. no Full Disk Access: the
 script's message is shown). `--json`: one object
 `{"host","dry_run","contacts":{"dir","received","photos","written","unchanged","removed"},
-"pins":{"mac":[{"pin","chat_id","result","detail"}],"order":[…],"kept_local":[…],"unpin":[…]},
+"pins":{"mac":[{"pin","chat_id","result","detail"}],"order":[…],"kept_local":[…],"unpin":[…],"kept_unmapped":[…],"lookup_error":"…"},
 "backgrounds":{"chats":[…as import-mac --backgrounds…]}}`, with
 `{"error": "…"}` in place of a part that failed and parts not asked for
-left out. Pin results: `pinned` (`would-pin` in a dry run), `duplicate`,
-`not-in-daemon`, `unknown`.
+left out (`kept_unmapped` and `lookup_error` only when there are any).
+Pin results: `pinned` (`would-pin` in a dry run), `duplicate`,
+`not-in-daemon`, `unknown`. A failure before any part is applied (no
+host, daemon not running when pins or backgrounds are asked for, ssh or
+the transfer failing, no `sync.json`) prints `{"host": "…" | null,
+"error": "…"}` on stdout with `--json` (exit code as without `--json`:
+2 usage, 5 no daemon, else 1), so a caller only parses stdout. `imsg`'s
+own messages go to stderr only in human mode; the Mac script's and ssh's
+diagnostics are passed through to stderr in both modes.
 
 ### `store purge-invalid-chats [--yes]`
 

@@ -578,7 +578,7 @@ impl Hub {
     }
 
     /// Pin or unpin a chat (local only). `order`: position among the pins
-    /// (0 = first), `None` = last. Emits `ChatUpdated` for every chat whose
+    /// (0 = first); `None` = last for a new pin, unchanged for a pinned one. Emits `ChatUpdated` for every chat whose
     /// pin changed and returns the chat.
     pub async fn set_chat_pinned(self: &Arc<Self>, chat_id: &str, pinned: bool, order: Option<u32>) -> OpResult<Chat> {
         let id = ChatId(chat_id.to_string());

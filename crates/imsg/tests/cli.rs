@@ -426,35 +426,75 @@ async fn pin_and_unpin() {
     h.shutdown().await;
 }
 
-/// `sync-mac` end to end: a fake `ssh` on PATH runs the embedded exporter
-/// locally against a synthetic Mac home (tools/test_mac_sync_export.py
-/// builds it). Skipped without python3.
+/// A synthetic Mac (tools/test_mac_sync_export.py builds its home) and
+/// a fake `ssh` on PATH that runs the remote command locally with HOME
+/// set to it; host `failmac` fails like an unreachable Mac. `None`
+/// without python3.
+struct FakeMac {
+    t: tempfile::TempDir,
+    mac: std::path::PathBuf,
+    data: std::path::PathBuf,
+    state: std::path::PathBuf,
+    path: String,
+}
+
+impl FakeMac {
+    fn new() -> Option<FakeMac> {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("SKIP: python3 not found");
+            return None;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let (mac, bin) = (t.path().join("mac"), t.path().join("bin"));
+        for d in [&mac, &bin, &t.path().join("home")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let maker = t.path().join("test_mac_sync_export.py");
+        std::fs::write(&maker, include_str!("../../../tools/test_mac_sync_export.py")).unwrap();
+        std::fs::write(t.path().join("mac-sync-export.py"), include_str!("../../../tools/mac-sync-export.py")).unwrap();
+        std::fs::write(t.path().join("mac-backgrounds-export.py"), include_str!("../../../tools/mac-backgrounds-export.py")).unwrap();
+        let st = std::process::Command::new("python3").arg("-I").arg(&maker).arg(t.path().join("mac-sync-export.py")).arg("--make-home").arg(&mac).status().unwrap();
+        assert!(st.success());
+        // ssh [-F x] [-o x]... HOST CMD...  ->  HOME=<mac> sh -c "CMD..."
+        let ssh = bin.join("ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -F|-o) shift 2 ;; *) break ;; esac; done\n\
+             host=\"$1\"; shift\n[ \"$host\" = failmac ] && { echo 'ssh: connect to host failmac: refused' >&2; exit 255; }\n\
+             cmd=\"$*\"; HOME=\"$FAKE_MAC_HOME\" exec sh -c \"${cmd#/usr/bin/}\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        Some(FakeMac { data: t.path().join("data"), state: t.path().join("state"), mac, path, t })
+    }
+
+    fn env(&self, c: &mut tokio::process::Command) {
+        c.env("PATH", &self.path)
+            .env("FAKE_MAC_HOME", &self.mac)
+            .env("HOME", self.t.path().join("home"))
+            .env("XDG_DATA_HOME", &self.data)
+            .env("XDG_STATE_HOME", &self.state)
+            .env("XDG_CACHE_HOME", self.t.path().join("cache"));
+    }
+
+    fn set_mac_pins(&self, pins: &[&str]) {
+        let items: String = pins.iter().map(|p| format!("<string>{p}</string>")).collect();
+        let plist = self.mac.join("Library/Preferences/com.apple.messages.pinning.plist");
+        std::fs::write(plist, format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>pD</key><dict><key>pP</key><array>{items}</array></dict></dict></plist>")).unwrap();
+    }
+}
+
+/// `sync-mac` end to end against the fake Mac.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sync_mac_with_a_fake_ssh() {
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
-        return eprintln!("SKIP: python3 not found");
-    }
+    let Some(fake) = FakeMac::new() else { return };
     let Some(h) = Harness::logged_in().await else { return };
-    let t = tempfile::tempdir().unwrap();
-    let (mac, bin, data, state, cache, home) = (t.path().join("mac"), t.path().join("bin"), t.path().join("data"), t.path().join("state"), t.path().join("cache"), t.path().join("home"));
-    for d in [&mac, &bin, &home] {
-        std::fs::create_dir_all(d).unwrap();
-    }
-    let maker = t.path().join("test_mac_sync_export.py");
-    std::fs::write(&maker, include_str!("../../../tools/test_mac_sync_export.py")).unwrap();
-    std::fs::write(t.path().join("mac-sync-export.py"), include_str!("../../../tools/mac-sync-export.py")).unwrap();
-    std::fs::write(t.path().join("mac-backgrounds-export.py"), include_str!("../../../tools/mac-backgrounds-export.py")).unwrap();
-    let st = std::process::Command::new("python3").arg("-I").arg(&maker).arg(t.path().join("mac-sync-export.py")).arg("--make-home").arg(&mac).status().unwrap();
-    assert!(st.success());
-    // ssh [-F x] -o a -o b HOST python3 - ARGS  ->  HOME=<mac> python3 -I - ARGS
-    let ssh = bin.join("ssh");
-    std::fs::write(&ssh, "#!/bin/sh\nwhile [ $# -gt 0 ] && [ \"$1\" != python3 ]; do shift; done\nshift\nHOME=\"$FAKE_MAC_HOME\" exec python3 -I \"$@\"\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let data = fake.data.clone();
     let sync = |args: &[&str]| {
         let mut c = h.command(args);
-        c.env("PATH", &path).env("FAKE_MAC_HOME", &mac).env("HOME", &home).env("XDG_DATA_HOME", &data).env("XDG_STATE_HOME", &state).env("XDG_CACHE_HOME", &cache);
+        fake.env(&mut c);
         run(c, None)
     };
     for to in ["bob@example.com", "carol@example.com"] {
@@ -462,10 +502,18 @@ async fn sync_mac_with_a_fake_ssh() {
     }
     assert_eq!(h.run(&["chat", "carol@example.com", "--pin"]).await.code, 0);
 
-    // no HOST and no mac_host: usage error
+    // no HOST and no mac_host: usage error; with --json also on stdout
     let o = sync(&["sync-mac"]).await;
     assert_eq!(o.code, 2, "{}", o.stderr);
     assert!(o.stderr.contains("mac_host"), "{}", o.stderr);
+    let o = sync(&["sync-mac", "--json"]).await;
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert!(o.json()["host"].is_null() && o.json()["error"].as_str().unwrap().contains("mac_host"), "{}", o.stdout);
+    // ssh fails: --json reports it on stdout, exit 1
+    let o = sync(&["sync-mac", "failmac", "--json"]).await;
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert_eq!(o.json()["host"], "failmac");
+    assert!(o.json()["error"].as_str().unwrap().contains("failed"), "{}", o.stdout);
 
     // dry run: reports, changes nothing
     let o = sync(&["sync-mac", "fakemac", "--dry-run", "--json"]).await;
@@ -499,19 +547,26 @@ async fn sync_mac_with_a_fake_ssh() {
     let chats = h.run(&["chats", "--json"]).await.json();
     let order = |id: &str| chats.as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["pin_order"].as_u64();
     assert_eq!((order("mailto:bob@example.com"), order("mailto:carol@example.com")), (Some(0), Some(1)));
-    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(state.join("imsg/mac-pins.json")).unwrap()).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(fake.state.join("imsg/mac-pins.json")).unwrap()).unwrap();
     assert_eq!(saved["chats"], serde_json::json!(["mailto:bob@example.com"]));
 
-    // again: nothing to write; the Mac unpins bob -> unpinned here, carol stays
+    // again: nothing to write; the Mac unpins bob (pins only addresses
+    // now, so nothing is unmapped) -> unpinned here, carol stays
     let o = sync(&["sync-mac", "fakemac", "--contacts", "--json"]).await;
     assert_eq!((o.json()["contacts"]["unchanged"].as_u64(), o.json().get("pins").is_none()), (Some(6), true));
-    let plist = mac.join("Library/Preferences/com.apple.messages.pinning.plist");
-    std::fs::write(&plist, "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>pD</key><dict><key>pP</key><array/></dict></dict></plist>").unwrap();
+    fake.set_mac_pins(&["carol@example.com"]);
     let o = sync(&["sync-mac", "fakemac", "--pins", "--json"]).await;
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert_eq!(o.json()["pins"]["unpin"], serde_json::json!(["mailto:bob@example.com"]));
     assert_eq!(h.run(&["chat", "bob@example.com", "--json"]).await.json()["pinned"], false);
     assert_eq!(h.run(&["chat", "carol@example.com", "--json"]).await.json()["pin_order"], 0);
+    // carol was pinned here before the Mac pinned her: still the user's pin
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(fake.state.join("imsg/mac-pins.json")).unwrap()).unwrap();
+    assert_eq!(saved["chats"], serde_json::json!([]));
+    fake.set_mac_pins(&[]);
+    let o = sync(&["sync-mac", "fakemac", "--pins", "--json"]).await;
+    assert_eq!((o.json()["pins"]["unpin"].clone(), o.json()["pins"]["kept_local"].clone()), (serde_json::json!([]), serde_json::json!(["mailto:carol@example.com"])));
+    assert_eq!(h.run(&["chat", "carol@example.com", "--json"]).await.json()["pinned"], true);
 
     // backgrounds ride along in the same ssh trip (the fixture's chat is not in the daemon)
     let o = sync(&["sync-mac", "fakemac", "--backgrounds", "--json"]).await;
@@ -519,11 +574,55 @@ async fn sync_mac_with_a_fake_ssh() {
     assert_eq!(o.json()["backgrounds"]["chats"][0]["result"], "not-in-daemon");
 
     // a section failing on the Mac: reported, exit 1, the folder left alone
-    std::fs::remove_dir_all(mac.join("Library/Application Support/AddressBook")).unwrap();
+    std::fs::remove_dir_all(fake.mac.join("Library/Application Support/AddressBook")).unwrap();
     let o = sync(&["sync-mac", "fakemac", "--json"]).await;
     assert_eq!(o.code, 1, "{}", o.stderr);
     assert!(o.json()["contacts"]["error"].as_str().unwrap().contains("no Contacts database"));
     assert!(o.json()["pins"]["order"].is_array());
     assert!(vcf.exists());
     h.shutdown().await;
+}
+
+/// The contacts part needs no daemon when HOST is given; pins do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_mac_contacts_without_a_daemon() {
+    let Some(fake) = FakeMac::new() else { return };
+    let dir = fake.t.path().join("vcards");
+    let state = fake.t.path().join("imessaged");
+    let cmd = |args: &[&str]| {
+        let mut c = imsg_command("unix:path=/nonexistent/imsg-test-bus", &state, args);
+        fake.env(&mut c);
+        c
+    };
+    let o = run(cmd(&["sync-mac", "fakemac", "--contacts", "--contacts-dir", dir.to_str().unwrap()]), None).await;
+    assert_eq!(o.code, 0, "{} {}", o.stderr, o.stdout);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 6);
+    let o = run(cmd(&["sync-mac", "fakemac", "--pins", "--json"]), None).await;
+    assert_eq!(o.code, 5, "{}", o.stderr);
+    assert!(o.json()["error"].as_str().unwrap().contains("D-Bus"), "{}", o.stdout);
+}
+
+/// tools/mac-contacts-export.sh: through imsg when it is there, else the
+/// exporter directly; the same files either way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mac_contacts_export_wrapper() {
+    let Some(fake) = FakeMac::new() else { return };
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/mac-contacts-export.sh");
+    let (a, b) = (fake.t.path().join("via-imsg"), fake.t.path().join("fallback"));
+    for (imsg, out) in [(IMSG, &a), ("/nonexistent/imsg", &b)] {
+        let mut c = tokio::process::Command::new("bash");
+        c.arg(script).arg("fakemac").arg(out).env("IMSG", imsg).env("IMSG_BUS_ADDRESS", "unix:path=/nonexistent/imsg-test-bus");
+        c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        fake.env(&mut c);
+        let o = run(c, None).await;
+        assert_eq!(o.code, 0, "{imsg}: {} {}", o.stderr, o.stdout);
+    }
+    let names = |d: &std::path::Path| {
+        let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap()).map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).unwrap())).collect();
+        v.sort();
+        v
+    };
+    let (va, vb) = (names(&a), names(&b));
+    assert_eq!(va.len(), 6);
+    assert!(va == vb, "both branches write the same vCards");
 }

@@ -85,6 +85,10 @@ pub struct BgChatRec {
 
 pub fn read_records(stage: &Path) -> anyhow::Result<Vec<BgChatRec>> {
     let path = stage.join("backgrounds.jsonl");
+    // Plain files only: a tar member could have made it a symlink.
+    if !stage.symlink_metadata().is_ok_and(|m| m.is_dir()) || !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+        anyhow::bail!("{}: not a plain file in the export", path.display());
+    }
     let f = std::fs::File::open(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     let mut out = vec![];
     for (i, line) in std::io::BufReader::new(f).lines().enumerate() {
@@ -545,6 +549,21 @@ mod tests {
             std::fs::write(d.path().join("backgrounds").join(f), f.as_bytes()).unwrap();
         }
         d
+    }
+
+    #[test]
+    fn records_must_be_a_plain_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside.jsonl");
+        std::fs::write(&outside, "").unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::os::unix::fs::symlink(&outside, stage.join("backgrounds.jsonl")).unwrap();
+        assert!(read_records(&stage).unwrap_err().to_string().contains("not a plain file"));
+        let linked = tmp.path().join("linked");
+        std::os::unix::fs::symlink(&stage, &linked).unwrap();
+        assert!(read_records(&linked).is_err());
+        assert!(read_records(&tmp.path().join("missing")).is_err());
     }
 
     #[test]
