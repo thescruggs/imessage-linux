@@ -14,6 +14,7 @@
 #include "macsync.h"
 #include "messagelistmodel.h"
 #include "messagesearchmodel.h"
+#include "recipientpickermodel.h"
 
 #include <QDBusConnection>
 #include <QHash>
@@ -48,6 +49,8 @@ class AppController : public QObject
     Q_PROPERTY(km::AppSettings *settings READ settings CONSTANT)
     Q_PROPERTY(km::ContactResolver *contacts READ contacts CONSTANT)
     Q_PROPERTY(km::ContactSuggestionModel *contactSuggestions READ contactSuggestions CONSTANT)
+    /// contactSuggestions, then recipientSuggestions, as one list (the new-message page).
+    Q_PROPERTY(km::RecipientPickerModel *recipientPicker READ recipientPicker CONSTANT)
     /// "Sync from Mac" (`imsg sync-mac`).
     Q_PROPERTY(km::MacSync *macSync READ macSync CONSTANT)
     Q_PROPERTY(QString currentChatId READ currentChatId WRITE setCurrentChatId NOTIFY currentChatIdChanged)
@@ -74,6 +77,7 @@ public:
     AppSettings *settings() const { return m_settings; }
     ContactResolver *contacts() const { return m_contacts; }
     ContactSuggestionModel *contactSuggestions() const { return m_contactSuggestions; }
+    RecipientPickerModel *recipientPicker() const { return m_recipientPicker; }
     MacSync *macSync() const { return m_macSync; }
     QString currentChatId() const { return m_currentChatId; }
     void setCurrentChatId(const QString &chatId);
@@ -141,6 +145,7 @@ private:
     AppOptions m_options;
     ContactResolver *m_contacts = nullptr; ///< created first: the models consult it
     ContactSuggestionModel *m_contactSuggestions = nullptr;
+    RecipientPickerModel *m_recipientPicker = nullptr;
     MacSync *m_macSync = nullptr;
     DaemonClient *m_client = nullptr;
     ChatListModel *m_chatList = nullptr;

@@ -189,6 +189,14 @@ class TestScreens : public QObject
         QTest::mouseClick(m_window, Qt::RightButton, {}, centre.toPoint());
     }
 
+    /// QTest::keyClicks() takes only widgets: one key event per (ASCII) character.
+    void typeKeys(const QString &text)
+    {
+        for (const QChar c : text) {
+            QTest::keyClick(m_window, c.toLatin1());
+        }
+    }
+
     void click(QObject *button)
     {
         QVERIFY(button);
@@ -673,6 +681,80 @@ private Q_SLOTS:
         QTRY_COMPARE_WITH_TIMEOUT(m_controller->contactSuggestions()->index(0).data(ContactSuggestionModel::ReachabilityRole).toString(), u"reachable"_s, Timeout);
         shoot(u"new-message-contacts"_s);
         field->setProperty("text", QString());
+    }
+
+    void newMessageKeyboard()
+    {
+        invoke("showNewMessage");
+        auto *r = m_controller->recipients();
+        auto *picker = m_controller->recipientPicker();
+        QTRY_VERIFY_WITH_TIMEOUT(visibleItem(u"recipientField"_s), Timeout);
+        auto *field = visibleItem(u"recipientField"_s);
+        QObject *page = field;
+        while (page && !page->property("highlightedIndex").isValid()) {
+            page = page->parent();
+        }
+        QVERIFY(page);
+        field->forceActiveFocus();
+        QTRY_VERIFY_WITH_TIMEOUT(field->hasActiveFocus(), Timeout);
+        QCOMPARE(r->rowCount(), 0);
+
+        // "dav": Dave's two addresses (contacts), then the conversations
+        // with him (the group first, then the 1:1 chat).
+        typeKeys(u"dav"_s);
+        QCOMPARE(field->property("text").toString(), u"dav"_s);
+        QCOMPARE(m_controller->contactSuggestions()->rowCount(), 2);
+        QCOMPARE(picker->rowCount(), 4);
+        QCOMPARE(picker->rowData(0).value(u"kind"_s).toString(), u"contact"_s);
+        QCOMPARE(picker->rowData(1).value(u"uri"_s).toString(), u"mailto:dave@example.net"_s);
+        QCOMPARE(picker->rowData(2).value(u"chatId"_s).toString(), Team);
+        QCOMPARE(picker->rowData(3).value(u"chatId"_s).toString(), Dave);
+        QCOMPARE(page->property("highlightedIndex").toInt(), 0);
+        QTest::keyClick(m_window, Qt::Key_Up); // wraps to the last row
+        QCOMPARE(page->property("highlightedIndex").toInt(), 3);
+        QTest::keyClick(m_window, Qt::Key_Down); // and back to the first
+        QCOMPARE(page->property("highlightedIndex").toInt(), 0);
+        QTest::keyClick(m_window, Qt::Key_Down);
+        QTest::keyClick(m_window, Qt::Key_Down);
+        shoot(u"new-message-keyboard"_s);
+        QTest::keyClick(m_window, Qt::Key_Down);
+        QCOMPARE(page->property("highlightedIndex").toInt(), 3);
+        // The 1:1 conversation with Dave adds his number.
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QCOMPARE(r->handles(), QStringList{Dave});
+        QCOMPARE(field->property("text").toString(), QString());
+
+        // Typing again highlights the first row: Down, Enter → the second address.
+        typeKeys(u"dav"_s);
+        QCOMPARE(page->property("highlightedIndex").toInt(), 0);
+        QTest::keyClick(m_window, Qt::Key_Down);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QCOMPARE(r->handles(), (QStringList{Dave, u"mailto:dave@example.net"_s}));
+        r->removeLast();
+
+        // A contact's address: "carol", Enter → the first row.
+        typeKeys(u"carol"_s);
+        QCOMPARE(page->property("highlightedIndex").toInt(), 0);
+        QCOMPARE(picker->rowData(0).value(u"uri"_s).toString(), Carol);
+        QTest::keyClick(m_window, Qt::Key_Enter);
+        QCOMPARE(r->handles(), (QStringList{Dave, Carol}));
+
+        // Nothing matches: Enter adds what was typed.
+        typeKeys(u"zed@example.org"_s);
+        QCOMPARE(picker->rowCount(), 0);
+        QCOMPARE(page->property("highlightedIndex").toInt(), -1);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QCOMPARE(r->handles(), (QStringList{Dave, Carol, u"mailto:zed@example.org"_s}));
+
+        // Escape clears the text; with nothing typed it goes back to the list.
+        typeKeys(u"bo"_s);
+        QVERIFY(picker->rowCount() > 0);
+        QTest::keyClick(m_window, Qt::Key_Escape);
+        QCOMPARE(field->property("text").toString(), QString());
+        QCOMPARE(r->rowCount(), 3);
+        QTest::keyClick(m_window, Qt::Key_Escape);
+        QTRY_COMPARE_WITH_TIMEOUT(pageStack()->property("depth").toInt(), 1, Timeout);
+        r->clear();
     }
 
     void login()

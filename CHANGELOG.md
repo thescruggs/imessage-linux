@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* **kmessages: pick recipients with the keyboard.** On the new-message
+  page Up / Down move a highlight over the suggestions (contacts, then
+  conversations; wrapping, scrolled into view, the first one highlighted
+  as you type, the mouse moves it too), Enter adds the highlighted
+  address or opens the highlighted group and falls back to what you
+  typed, Escape clears the field and goes back when it is already empty.
 * **Link previews (as Messages).** A link someone sends with a preview
   now arrives as a card (title, site, image or icon) instead of plain
   text, and a message that was only a preview no longer shows "app

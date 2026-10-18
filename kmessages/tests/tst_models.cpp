@@ -11,6 +11,7 @@
 #include "messagelistmodel.h"
 #include "messagesearchmodel.h"
 #include "outgoingfiles.h"
+#include "recipientpickermodel.h"
 
 #include <QAbstractItemModelTester>
 #include <QDateTime>
@@ -19,6 +20,7 @@
 #include <QImage>
 #include <QTemporaryDir>
 #include <QSignalSpy>
+#include <QStandardItemModel>
 #include <QTest>
 
 using namespace Qt::StringLiterals;
@@ -1443,6 +1445,76 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QTRY_VERIFY_WITH_TIMEOUT(client.isStatusKnown(), Timeout);
         QTRY_COMPARE_WITH_TIMEOUT(m_fake.callsOf(u"React"_s).size(), 1, Timeout);
         QCOMPARE(m_fake.callsOf(u"React"_s).first().at(4).toBool(), true); // ours already: a removal
+    }
+
+    void recipientPicker()
+    {
+        // Two stand-in sources with the role names of ContactSuggestionModel / ChatFilterModel.
+        QStandardItemModel contacts;
+        contacts.setItemRoleNames({{Qt::UserRole + 1, "name"}, {Qt::UserRole + 2, "uri"}, {Qt::UserRole + 3, "address"}, {Qt::UserRole + 4, "reachability"}});
+        QStandardItemModel chats;
+        chats.setItemRoleNames({{Qt::UserRole + 1, "chatId"}, {Qt::UserRole + 2, "name"}, {Qt::UserRole + 3, "isGroup"}, {Qt::UserRole + 4, "participantUris"}});
+        const auto contact = [](const QString &name, const QString &uri) {
+            auto *item = new QStandardItem;
+            item->setData(name, Qt::UserRole + 1);
+            item->setData(uri, Qt::UserRole + 2);
+            item->setData(uri.section(u':', 1), Qt::UserRole + 3);
+            item->setData(u"reachable"_s, Qt::UserRole + 4);
+            return item;
+        };
+        const auto chat = [](const QString &id, const QString &name, bool group, const QStringList &uris) {
+            auto *item = new QStandardItem;
+            item->setData(id, Qt::UserRole + 1);
+            item->setData(name, Qt::UserRole + 2);
+            item->setData(group, Qt::UserRole + 3);
+            item->setData(uris, Qt::UserRole + 4);
+            return item;
+        };
+        RecipientPickerModel picker(&contacts, &chats);
+        QAbstractItemModelTester tester(&picker, QAbstractItemModelTester::FailureReportingMode::QtTest);
+        QSignalSpy count(&picker, &RecipientPickerModel::countChanged);
+
+        chats.appendRow(chat(Team, u"Weekend Trip"_s, true, {Bob, Carol}));
+        chats.appendRow(chat(Bob, u"Bob"_s, false, {Bob}));
+        QCOMPARE(picker.rowCount(), 2);
+        QCOMPARE(count.count(), 2);
+        // No contact rows: no section headers.
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::SectionRole).toString(), QString());
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::KindRole).toString(), u"conversation"_s);
+
+        contacts.appendRow(contact(u"Carol"_s, Carol));
+        QCOMPARE(picker.rowCount(), 3);
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::KindRole).toString(), u"contact"_s);
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::NameRole).toString(), u"Carol"_s);
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::UriRole).toString(), Carol);
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::ReachabilityRole).toString(), u"reachable"_s);
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::SectionRole).toString(), u"Contacts"_s);
+        QCOMPARE(roleOf(picker, 1, RecipientPickerModel::SectionRole).toString(), u"Conversations"_s);
+        QCOMPARE(roleOf(picker, 1, RecipientPickerModel::ChatIdRole).toString(), Team);
+        QCOMPARE(roleOf(picker, 1, RecipientPickerModel::UriRole).toString(), QString());
+        QCOMPARE(roleOf(picker, 1, RecipientPickerModel::ReachabilityRole).toString(), QString());
+
+        // rowData(): what activating a row does.
+        QCOMPARE(picker.rowData(0).value(u"kind"_s).toString(), u"contact"_s);
+        QCOMPARE(picker.rowData(0).value(u"uri"_s).toString(), Carol);
+        QCOMPARE(picker.rowData(1).value(u"isGroup"_s).toBool(), true);
+        QCOMPARE(picker.rowData(2).value(u"participantUris"_s).toStringList(), QStringList{Bob});
+        QVERIFY(picker.rowData(3).isEmpty());
+        QVERIFY(picker.rowData(-1).isEmpty());
+
+        // Data changes land on the shifted row.
+        QSignalSpy changed(&picker, &QAbstractItemModel::dataChanged);
+        chats.item(1)->setData(u"Bobby"_s, Qt::UserRole + 2);
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(changed.first().at(0).toModelIndex().row(), 2);
+        QCOMPARE(roleOf(picker, 2, RecipientPickerModel::NameRole).toString(), u"Bobby"_s);
+
+        // Removing the last contact drops the headers again; a reset empties everything.
+        contacts.removeRow(0);
+        QCOMPARE(picker.rowCount(), 2);
+        QCOMPARE(roleOf(picker, 0, RecipientPickerModel::SectionRole).toString(), QString());
+        chats.clear();
+        QCOMPARE(picker.rowCount(), 0);
     }
 
     void linkifyPunctuation()

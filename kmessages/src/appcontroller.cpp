@@ -40,6 +40,7 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
     m_settings = new AppSettings(config, this);
     m_macSync = new MacSync(m_client, m_settings, std::move(config), this);
     m_contactSuggestions = new ContactSuggestionModel(m_client, m_contacts, this);
+    m_recipientPicker = new RecipientPickerModel(m_contactSuggestions, m_suggestions, this);
 
     // "My other addresses" (the iPhone's number …) count as the user's own.
     m_client->setOtherOwnHandles(m_settings->otherHandleUris());

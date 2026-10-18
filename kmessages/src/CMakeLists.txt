@@ -13,6 +13,7 @@ add_library(kmessages_core STATIC
     appsettings.cpp appsettings.h
     contactresolver.cpp contactresolver.h
     contactsuggestionmodel.cpp contactsuggestionmodel.h
+    recipientpickermodel.cpp recipientpickermodel.h
     macsync.cpp macsync.h
     appcontroller.cpp appcontroller.h
     qmlsetup.cpp qmlsetup.h

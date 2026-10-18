@@ -322,6 +322,12 @@ notification and mark the chat read instead of leaving it unread. Text
 messages relayed by your iPhone (see Text messages) show as green bubbles
 and the composer says "Text Message"; **Settings → Text Message
 Forwarding** turns the relay on or off.
+**Keyboard.** Ctrl+N starts a new message, Ctrl+F searches the chat
+list, Ctrl+Q quits. In the new message's To: field, Up / Down pick a
+suggested contact or conversation, Enter adds it (or what you typed, when
+nothing matches), Escape clears the field and, when it is empty, goes back.
+In the composer Enter sends and Shift+Enter starts a new line.
+
 Details, tests and screenshots: [docs/KMESSAGES.md](docs/KMESSAGES.md).
 
 ## Contacts

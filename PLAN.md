@@ -144,7 +144,7 @@ chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
    through the sync, `imsg chat CHAT --pin --position N` reorders by hand),
    and Mute (the daemon has no mute).
 
-### B. Keyboard: Ctrl+N and picking recipients with ↑ ↓ Enter
+### B. Keyboard: Ctrl+N and picking recipients with ↑ ↓ Enter **[done 2026-10-18]**
 
 `Ctrl+N` already exists (`Main.qml`, `StandardKey.New`, since 0.1.10) and
 opens the new-message page (verified by the user 2026-10-17; nothing to do
@@ -163,6 +163,19 @@ beyond mentioning it in the docs). The new-message page:
    as is in the composer. Tests in tst_screens with `QTest::keyClick` on
    the recipient field (down, down, enter → recipient chip added; enter with
    no match → typed address).
+
+As built: `RecipientPickerModel` (`App.recipientPicker`) concatenates the
+contact suggestions and the conversation matches into one list model
+(`kind`, `section` "Contacts" / "Conversations" only while contacts
+match, `rowData(row)`), so the page's single `ListView` has one
+`currentIndex` = `highlightedIndex` (0 on every text change, -1 without
+rows; rows arriving later keep a valid highlight). Down / Up wrap and
+`positionViewAtIndex(…, Contain)`; Enter on a contact adds its URI, on a
+group opens it, on a 1:1 conversation adds the other person (as a click
+did before); Escape clears, then goes back (`popToList`). Hover highlights;
+the row is `ItemDelegate.highlighted` (Kirigami highlight colour) and
+`Accessible.selected`. Tests: `recipientPicker` (tst_models),
+`newMessageKeyboard` + `new-message-keyboard` screenshot (tst_screens).
 
 ### C. Emoji suggestions while typing
 
