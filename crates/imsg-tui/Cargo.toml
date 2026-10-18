@@ -1,0 +1,38 @@
+[package]
+name = "imsg-tui"
+description = "Terminal client for imessaged: your iMessages as bubbles in a terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "imsg-tui"
+path = "src/main.rs"
+
+[dependencies]
+imessage-common.workspace = true
+imsg-client.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+log.workspace = true
+env_logger.workspace = true
+futures-util = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Pinned together: tui-textarea 0.7 is built against ratatui 0.29 / crossterm 0.28.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = "0.7"
+emojis = "0.9"
+unicode-width = "0.2"
+
+[dev-dependencies]
+# Integration tests run imessaged in-process with MockEngine on a private
+# bus (as crates/imsg/tests does).
+imessaged = { path = "../imessaged" }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tempfile = "3"
+crossterm = { version = "0.28" }

@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 imessage-common.workspace = true
+imsg-client.workspace = true
 open-absinthe.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -18,8 +19,6 @@ sha2.workspace = true
 env_logger.workspace = true
 log.workspace = true
 tokio.workspace = true
-# Thin D-Bus client (same zbus 5 / tokio stack as imessaged).
-zbus = { version = "5", default-features = false, features = ["tokio"] }
 futures-util = { version = "0.3", default-features = false }
 rpassword = "7"
 # Wipes the Apple ID password from memory after use.
@@ -36,3 +35,5 @@ plist.workspace = true
 # bus. Dev-only: `cargo tree -p imsg -e normal` stays free of rustpush.
 imessaged = { path = "../imessaged" }
 tempfile = "3"
+# The integration tests open their own bus connection.
+zbus = { version = "5", default-features = false, features = ["tokio"] }

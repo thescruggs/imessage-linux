@@ -302,6 +302,39 @@ logged in, 4 two-factor code needed, 5 daemon not running, 6 not found,
 7 temporary failure. For non-interactive login use `--password-stdin` /
 `--code-stdin`; never put the password on the command line.
 
+## Terminal app (imsg-tui)
+
+`imsg-tui` is the [imessage-cli](https://github.com/thescruggs/imessage-cli)
+terminal client (bubbles, contact names, reactions, replies, attachments,
+emoji picker, file sending) ported from the Mac to `imessaged`: everything
+goes over D-Bus to the daemon, nothing else runs. Keys and details:
+[docs/TUI.md](docs/TUI.md).
+
+```sh
+cargo install --path crates/imsg-tui                 # -> ~/.cargo/bin/imsg-tui
+imsg-tui
+```
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move between the chat list, the messages, and the compose box |
+| `j` / `k` or arrow keys | Move through chats or messages |
+| `Enter` | Open the compose box, or send |
+| `Alt+Enter`, `Ctrl+J` | New line while composing |
+| `:smile:` | Emoji shortcode; `Ctrl+E` opens the emoji picker |
+| `Ctrl+F` | Attach a file (with Tab completion) |
+| `Ctrl+N` | New message to a contact, number, or email |
+| `Ctrl+S` | Search all messages |
+| `/` | Filter the chat list |
+| `o` / `s` / `y` | Open, save, or copy the selected message's attachment, link or text |
+| `r` / `R` | React to (tapback or emoji) / reply to the selected message |
+| `Ctrl+R`, `Ctrl+L` | Reload, redraw |
+| `?` | Help |
+
+Contact names come from the vCards in `~/.local/share/kpeoplevcard` (the
+folder kmessages uses; `imsg sync-mac` fills it from your Mac), see
+[Contacts](#contacts).
+
 ## KDE app (kmessages)
 
 ```sh

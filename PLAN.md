@@ -29,6 +29,8 @@ Crate layout (Cargo workspace):
 | `crates/open-absinthe` | `open-absinthe` drop-in | NAC emulator: runs `IMDAppleServices` under `unicorn-engine`, exposes `HardwareConfig` + `ValidationCtx` with the exact API rustpush expects |
 | `crates/imessaged` | daemon | wraps rustpush: login/2FA, register, APNs loop, renewal, message store, D-Bus `org.imessage.Daemon1` |
 | `crates/imsg` | CLI | `imsg login`, `status`, `chats`, `messages`, `send`, `send-file`, `react`, `watch`, `doctor`, `hwconfig import` |
+| `crates/imsg-client` | library | the `org.imessage.Daemon1` zbus proxy + typed wrapper, shared by `imsg` and `imsg-tui` |
+| `crates/imsg-tui` | TUI | `imsg-tui`: ratatui terminal client (ported from the Mac-only `imessage-cli` TUI), bubbles, live signals, vCard names |
 | `kmessages/` | KDE app | C++/QML Kirigami 6, QtDBus client, Messages.app-like 3-pane UI |
 | `crates/imessage-common` | library | hwconfig format + validation, shared paths |
 | `patches/` + `tools/bootstrap.sh` | setup | submodule init, patch application, `IMDAppleServices` download + sha1 check |

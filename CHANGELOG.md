@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+* **New: `imsg-tui`, a terminal app.** The Mac-only
+  [imessage-cli](https://github.com/thescruggs/imessage-cli) terminal
+  client, ported to Linux on top of `imessaged`: the same two-pane layout
+  and keys (chat list, bubble transcript, composer; `j`/`k`, `/` filter,
+  `Ctrl+N` new message with a contact picker, `Ctrl+E` emoji picker and
+  `:shortcode:` expansion, `Ctrl+F` attach, `Ctrl+S` search, `o` / `s` /
+  `y` open / save / copy), now over D-Bus instead of HTTP: chats, paged
+  history, sending text and files, search and attachment downloads are
+  daemon calls, and new messages, delivery / read state, reactions,
+  edits, unsends, chat changes and typing arrive live from the daemon's
+  signals (reconnecting with backoff if the bus goes away). What the Mac
+  version could not do: `r` reacts with a tapback or any emoji (again to
+  remove), `R` replies inline, SMS bubbles are green per message, link
+  previews show as cards, pinned chats sit on top, opening a chat sends a
+  read receipt and typing is shown both ways. Contact names come from the
+  same vCard folder as kmessages (`~/.local/share/kpeoplevcard`, filled
+  by `imsg sync-mac`; `--contacts-dir` / `IMSG_CONTACTS_DIR` for others),
+  then from the name a person shared, then the bare address. Attachments
+  open with `xdg-open`; copying uses `wl-copy` / `xclip` / `xsel` or the
+  terminal's OSC 52. Docs: [docs/TUI.md](docs/TUI.md). The one-shot
+  `--list` / `--to` flags of the Mac version are not carried over: that
+  is what `imsg` is for.
+* **Refactor: `imsg-client` crate.** The D-Bus proxy and typed client
+  that `imsg` had in `client.rs` are now a small library crate shared by
+  `imsg` and `imsg-tui` (no behaviour change for `imsg`).
+
 ## 0.1.13 (2026-10-18)
 
 * **kmessages: pick recipients with the keyboard.** On the new-message

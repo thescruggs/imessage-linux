@@ -1,4 +1,5 @@
-//! D-Bus client for `org.imessage.Daemon1` (see docs/DBUS.md).
+//! D-Bus client for `org.imessage.Daemon1` (see docs/DBUS.md), shared by
+//! the `imsg` command-line client and `imsg-tui`.
 //!
 //! [`Daemon1Proxy`] mirrors the interface 1:1 (methods, properties and
 //! signals of docs/DBUS.md). [`Client`] wraps it: every call returns both the raw JSON

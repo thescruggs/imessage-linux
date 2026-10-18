@@ -4,6 +4,8 @@ members = [
     "crates/imessage-common",
     "crates/imessaged",
     "crates/imsg",
+    "crates/imsg-client",
+    "crates/imsg-tui",
     # NAC emulator (drop-in replacement for the closed `open-absinthe`).
     "crates/open-absinthe",
 ]
@@ -19,6 +21,7 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 imessage-common = { path = "crates/imessage-common" }
+imsg-client = { path = "crates/imsg-client" }
 open-absinthe = { path = "crates/open-absinthe" }
 serde = { version = "1", features = ["derive"] }
 plist = "1.7"

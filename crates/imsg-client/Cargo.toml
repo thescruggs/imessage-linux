@@ -1,0 +1,15 @@
+[package]
+name = "imsg-client"
+description = "D-Bus client library for imessaged (shared by the imsg CLI and imsg-tui)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+imessage-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+# Same zbus 5 / tokio stack as imessaged.
+zbus = { version = "5", default-features = false, features = ["tokio"] }

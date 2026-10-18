@@ -1,6 +1,6 @@
 # Maintainer: The imessage-linux developers
 #
-# Builds imessaged (daemon), imsg (CLI) and kmessages (KDE app) from the
+# Builds imessaged (daemon), imsg (CLI), imsg-tui (terminal app) and kmessages (KDE app) from the
 # v${pkgver} tag. Apple's IMDAppleServices is NOT part of the package: after
 # installing, each user downloads it once with
 #   /usr/share/imessage-linux/tools/bootstrap.sh
@@ -120,7 +120,7 @@ prepare() {
 
 build() {
   cd "$srcdir/imessage-linux"
-  _cargo build --frozen --release -p imessaged -p imsg
+  _cargo build --frozen --release -p imessaged -p imsg -p imsg-tui
 
   cmake -B "$srcdir/build-kmessages" -S kmessages -G Ninja \
     -DCMAKE_BUILD_TYPE=None \
@@ -134,12 +134,12 @@ check() {
   cd "$srcdir/imessage-linux"
   # Tests needing Apple's binary or the network skip themselves; D-Bus
   # tests need dbus-daemon (else they print SKIP).
-  _cargo test --frozen --release -p imessage-common -p open-absinthe -p imessaged -p imsg
+  _cargo test --frozen --release -p imessage-common -p open-absinthe -p imessaged -p imsg -p imsg-client -p imsg-tui
 }
 
 package() {
   cd "$srcdir/imessage-linux"
-  install -Dm755 -t "$pkgdir/usr/bin" target/release/imessaged target/release/imsg
+  install -Dm755 -t "$pkgdir/usr/bin" target/release/imessaged target/release/imsg target/release/imsg-tui
 
   # systemd user unit: the checkout's unit runs ~/.cargo/bin/imessaged
   sed 's|^ExecStart=%h/\.cargo/bin/imessaged |ExecStart=/usr/bin/imessaged |' \

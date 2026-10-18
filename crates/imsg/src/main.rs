@@ -5,7 +5,6 @@
 //! the daemon's JSON unchanged; human output is the default.
 
 mod backgrounds;
-mod client;
 mod commands;
 mod format;
 mod import;
@@ -18,6 +17,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use imessage_common::paths;
+
+use imsg_client as client;
 
 use client::{Bus, CliError, exit};
 use format::Style;
