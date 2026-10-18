@@ -287,6 +287,27 @@ private Q_SLOTS:
         QVERIFY(m->isOnlyLink());
         QCOMPARE(m->snippet(), u"https://x.example/b"_s);
 
+        // Redirected: the text is the URL as typed, the card has the final
+        // page (and original_url); a bare http(s) token counts without it.
+        const QString redirected = QString(sparse)
+                                       .replace(u"\"text\":\"look https://x.example/b\""_s, u"\"text\":\"https://t.example/abc \""_s)
+                                       .replace(u"\"url\":\"https://x.example/b\""_s, u"\"url\":\"https://www.example.com/final\",\"original_url\":\"https://t.example/abc\""_s);
+        m = Json::parseMessage(redirected, &err);
+        QVERIFY2(m, qPrintable(err));
+        QCOMPARE(m->link()->originalUrl, u"https://t.example/abc"_s);
+        QVERIFY(m->isOnlyLink());
+        m = Json::parseMessage(QString(redirected).replace(u",\"original_url\":\"https://t.example/abc\""_s, QString()), &err);
+        QVERIFY2(m, qPrintable(err));
+        QVERIFY(m->link()->originalUrl.isEmpty());
+        QVERIFY(m->isOnlyLink());
+        // two tokens, or not a URL: the text stays
+        m = Json::parseMessage(QString(redirected).replace(u"https://t.example/abc \""_s, u"https://t.example/abc and more\""_s), &err);
+        QVERIFY2(m, qPrintable(err));
+        QVERIFY(!m->isOnlyLink());
+        m = Json::parseMessage(QString(redirected).replace(u"\"text\":\"https://t.example/abc \""_s, u"\"text\":\"ftp://t.example/abc\""_s), &err);
+        QVERIFY2(m, qPrintable(err));
+        QVERIFY(!m->isOnlyLink());
+
         // A link part without a URL degrades to an unsupported part.
         m = Json::parseMessage(QString(sparse).replace(u"\"url\":\"https://x.example/b\","_s, QString()), &err);
         QVERIFY2(m, qPrintable(err));

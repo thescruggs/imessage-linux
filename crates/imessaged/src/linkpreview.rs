@@ -14,7 +14,8 @@
 //! else is left out. Icons must also be at most [`FetchOptions::max_icon_px`]
 //! pixels on each side.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -40,11 +41,17 @@ pub struct FetchOptions {
     pub max_image_bytes: usize,
     /// Largest icon side, in pixels.
     pub max_icon_px: u32,
+    /// Largest image side, in pixels (we cannot scale it down).
+    pub max_image_px: u32,
     pub user_agent: String,
-    /// Fetch `localhost`, `*.local` and private / loopback IP literals too
+    /// Fetch `localhost`, `*.local` and private / loopback addresses too
     /// (tests). Off by default: a preview of an internal page would send
-    /// its title to the recipient.
+    /// its title to the recipient. Applies to names too: every name is
+    /// resolved by [`GuardedResolver`], which drops private addresses.
     pub allow_private_hosts: bool,
+    /// Fixed answers for host names, consulted before DNS (tests); the
+    /// private-address filter applies to them as to DNS answers.
+    pub hosts: Vec<(String, IpAddr)>,
 }
 
 impl Default for FetchOptions {
@@ -56,8 +63,10 @@ impl Default for FetchOptions {
             max_image_download: 5 << 20,
             max_image_bytes: 1 << 20,
             max_icon_px: 256,
+            max_image_px: 4096,
             user_agent: format!("imessage-linux/{}", env!("CARGO_PKG_VERSION")),
             allow_private_hosts: false,
+            hosts: vec![],
         }
     }
 }
@@ -141,16 +150,57 @@ pub fn is_private_host(u: &Url) -> bool {
     }
 }
 
-fn private_ip(ip: IpAddr) -> bool {
+/// Loopback, private, link-local, unspecified, "this network" (0/8),
+/// CGNAT, broadcast, multicast, unique-local, site-local, and IPv4
+/// addresses in IPv4-mapped / -compatible IPv6 form.
+pub fn private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || (v.octets()[0] == 100 && (v.octets()[1] & 0xc0) == 64),
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || v.is_multicast() || o[0] == 0 || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
         IpAddr::V6(v) => {
-            if let Some(v4) = v.to_ipv4_mapped() {
+            if let Some(v4) = v.to_ipv4() {
                 return private_ip(IpAddr::V4(v4));
             }
             let s = v.segments()[0];
-            v.is_loopback() || v.is_unspecified() || (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80
+            v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80 || (s & 0xffc0) == 0xfec0
         }
+    }
+}
+
+/// The resolver refused every address of a name (all private).
+#[derive(Debug, thiserror::Error)]
+#[error("{0} resolves only to private addresses")]
+pub struct BlockedAddress(String);
+
+/// DNS for link previews: `tokio::net::lookup_host` (or
+/// [`FetchOptions::hosts`]), minus private addresses unless allowed. reqwest
+/// connects only to what this returns, so a name pointing at an internal
+/// address (split horizon, `metadata.internal`, DNS rebinding) is never
+/// reached: not for the page, a redirect hop, the image or the icon.
+pub struct GuardedResolver {
+    allow_private: bool,
+    hosts: Vec<(String, IpAddr)>,
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: hyper::client::connect::dns::Name) -> reqwest::dns::Resolving {
+        let name = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        let fixed: Vec<IpAddr> = self.hosts.iter().filter(|(h, _)| h.eq_ignore_ascii_case(&name)).map(|(_, ip)| *ip).collect();
+        let allow_private = self.allow_private;
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = if fixed.is_empty() {
+                tokio::net::lookup_host((name.as_str(), 0)).await?.collect()
+            } else {
+                fixed.into_iter().map(|ip| SocketAddr::new(ip, 0)).collect()
+            };
+            let ok: Vec<SocketAddr> = addrs.into_iter().filter(|a| allow_private || !private_ip(a.ip())).collect();
+            if ok.is_empty() {
+                return Err(Box::new(BlockedAddress(name)) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 
@@ -169,6 +219,8 @@ pub struct PageMeta {
     pub icons: Vec<IconLink>,
     /// `<base href>`.
     pub base: Option<String>,
+    /// `<meta charset>` or the charset of `<meta http-equiv=content-type>`.
+    pub charset: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -455,6 +507,11 @@ pub fn parse_head(html: &str) -> PageMeta {
                 i = close;
             }
             "meta" => {
+                if meta.charset.is_none() {
+                    meta.charset = tag.attr("charset").map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).or_else(|| {
+                        tag.attr("http-equiv").filter(|h| h.trim().eq_ignore_ascii_case("content-type")).and_then(|_| tag.attr("content")).and_then(charset_param).map(str::to_string)
+                    });
+                }
                 let key = tag.attr("property").or_else(|| tag.attr("name")).or_else(|| tag.attr("itemprop")).map(|k| k.trim().to_ascii_lowercase());
                 if let (Some(k), Some(v)) = (key, tag.attr("content")) {
                     meta.metas.push((k, v.to_string()));
@@ -535,6 +592,7 @@ pub fn image_info(data: &[u8]) -> Option<(&'static str, u32, u32)> {
 // ---------------------------------------------------------------------------
 
 fn client(opts: &FetchOptions) -> Result<reqwest::Client, PreviewError> {
+    let resolver = Arc::new(GuardedResolver { allow_private: opts.allow_private_hosts, hosts: opts.hosts.clone() });
     let max = opts.max_redirects;
     let allow_private = opts.allow_private_hosts;
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
@@ -550,6 +608,8 @@ fn client(opts: &FetchOptions) -> Result<reqwest::Client, PreviewError> {
     });
     reqwest::Client::builder()
         .redirect(policy)
+        .referer(false)
+        .dns_resolver(resolver)
         .user_agent(opts.user_agent.clone())
         .timeout(opts.deadline)
         .build()
@@ -557,6 +617,13 @@ fn client(opts: &FetchOptions) -> Result<reqwest::Client, PreviewError> {
 }
 
 fn http_err(e: reqwest::Error) -> PreviewError {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(s) = src {
+        if s.downcast_ref::<BlockedAddress>().is_some() {
+            return PreviewError::PrivateHost;
+        }
+        src = s.source();
+    }
     if e.is_timeout() {
         PreviewError::Timeout
     } else if e.is_redirect() {
@@ -594,9 +661,32 @@ async fn read_capped(resp: &mut reqwest::Response, max: usize, stop_at: Option<&
     Ok(Some(buf))
 }
 
+/// Fetches link previews with one HTTP client (connection pool, guarded
+/// resolver) for all sends.
+pub struct Fetcher {
+    opts: FetchOptions,
+    client: reqwest::Client,
+}
+
+impl Fetcher {
+    pub fn new(opts: FetchOptions) -> Result<Fetcher, PreviewError> {
+        let client = client(&opts)?;
+        Ok(Fetcher { opts, client })
+    }
+
+    /// See [`fetch`].
+    pub async fn fetch(&self, original: &str) -> Result<LinkPreview, PreviewError> {
+        fetch_with(&self.client, original, &self.opts).await
+    }
+}
+
 /// Fetch the preview for `original` (a URL from the message text) within
-/// `opts.deadline`.
+/// `opts.deadline` (a one-off [`Fetcher`]).
 pub async fn fetch(original: &str, opts: &FetchOptions) -> Result<LinkPreview, PreviewError> {
+    Fetcher::new(opts.clone())?.fetch(original).await
+}
+
+async fn fetch_with(client: &reqwest::Client, original: &str, opts: &FetchOptions) -> Result<LinkPreview, PreviewError> {
     let deadline = Instant::now() + opts.deadline;
     let url = Url::parse(original).map_err(|_| PreviewError::BadUrl)?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none_or(str::is_empty) {
@@ -605,21 +695,20 @@ pub async fn fetch(original: &str, opts: &FetchOptions) -> Result<LinkPreview, P
     if !opts.allow_private_hosts && is_private_host(&url) {
         return Err(PreviewError::PrivateHost);
     }
-    let client = client(opts)?;
-    let (final_url, meta) = tokio::time::timeout_at(deadline, fetch_page(&client, url, opts)).await.map_err(|_| PreviewError::Timeout)??;
+    let (final_url, meta) = tokio::time::timeout_at(deadline, fetch_page(client, url, opts)).await.map_err(|_| PreviewError::Timeout)??;
     let base = meta.base.as_deref().and_then(|b| final_url.join(b).ok()).unwrap_or_else(|| final_url.clone());
     let resolve = |href: &str| base.join(href.trim()).ok().filter(|u| matches!(u.scheme(), "http" | "https") && (opts.allow_private_hosts || !is_private_host(u)));
 
     let title = meta.best_title().map(|t| cap_chars(t, MAX_TITLE_CHARS));
     let summary = meta.best_summary().map(|t| cap_chars(t, MAX_SUMMARY_CHARS));
     let image = match meta.best_image().as_deref().and_then(resolve) {
-        Some(u) => fetch_image(&client, u, opts, None, deadline).await,
+        Some(u) => fetch_image(client, u, opts, Some(opts.max_image_px), deadline).await,
         None => None,
     };
     let mut icon = None;
     for href in meta.icon_candidates(opts.max_icon_px).iter().take(2) {
         if let Some(u) = resolve(href) {
-            icon = fetch_image(&client, u, opts, Some(opts.max_icon_px), deadline).await;
+            icon = fetch_image(client, u, opts, Some(opts.max_icon_px), deadline).await;
             if icon.is_some() {
                 break;
             }
@@ -656,7 +745,30 @@ async fn fetch_page(client: &reqwest::Client, url: Url, opts: &FetchOptions) -> 
     }
     let final_url = resp.url().clone();
     let body = read_capped(&mut resp, opts.max_html_bytes, Some(b"</head>")).await?.unwrap_or_default();
-    Ok((final_url, parse_head(&String::from_utf8_lossy(&body))))
+    Ok((final_url, parse_head(&decode_html(&body, &ctype))))
+}
+
+/// The `charset=` of a Content-Type value or a `<meta>` `content`.
+fn charset_param(s: &str) -> Option<&str> {
+    let i = s.to_ascii_lowercase().find("charset=")?;
+    let v = s[i + 8..].trim_start_matches(['"', '\'', ' ']);
+    let end = v.find(['"', '\'', ';', ',', ' ', '>', '/']).unwrap_or(v.len());
+    Some(&v[..end]).filter(|v| !v.is_empty())
+}
+
+/// Decode the page: a BOM, else the Content-Type's charset, else
+/// `<meta charset>` / `<meta http-equiv=content-type>` in the first 4 KB,
+/// else UTF-8 (invalid bytes replaced).
+pub fn decode_html(body: &[u8], content_type: &str) -> String {
+    let declared = charset_param(content_type).and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes())).or_else(|| {
+        let head = String::from_utf8_lossy(&body[..body.len().min(4096)]).into_owned();
+        let m = parse_head(&head);
+        m.charset.as_deref().and_then(|l| encoding_rs::Encoding::for_label(l.trim().as_bytes()))
+    });
+    let enc = declared.unwrap_or(encoding_rs::UTF_8);
+    // A page cannot be UTF-16 once we read its <meta> as ASCII.
+    let enc = if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE { encoding_rs::UTF_8 } else { enc };
+    enc.decode(body).0.into_owned()
 }
 
 /// A JPEG / PNG we can send as is, or `None` (any failure, too big, not

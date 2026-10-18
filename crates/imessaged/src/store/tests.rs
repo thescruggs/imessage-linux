@@ -954,3 +954,31 @@ fn pins() {
     s.purge_chat(&dave).unwrap();
     assert_eq!(order(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), [BOB, CAROL]);
 }
+
+/// An edit keeps the link preview while the text still has its URL (or
+/// the URL as typed), and drops it once the URL is gone.
+#[test]
+fn edits_keep_a_link_preview_only_with_its_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path());
+    let bob = ChatId::direct(BOB);
+    let mut m = msg("LNK1", &bob, ME, 1000, "see https://ex.com/r");
+    m.parts.push(MessagePart::Link {
+        url: "https://ex.com/final".into(),
+        original_url: Some("https://ex.com/r".into()),
+        title: Some("T".into()),
+        summary: None,
+        site_name: None,
+        image_attachment_id: None,
+        icon_attachment_id: None,
+    });
+    s.insert_message(&m, &[]).unwrap();
+    let has_link = |s: &Store| s.get_message(&m.id).unwrap().unwrap().parts.iter().any(|p| matches!(p, MessagePart::Link { .. }));
+    s.apply_event(&edit_ev(&bob, &m.id, ME, true, "fixed: https://ex.com/r", 2000)).unwrap();
+    assert!(has_link(&s), "original URL still there");
+    s.apply_event(&edit_ev(&bob, &m.id, ME, true, "now https://ex.com/final", 3000)).unwrap();
+    assert!(has_link(&s), "final URL counts too");
+    s.apply_event(&edit_ev(&bob, &m.id, ME, true, "never mind", 4000)).unwrap();
+    let after = s.get_message(&m.id).unwrap().unwrap();
+    assert_eq!(after.parts, vec![MessagePart::Text { text: "never mind".into() }]);
+}

@@ -314,11 +314,27 @@ fn image_ext_for(mime: &str) -> &'static str {
 /// An inline attachment row for link-preview bytes (`id` is
 /// [`AttachmentId::link_image`] / [`AttachmentId::link_icon`]); `None`
 /// for empty or oversized data.
+///
+/// An icon (`kind` = `link-icon`) must be a PNG or JPEG (by its bytes; the
+/// app shows icons with a widget that would render SVG); an image must not
+/// be SVG / markup. A PNG or JPEG gets its real MIME type whatever the
+/// sender claimed.
 pub fn link_attachment(id: AttachmentId, message_id: &MessageId, kind: &str, mime: &str, data: &[u8]) -> Option<Attachment> {
     if data.is_empty() || data.len() > MAX_LINK_IMAGE_BYTES {
         return None;
     }
-    let mime = if mime.trim().is_empty() { "image/jpeg".to_string() } else { mime.trim().to_ascii_lowercase() };
+    let sniffed = crate::linkpreview::image_info(data).map(|(m, _, _)| m);
+    let claimed = mime.trim().to_ascii_lowercase();
+    let markup = claimed.contains("svg") || claimed.contains("xml") || claimed.starts_with("text/") || data.trim_ascii_start().starts_with(b"<");
+    if (kind == "link-icon" && sniffed.is_none()) || (sniffed.is_none() && markup) {
+        log::debug!("link preview in {message_id}: {kind} is not an image we show; dropped");
+        return None;
+    }
+    let mime = match sniffed {
+        Some(m) => m.to_string(),
+        None if claimed.is_empty() => "image/jpeg".to_string(),
+        None => claimed,
+    };
     let filename = format!("{kind}.{}", image_ext_for(&mime));
     let a = RpAttachment {
         a_type: AttachmentType::Inline(data.to_vec()),
@@ -350,8 +366,10 @@ pub fn link_from_meta(message_id: &MessageId, meta: &LinkMeta) -> Option<(Messag
     };
     let image_attachment_id = pick(meta.data.image.as_ref(), AttachmentId::link_image(message_id), "link-image");
     let icon_attachment_id = pick(meta.data.icon.as_ref(), AttachmentId::link_icon(message_id), "link-icon");
+    let original_url = meta.data.original_url.clone().map(Into::<String>::into).map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     let part = MessagePart::Link {
         url,
+        original_url,
         title: link_text(meta.data.title.as_deref()),
         summary: link_text(meta.data.summary.as_deref()),
         site_name: None,
@@ -1413,6 +1431,12 @@ mod tests {
         }
     }
 
+    fn png_bytes() -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x40\0\0\0\x40".to_vec();
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
     fn link_msg(text: &str, data: rustpush::LPLinkMetadata, atts: Vec<Vec<u8>>) -> RpMessage {
         let mut n = NormalMessage::new(text.into(), MessageType::IMessage);
         n.link_meta = Some(LinkMeta { data, attachments: atts });
@@ -1432,10 +1456,10 @@ mod tests {
         const URL: &str = "https://example.com/story";
         let id = "1B2C3D4E-0000-4000-8000-000000000001";
         // with text, image and icon
-        let (m, atts) = received(link_msg(&format!("look {URL}"), lp(Some(URL), Some(" Story "), Some(1), Some(0)), vec![b"ICON".to_vec(), b"JPEGDATA".to_vec()]));
+        let (m, atts) = received(link_msg(&format!("look {URL}"), lp(Some(URL), Some(" Story "), Some(1), Some(0)), vec![png_bytes(), b"JPEGDATA".to_vec()]));
         assert_eq!(m.text.as_deref(), Some("look https://example.com/story"));
         assert_eq!(m.parts.len(), 2);
-        let MessagePart::Link { url, title, summary, site_name, image_attachment_id, icon_attachment_id } = &m.parts[1] else { panic!("{:?}", m.parts) };
+        let MessagePart::Link { url, title, summary, site_name, image_attachment_id, icon_attachment_id, .. } = &m.parts[1] else { panic!("{:?}", m.parts) };
         assert_eq!((url.as_str(), title.as_deref(), summary.as_deref(), site_name.as_deref()), (URL, Some("Story"), None, None));
         assert_eq!(image_attachment_id.as_ref().unwrap().0, format!("{id}:link-image"));
         assert_eq!(icon_attachment_id.as_ref().unwrap().0, format!("{id}:link-icon"));
@@ -1445,6 +1469,15 @@ mod tests {
         let back = attachment_from_locator(&img.mmcs).unwrap();
         assert!(matches!(&back.a_type, AttachmentType::Inline(d) if d == b"JPEGDATA"));
         assert_eq!((atts[1].filename.as_str(), atts[1].mime.as_str()), ("link-icon.png", "image/png"));
+        // an icon that is not PNG / JPEG (SVG, ICO) and an SVG image: dropped
+        let mut svg = lp(Some(URL), Some("T"), Some(0), Some(1));
+        svg.image.as_mut().unwrap().mime_type = "image/svg+xml".into();
+        let (m, atts) = received(link_msg(URL, svg, vec![b"<svg xmlns='x'/>".to_vec(), b"\0\0\x01\0ico".to_vec()]));
+        assert!(matches!(&m.parts[1], MessagePart::Link { image_attachment_id: None, icon_attachment_id: None, .. }), "{:?}", m.parts);
+        assert!(atts.is_empty());
+        // a PNG claimed as JPEG gets its real type
+        let (_, atts) = received(link_msg(URL, lp(Some(URL), Some("T"), Some(0), None), vec![png_bytes()]));
+        assert_eq!((atts[0].mime.as_str(), atts[0].filename.as_str()), ("image/png", "link-image.png"));
 
         // only a URL balloon, no text: the URL becomes the text; no image
         let (m, atts) = received(link_msg("", lp(Some(URL), None, None, None), vec![]));
@@ -1482,10 +1515,10 @@ mod tests {
             summary: Some("Sum".into()),
             site_name: Some("Example".into()),
             image: Some(LinkImage { data: b"IMG".to_vec(), mime: "image/jpeg".into(), width: 1200, height: 630, source_url: "https://example.com/i.jpg".into() }),
-            icon: Some(LinkImage { data: b"ICO".to_vec(), mime: "image/png".into(), width: 180, height: 180, source_url: String::new() }),
+            icon: Some(LinkImage { data: png_bytes(), mime: "image/png".into(), width: 180, height: 180, source_url: String::new() }),
         };
         let meta = link_meta(&p);
-        assert_eq!(meta.attachments, vec![b"IMG".to_vec(), b"ICO".to_vec()]);
+        assert_eq!(meta.attachments, vec![b"IMG".to_vec(), png_bytes()]);
         assert_eq!(meta.data.image.as_ref().unwrap().rich_link_image_attachment_substitute_index, 0);
         assert_eq!(meta.data.icon.as_ref().unwrap().rich_link_image_attachment_substitute_index, 1);
         assert_eq!(meta.data.image_metadata.as_ref().unwrap().size, "{1200, 630}");
@@ -1498,8 +1531,9 @@ mod tests {
         let back: RichLinkArchive = plist::from_value(&rustpush::KeyedArchive::expand_root(&bin).unwrap()).unwrap();
         let mid = MessageId::new("abc");
         let (part, atts) = link_from_meta(&mid, &LinkMeta { data: back.rich_link_metadata, attachments: meta.attachments.clone() }).unwrap();
-        let MessagePart::Link { url, title, summary, site_name, image_attachment_id, icon_attachment_id } = &part else { panic!() };
+        let MessagePart::Link { url, original_url, title, summary, site_name, image_attachment_id, icon_attachment_id } = &part else { panic!() };
         assert_eq!((url.as_str(), title.as_deref(), summary.as_deref(), site_name.as_deref()), ("https://example.com/final", Some("Title"), Some("Sum"), None));
+        assert_eq!(original_url.as_deref(), Some("https://example.com/r"));
         assert_eq!((image_attachment_id.as_ref().unwrap().0.as_str(), icon_attachment_id.as_ref().unwrap().0.as_str()), ("ABC:link-image", "ABC:link-icon"));
         assert_eq!(atts.len(), 2);
         // our own row keeps the site name

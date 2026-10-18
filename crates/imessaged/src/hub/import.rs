@@ -179,6 +179,29 @@ impl Hub {
     }
 }
 
+/// An imported preview file: bytes, MIME type, width, height (PNG / JPEG
+/// only; anything else was already dropped).
+type LinkFile = (Vec<u8>, &'static str, u32, u32);
+
+/// Smaller than this on both sides is an icon, not a hero image.
+const TINY_IMAGE_PX: u32 = 64;
+
+/// Sanity-check the `(image, icon)` roles of imported preview files: an
+/// "icon" larger than 256 px with a tiny "image" are swapped; otherwise an
+/// icon over 256 px is dropped, and a tiny image becomes the icon if there
+/// is none, else is dropped.
+fn link_roles(image: Option<LinkFile>, icon: Option<LinkFile>) -> (Option<LinkFile>, Option<LinkFile>) {
+    let tiny = |f: &Option<LinkFile>| f.as_ref().is_some_and(|(_, _, w, h)| *w < TINY_IMAGE_PX && *h < TINY_IMAGE_PX);
+    let big_icon = |f: &Option<LinkFile>| f.as_ref().is_some_and(|(_, _, w, h)| *w > 256 || *h > 256);
+    match (image, icon) {
+        (i, c) if tiny(&i) && big_icon(&c) => (c, i),
+        (i, c) if big_icon(&c) => (i, None),
+        (i, None) if tiny(&i) => (None, i),
+        (i, c) if tiny(&i) => (None, c),
+        other => other,
+    }
+}
+
 /// The bytes of an imported link-preview file: a regular file (not a
 /// symlink) of at most [`convert::MAX_LINK_IMAGE_BYTES`].
 async fn read_link_image(path: &str) -> Option<Vec<u8>> {
@@ -208,26 +231,33 @@ impl Hub {
             return vec![];
         };
         let url = parsed.link_url().unwrap_or_default();
-        let mut atts = vec![];
-        let mut take = async |sub: &Option<(u64, String)>, id: AttachmentId, kind: &str| -> Option<AttachmentId> {
-            let (idx, mime) = sub.as_ref()?;
-            let path = link.images.get(usize::try_from(*idx).ok()?)?.as_deref()?;
+        // The archive's indexes are taken as positions among the message's
+        // hidden preview files (chat.db order; not yet confirmed against a
+        // real export), so check the files fit their role.
+        let read = async |sub: &Option<(u64, String)>| -> Option<(Vec<u8>, &'static str, u32, u32)> {
+            let path = link.images.get(usize::try_from(sub.as_ref()?.0).ok()?)?.as_deref()?;
             let data = read_link_image(path).await?;
-            let mime = if mime.is_empty() { crate::linkpreview::image_info(&data).map(|(m, _, _)| m.to_string()).unwrap_or_default() } else { mime.clone() };
-            let a = convert::link_attachment(id, &m.id, kind, &mime, &data)?;
+            let (mime, w, h) = crate::linkpreview::image_info(&data)?;
+            Some((data, mime, w, h))
+        };
+        let (image, icon) = link_roles(read(&parsed.image).await, read(&parsed.icon).await);
+        let mut atts = vec![];
+        let mut add = |f: Option<(Vec<u8>, &'static str, u32, u32)>, id: AttachmentId, kind: &str| -> Option<AttachmentId> {
+            let (data, mime, _, _) = f?;
+            let a = convert::link_attachment(id, &m.id, kind, mime, &data)?;
             let id = a.id.clone();
             atts.push(a);
             Some(id)
         };
-        let image_attachment_id = take(&parsed.image, AttachmentId::link_image(&m.id), "link-image").await;
-        let icon_attachment_id = take(&parsed.icon, AttachmentId::link_icon(&m.id), "link-icon").await;
+        let image_attachment_id = add(image, AttachmentId::link_image(&m.id), "link-image");
+        let icon_attachment_id = add(icon, AttachmentId::link_icon(&m.id), "link-icon");
         m.parts.retain(|p| !matches!(p, MessagePart::Unsupported { .. } | MessagePart::Link { .. }));
         if m.text.as_deref().is_none_or(|t| t.trim().is_empty()) {
             m.parts.retain(|p| !matches!(p, MessagePart::Text { .. }));
             m.parts.insert(0, MessagePart::Text { text: url.clone() });
             m.text = Some(url.clone());
         }
-        m.parts.push(MessagePart::Link { url, title: parsed.title, summary: parsed.summary, site_name: None, image_attachment_id, icon_attachment_id });
+        m.parts.push(MessagePart::Link { url, original_url: parsed.original_url, title: parsed.title, summary: parsed.summary, site_name: None, image_attachment_id, icon_attachment_id });
         self.keep_link_files(atts).await
     }
 }
@@ -267,5 +297,25 @@ impl Hub {
             summary.handles
         );
         Ok(summary)
+    }
+}
+
+#[cfg(test)]
+mod link_role_tests {
+    use super::*;
+
+    fn f(w: u32, h: u32) -> Option<LinkFile> {
+        Some((vec![], "image/png", w, h))
+    }
+
+    #[test]
+    fn roles() {
+        let dims = |(i, c): (Option<LinkFile>, Option<LinkFile>)| (i.map(|x| x.2), c.map(|x| x.2));
+        assert_eq!(dims(link_roles(f(1200, 630), f(180, 180))), (Some(1200), Some(180)), "as indexed");
+        assert_eq!(dims(link_roles(f(32, 32), f(1200, 630))), (Some(1200), Some(32)), "swapped");
+        assert_eq!(dims(link_roles(f(1200, 630), f(512, 512))), (Some(1200), None), "icon too big");
+        assert_eq!(dims(link_roles(f(16, 16), None)), (None, Some(16)), "tiny image is the icon");
+        assert_eq!(dims(link_roles(f(16, 16), f(64, 64))), (None, Some(64)));
+        assert_eq!(dims(link_roles(None, None)), (None, None));
     }
 }

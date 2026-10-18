@@ -264,7 +264,7 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
      "mime": "image/jpeg", "filename": "IMG_0001.jpeg", "size": 183422},
     {"type": "mention", "handle": "mailto:carol@example.com", "text": "Carol"},
     {"type": "unsupported", "description": "app message"},
-    {"type": "link", "url": "https://example.com/story", "title": "A story", "summary": "What happened",
+    {"type": "link", "url": "https://example.com/story", "original_url": "https://exam.pl/s1", "title": "A story", "summary": "What happened",
      "site_name": null, "image_attachment_id": "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0:link-image",
      "icon_attachment_id": null}
   ],
@@ -299,7 +299,9 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
   `{"emoji": "…"}` for emoji reactions.
 * `text` concatenates the text and mention parts; `null` if none.
 * `link`: a link preview (Messages' URL balloon), after the text parts.
-  Only `url` is always there; `title`, `summary`, `site_name` (from the
+  Only `url` (the page, after redirects) is always there;
+  `original_url` (the URL as written in the message, when the sender's
+  metadata has one), `title`, `summary`, `site_name` (from the
   page's `og:site_name`; only on previews this daemon fetched, else show
   the URL's host) and the attachment ids may be `null` or missing. The
   image and icon are ordinary inline attachments of the message, ids
@@ -310,7 +312,11 @@ our own handles), where it is that handle. Handles may carry `"display"` (not fi
   URL: a balloon sent without text gets the URL as `text` (and a text
   part), so search, snippets and the CLI keep working. The sender built
   the preview; the daemon never fetches anything for a received link
-  (see docs/DAEMON.md, "Link previews").
+  (see docs/DAEMON.md, "Link previews"). Show the card instead of the
+  text when the text is a single `http(s)` token (the card's `url` may
+  differ from it after redirects). An edit that removes the URL from the
+  text (neither `url` nor `original_url` left in it) drops the `link`
+  part. A preview's icon is always PNG or JPEG.
 * An unsent message keeps its id/sender/time with `text: null`,
   `parts: []`, `unsent: true`.
 

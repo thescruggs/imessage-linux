@@ -83,7 +83,8 @@ struct MessagePart {
     QString handle; ///< Mention
     QString description; ///< Unsupported
     // Link (a link preview: the page's metadata as the sender fetched it)
-    QString url; ///< Link
+    QString url; ///< Link: the page (after redirects)
+    QString originalUrl; ///< Link: the URL as written in the message, empty = not given
     QString title; ///< Link, empty = none
     QString summary; ///< Link, empty = none
     QString siteName; ///< Link, empty = unknown (show the URL's host)
@@ -141,7 +142,9 @@ struct Message {
     QList<Attachment> attachments() const;
     /// The first link part (Messages shows one preview per message).
     std::optional<MessagePart> link() const;
-    /// The text is nothing but the link's URL: the preview card replaces it.
+    /// The text is nothing but a link (one http(s) token, or the link's URL /
+    /// original URL): the preview card replaces it. The card's URL may be
+    /// the page after redirects, so any single http(s) token counts.
     bool isOnlyLink() const;
     /// Descriptions of parts we cannot render.
     QStringList unsupported() const;

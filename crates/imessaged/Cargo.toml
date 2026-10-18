@@ -36,7 +36,11 @@ base64 = "0.21"
 url = "2"
 # Link previews for links we send (linkpreview.rs). rustpush already links
 # reqwest 0.11 with these features, so this adds nothing to the build.
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "gzip"] }
+# reqwest 0.11's DNS hook names hyper's `Name` (same hyper 0.14 / features
+# as reqwest); encoding_rs decodes pages in their declared charset.
+hyper = { version = "0.14", default-features = false, features = ["client", "tcp"] }
+encoding_rs = "0.8"
 aes-gcm = "0.10"
 rand = "0.8"
 sha2.workspace = true

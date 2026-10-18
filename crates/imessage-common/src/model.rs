@@ -418,7 +418,12 @@ pub enum MessagePart {
     /// `<message id>:link-icon`, with no attachment part of their own.
     /// The message's text keeps the URL.
     Link {
+        /// The page (after redirects / as the sender's device resolved it).
         url: String,
+        /// The URL as written in the message, when the sender's metadata
+        /// has one (it may differ from `url`).
+        #[serde(default)]
+        original_url: Option<String>,
         #[serde(default)]
         title: Option<String>,
         #[serde(default)]
@@ -787,6 +792,7 @@ mod tests {
         let m = MessageId::new("m1");
         let l = MessagePart::Link {
             url: "https://example.com/a".into(),
+            original_url: None,
             title: Some("A".into()),
             summary: None,
             site_name: None,
@@ -796,7 +802,7 @@ mod tests {
         let j = serde_json::to_string(&l).unwrap();
         assert_eq!(
             j,
-            r#"{"type":"link","url":"https://example.com/a","title":"A","summary":null,"site_name":null,"image_attachment_id":"M1:link-image","icon_attachment_id":null}"#
+            r#"{"type":"link","url":"https://example.com/a","original_url":null,"title":"A","summary":null,"site_name":null,"image_attachment_id":"M1:link-image","icon_attachment_id":null}"#
         );
         assert_eq!(serde_json::from_str::<MessagePart>(&j).unwrap(), l);
         // only url is required

@@ -20,7 +20,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
 use crate::engine::{convert, ChatTarget, Engine, EngineError, LinkPreview, LoginOutcome, SentMessage, MAX_ATTACHMENT_BYTES, MAX_BACKGROUND_BYTES};
-use crate::linkpreview::FetchOptions;
+use crate::linkpreview::{FetchOptions, Fetcher};
 use crate::store::{MessagePage, StoreError, StoreHandle, StoreUpdate};
 
 /// Typing indicators are cleared after this long without a refresh.
@@ -265,7 +265,7 @@ pub struct Hub {
     mac_host: Mutex<Option<String>>,
     /// Link previews for links we send (`link_previews` setting); `None` =
     /// off (the default for a bare `Hub`; the daemon turns them on).
-    link_previews: Mutex<Option<FetchOptions>>,
+    link_previews: Mutex<Option<Arc<Fetcher>>>,
 }
 
 impl Hub {
@@ -291,22 +291,29 @@ impl Hub {
     /// Fetch link previews for links we send with these options (`None` =
     /// off).
     pub fn set_link_previews(&self, opts: Option<FetchOptions>) {
-        *self.link_previews.lock().unwrap_or_else(|p| p.into_inner()) = opts;
+        let fetcher = opts.and_then(|o| match Fetcher::new(o) {
+            Ok(f) => Some(Arc::new(f)),
+            Err(e) => {
+                log::warn!("link previews off: cannot set up the HTTP client: {e}");
+                None
+            }
+        });
+        *self.link_previews.lock().unwrap_or_else(|p| p.into_inner()) = fetcher;
     }
 
     /// The preview for the first link in `text`, if previews are on and the
     /// fetch works out; any failure is logged (host only) and means none.
     async fn link_preview(&self, text: &str) -> Option<LinkPreview> {
-        let opts = self.link_previews.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
+        let fetcher = self.link_previews.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
         let url = crate::linkpreview::first_url(text)?;
         let host = imessage_common::model::link_host(&url).unwrap_or_default();
-        match crate::linkpreview::fetch(&url, &opts).await {
+        match fetcher.fetch(&url).await {
             Ok(p) => {
-                log::info!("link preview for {host}: title {}, image {}, icon {}", p.title.is_some(), p.image.is_some(), p.icon.is_some());
+                log::debug!("link preview for {host}: title {}, image {}, icon {}", p.title.is_some(), p.image.is_some(), p.icon.is_some());
                 Some(p)
             }
             Err(e) => {
-                log::info!("no link preview for {host}: {e}");
+                log::debug!("no link preview for {host}: {e}");
                 None
             }
         }
@@ -939,17 +946,30 @@ impl Hub {
         // Text messages carry no reply reference.
         let reply_to = reply_to.filter(|_| service == Service::Imessage);
         // Text messages (MMS) cannot carry a preview.
-        let link = if service == Service::Imessage { self.link_preview(text).await } else { None };
-        let send = || async {
-            match &link {
-                Some(l) => self.engine.send_text_with_link(&target, text, reply_to.as_ref(), l).await,
-                None => self.engine.send_text_via(&target, text, reply_to.as_ref(), service).await,
+        let mut link = if service == Service::Imessage { self.link_preview(text).await } else { None };
+        let send = |link: Option<LinkPreview>| {
+            let (target, reply_to) = (&target, reply_to.as_ref());
+            async move {
+                match &link {
+                    Some(l) => self.engine.send_text_with_link(target, text, reply_to, l).await,
+                    None => self.engine.send_text_via(target, text, reply_to, service).await,
+                }
             }
         };
-        let sent = match send().await {
-            Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => send().await?,
-            r => r?,
-        };
+        let mut r = send(link.clone()).await;
+        if matches!(r, Err(EngineError::ChatNotFound(_))) && self.reseed(&target).await {
+            r = send(link.clone()).await;
+        }
+        // The preview must never cost the message: a balloon that cannot
+        // go out (upload, packing) sends the text alone.
+        if let (Err(e), Some(l)) = (&r, &link)
+            && !matches!(e, EngineError::ChatNotFound(_))
+        {
+            log::warn!("link preview for {} not sent ({e}); sending the text alone", imessage_common::model::link_host(&l.url).unwrap_or_default());
+            link = None;
+            r = send(None).await;
+        }
+        let sent = r?;
         let mut parts = vec![MessagePart::Text { text: text.to_string() }];
         let mut atts = vec![];
         if let Some((part, link_atts)) = link.as_ref().and_then(|l| convert::link_for_sent(&sent.id, l)) {

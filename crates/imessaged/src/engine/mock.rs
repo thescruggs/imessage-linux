@@ -405,13 +405,14 @@ impl Engine for MockEngine {
     }
 
     async fn send_text_with_link(&self, chat: &ChatTarget, text: &str, reply_to: Option<&MessageId>, link: &LinkPreview) -> EngineResult<SentMessage> {
-        self.lock().calls.push(MockCall::LinkPreview {
+        // `fail_next` fails the balloon send (the hub then sends the text alone).
+        self.record(MockCall::LinkPreview {
             url: link.url.clone(),
             original_url: link.original_url.clone(),
             title: link.title.clone(),
             image_bytes: link.image.as_ref().map(|i| i.data.len()),
             icon_bytes: link.icon.as_ref().map(|i| i.data.len()),
-        });
+        })?;
         self.send_text(chat, text, reply_to).await
     }
 

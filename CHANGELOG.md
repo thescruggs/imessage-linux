@@ -8,8 +8,10 @@
   message". When you send an iMessage with a link, the daemon fetches the
   page first (5 s at most; Open Graph / Twitter card / `<title>`, the
   site icon and image) and sends the preview with the text, so the other
-  side's iPhone or Mac shows the same card; on any failure the text goes
-  out alone. Text messages (SMS) get no preview. Privacy: the daemon
+  side's iPhone or Mac shows the same card; on any failure (also when
+  the preview itself cannot be sent) the text goes out alone. Pages on
+  private addresses are never fetched, also when a public-looking name
+  resolves to one. Text messages (SMS) get no preview. Privacy: the daemon
   contacts the linked site when *you send* a link, never when you
   receive one; turn it off with `link_previews = false` (or
   `--no-link-previews`). New `link` message part on D-Bus (the image and

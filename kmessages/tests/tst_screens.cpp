@@ -398,7 +398,8 @@ private Q_SLOTS:
         QTRY_COMPARE_WITH_TIMEOUT(visibleItems(u"linkPreviewImage"_s).size(), 1, Timeout);
         QVERIFY(showsText(u"Plasma: what's new this spring"_s));
         QVERIFY(showsText(u"Fluffy pancakes"_s));
-        QVERIFY(!showsText(u"https://www.example.org/blog/plasma-release"_s));
+        // the bare URL (as typed; the card's page is where it redirected) is hidden
+        QVERIFY(!showsText(u"https://example.org/plasma"_s));
         shoot(u"link-preview"_s);
     }
 

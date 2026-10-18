@@ -626,6 +626,7 @@ mod tests {
             MessagePart::Text { text: "see https://www.example.com/a".into() },
             MessagePart::Link {
                 url: "https://www.example.com/a".into(),
+                original_url: None,
                 title: Some("An  Example\npage".into()),
                 summary: Some("s".into()),
                 site_name: None,

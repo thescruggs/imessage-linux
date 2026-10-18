@@ -287,6 +287,18 @@ async fn send_text_with_link_preview() {
     let path: String = h.p.call("DownloadAttachment", &(format!("{id}:link-image"),)).await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap().len(), 64);
     assert!(path.starts_with(h.dir.path().join("attachments").to_str().unwrap()));
+
+    // the balloon cannot go out (upload / packing error): the text still does
+    let before = h.mock.calls().len();
+    h.mock.fail_next("balloon upload failed");
+    let sent = h.call_json("SendText", &(BOB, "", text.as_str(), "")).await;
+    let id = sent["id"].as_str().unwrap().to_string();
+    let calls = h.mock.calls()[before..].to_vec();
+    assert!(matches!(&calls[..], [MockCall::LinkPreview { .. }, MockCall::SendText { text: t, .. }] if *t == text), "{calls:?}");
+    let page = h.call_json("ListMessages", &(BOB, "", 50u32)).await;
+    let m = page["messages"].as_array().unwrap().iter().find(|m| m["id"] == id.as_str()).unwrap().clone();
+    assert_eq!(m["parts"].as_array().unwrap().len(), 1, "no link part: {m}");
+    assert_eq!(m["text"], text.as_str());
     h.shutdown().await;
 }
 
@@ -308,6 +320,7 @@ async fn received_link_preview_files() {
             MessagePart::Text { text: "https://example.com/".into() },
             MessagePart::Link {
                 url: "https://example.com/".into(),
+                original_url: None,
                 title: Some("Example".into()),
                 summary: None,
                 site_name: None,

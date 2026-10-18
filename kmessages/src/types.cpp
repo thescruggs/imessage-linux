@@ -4,6 +4,8 @@
 
 #include <KLocalizedString>
 
+#include <algorithm>
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLocale>
@@ -150,7 +152,20 @@ std::optional<MessagePart> Message::link() const
 bool Message::isOnlyLink() const
 {
     const auto l = link();
-    return l && !l->url.isEmpty() && text.trimmed() == l->url.trimmed();
+    if (!l || l->url.isEmpty()) {
+        return false;
+    }
+    const QString t = text.trimmed();
+    if (t.isEmpty()) {
+        return false;
+    }
+    if (t == l->url.trimmed() || (!l->originalUrl.isEmpty() && t == l->originalUrl.trimmed())) {
+        return true;
+    }
+    const bool oneToken = std::none_of(t.cbegin(), t.cend(), [](QChar c) {
+        return c.isSpace();
+    });
+    return oneToken && (t.startsWith("https://"_L1, Qt::CaseInsensitive) || t.startsWith("http://"_L1, Qt::CaseInsensitive));
 }
 
 QStringList Message::unsupported() const
@@ -444,6 +459,7 @@ std::optional<MessagePart> part(const QJsonObject &o, QString *error)
         p.type = MessagePart::Type::Link;
         // Everything but the URL may be missing or null (toString() of null = "").
         p.url = o.value("url"_L1).toString();
+        p.originalUrl = o.value("original_url"_L1).toString();
         p.title = o.value("title"_L1).toString();
         p.summary = o.value("summary"_L1).toString();
         p.siteName = o.value("site_name"_L1).toString();

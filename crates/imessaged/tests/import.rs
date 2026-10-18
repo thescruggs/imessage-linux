@@ -157,9 +157,12 @@ async fn import_link_previews() {
     let dir = tempfile::tempdir().unwrap();
     let staging = tempfile::tempdir().unwrap();
     let img = staging.path().join("hero.pluginPayloadAttachment");
-    std::fs::write(&img, b"\xFF\xD8\xFFjpeg").unwrap();
+    // a JPEG header (SOF0 600x315) and a 64 px PNG header
+    let jpeg: Vec<u8> = [&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x3B, 0x02, 0x58][..], &[0u8; 12]].concat();
+    let png: Vec<u8> = [&b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x40\0\0\0\x40"[..], &[8, 6, 0, 0, 0]].concat();
+    std::fs::write(&img, &jpeg).unwrap();
     let icon = staging.path().join("icon.pluginPayloadAttachment");
-    std::fs::write(&icon, b"\x89PNGicon").unwrap();
+    std::fs::write(&icon, &png).unwrap();
     let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), Arc::new(MockEngine::new())).with_store(store(dir.path())).start().await.unwrap();
     let hub = running.hub();
     let preview = imessaged::engine::LinkPreview {
@@ -205,8 +208,8 @@ async fn import_link_previews() {
     std::fs::remove_file(&img).unwrap();
     let path = hub.download_attachment(&i.0).await.unwrap();
     assert!(std::path::Path::new(&path).starts_with(hub.attachments_dir()), "{path}");
-    assert_eq!(std::fs::read(&path).unwrap(), b"\xFF\xD8\xFFjpeg");
-    assert_eq!(std::fs::read(hub.download_attachment(&c.0).await.unwrap()).unwrap(), b"\x89PNGicon");
+    assert_eq!(std::fs::read(&path).unwrap(), jpeg);
+    assert_eq!(std::fs::read(hub.download_attachment(&c.0).await.unwrap()).unwrap(), png);
     // with text: text kept, card after it; the image file was not available
     let m = get("LINK-2").await;
     assert_eq!(m.text.as_deref(), Some("read this https://example.com/story"));

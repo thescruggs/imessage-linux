@@ -1513,6 +1513,16 @@ fn apply_edit_tx(
         parts = new_parts.to_vec();
         parts.extend(atts);
     }
+    // A link preview stays only while the edited text still has its URL.
+    parts.retain(|p| !matches!(p, MessagePart::Link { .. }));
+    let new_text = text_of(&parts).unwrap_or_default();
+    for l in m.parts.iter().filter(|p| matches!(p, MessagePart::Link { .. })) {
+        if let MessagePart::Link { url, original_url, .. } = l
+            && (new_text.contains(url.as_str()) || original_url.as_deref().is_some_and(|o| !o.is_empty() && new_text.contains(o)))
+        {
+            parts.push(l.clone());
+        }
+    }
     tx.execute(
         "UPDATE messages SET parts = ?2, text = ?3, edited = 1, edited_at = ?4 WHERE id = ?1",
         params![id.0, json(&parts), text_of(&parts), to_i64(at)],

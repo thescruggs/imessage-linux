@@ -892,7 +892,8 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QAbstractItemModelTester tester(msgs.get());
 
         // only a URL: the card replaces the text; image + icon, no attachments
-        const int only = rowWithText(*msgs, u"https://www.example.org/blog/plasma-release"_s);
+        // (the text is the typed short URL; the card has the page it redirected to)
+        const int only = rowWithText(*msgs, u"https://example.org/plasma"_s);
         QVERIFY(only >= 0);
         QVERIFY(roleOf(*msgs, only, MessageListModel::LinkOnlyRole).toBool());
         auto link = roleOf(*msgs, only, MessageListModel::LinkRole).toMap();
@@ -938,6 +939,14 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::SnippetRole).toString(), u"Big news"_s, Timeout);
         m_fake.control(u"InjectLink"_s, {Bob, Bob, u"read this https://news.example.com/y"_s, u"https://news.example.com/y"_s, u"Other"_s, QString(), false, false});
         QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 0, ChatListModel::SnippetRole).toString(), u"read this https://news.example.com/y"_s, Timeout);
+
+        // a javascript: "URL" is shown but never opened
+        m_fake.control(u"InjectLink"_s, {eve, eve, u"look"_s, u"javascript:alert(1)"_s, u"Evil"_s, QString(), false, false});
+        QTRY_VERIFY_WITH_TIMEOUT(rowWithText(*msgs, u"look"_s) >= 0, Timeout);
+        link = roleOf(*msgs, rowWithText(*msgs, u"look"_s), MessageListModel::LinkRole).toMap();
+        QCOMPARE(link.value(u"url"_s).toString(), u"javascript:alert(1)"_s);
+        QVERIFY(!link.value(u"openable"_s).toBool());
+        QVERIFY(!roleOf(*msgs, rowWithText(*msgs, u"look"_s), MessageListModel::LinkOnlyRole).toBool());
     }
 
     void sendFileSameNames()

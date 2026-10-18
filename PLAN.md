@@ -342,6 +342,27 @@ balloon shows "app message".
    message menu (so tapbacks / reply stay reachable from the card); fake
    daemon seeds two link messages in Eve's chat and has `InjectLink`.
 
+   Review fixes (2026-10-18): every name is resolved by our own
+   `GuardedResolver` (reqwest `dns_resolver`), which drops private
+   addresses, so a public-looking name pointing inside (split horizon,
+   `metadata.internal`, rebinding) is never fetched, for the page, a
+   redirect hop, the image or the icon; `private_ip` also covers 0/8,
+   multicast, site-local and IPv4-compatible v6. A balloon that cannot
+   be sent (MMCS upload of the balloon, packing) falls back to the text
+   alone. The part gained `original_url`; kmessages treats any single
+   http(s) token as link-only (the card's URL is after redirects). Pages
+   are decoded in their declared charset (`encoding_rs`); one reqwest
+   client, no `Referer`; images ≤ 4096 px; icons PNG / JPEG only (also on
+   receive); an edit drops the card when its URL leaves the text; Mac
+   import checks the indexed files fit their role (swap / drop).
+   **Known risk (not ours to fix here):** rustpush's receive path parses
+   the URL balloon with `KeyedArchive::expand_root`, which `unwrap`s the
+   root and indexes `$objects` / `expect`s equal key and value counts
+   without bounds checks, so a malformed balloon from a peer can panic
+   the receive task. Our own import path wraps the same code in
+   `catch_unwind`; the receive path is left as is (third_party is not
+   modified) and tracked separately.
+
 Order: D (CLI first, then the button) together with A's daemon part, then
 A's app part, E, B, C. Release as 0.1.13.
 

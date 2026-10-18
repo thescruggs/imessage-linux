@@ -465,8 +465,9 @@ send.
 text parts (URL from `URL`, else `originalURL`; title / summary trimmed);
 the image and icon bytes the balloon's substitutes index become inline
 attachment rows `<id>:link-image` / `<id>:link-icon` (an index outside
-the balloon's attachments, empty data or more than 8 MiB: left out, the
-card stays). The pump writes their files under `attachments/` right
+the balloon's attachments, empty data or more than 8 MiB, an icon that
+is not PNG / JPEG by its bytes, or an SVG / markup image: left out, the
+card stays; a PNG / JPEG gets its real MIME type). The pump writes their files under `attachments/` right
 after storing the message (no network: the bytes are in the locator). A
 balloon without text gets the URL as its text. A balloon rustpush could
 not parse (it logs "Error parsing url preview") keeps the old behaviour:
@@ -479,10 +480,14 @@ with `link_previews` on, `SendText` (iMessage only: `SendTextAs` with
 `sms`, and any send that goes out as a text message, carry no preview;
 MMS has no such balloon) takes the first `http(s)://` token of the text
 (trailing punctuation and unbalanced closing brackets dropped) and, before
-sending, fetches it with reqwest: one **5 s deadline** for everything,
-at most 3 redirects, User-Agent `imessage-linux/<version>`, only
-`text/html` / `application/xhtml+xml`, at most 2 MiB read (it stops at
-`</head>`). A small tolerant scanner reads the head (no HTML crate:
+sending, fetches it with reqwest (one client for all sends, no
+`Referer`, gzip accepted): one **5 s deadline** for everything, at most
+3 redirects, User-Agent `imessage-linux/<version>`, only `text/html` /
+`application/xhtml+xml`, at most 2 MiB read (it stops at `</head>`; the
+cap also holds for a streamed body without `Content-Length`). The page
+is decoded in its declared charset (a BOM, the `Content-Type` charset,
+else `<meta charset>` / `<meta http-equiv=content-type>` in the first
+4 KB; default UTF-8) with `encoding_rs`. A small tolerant scanner reads the head (no HTML crate:
 unquoted / single-quoted attributes, any case, comments, scripts and
 styles skipped, character references decoded): title from `og:title`,
 `twitter:title`, `<title>`; summary from `og:description`,
@@ -490,8 +495,8 @@ styles skipped, character references decoded): title from `og:title`,
 `og:image(:secure_url|:url)`, `twitter:image`; `og:site_name`; icon from
 `apple-touch-icon(-precomposed)`, else PNG / JPEG `rel=icon` (never
 `.ico` / SVG); relative URLs against `<base href>` or the final URL.
-The image is downloaded if at most 5 MiB and the icon must be at most
-256 px a side. The daemon has no image codec (the `image` crate is not a
+The image is downloaded if at most 5 MiB and must be at most 4096 px a
+side; the icon at most 256 px (sizes from the PNG / JPEG header). The daemon has no image codec (the `image` crate is not a
 dependency), so images are **not re-encoded**: a JPEG or PNG of at most
 1 MiB is sent as is, anything else is left out (the card then shows the
 icon and title). A preview needs a title or an image. The text and the
@@ -499,15 +504,30 @@ balloon go out in **one** message (`LPLinkMetadata` with `URL` = the
 final URL, `originalURL` = the URL as typed, `imageMetadata.size`
 `"{w, h}"`, version 1; image first, icon second in the attachments). Any
 failure (timeout, error status, not HTML, nothing found) sends the text
-alone, as Messages does when offline; the log line names only the host.
+alone, as Messages does when offline; the debug log line names only
+the host. If the balloon itself cannot go out (rustpush uploads a
+balloon over 1 KB to MMCS, which can fail, or packing fails), the
+message is sent again without it (logged as a warning with the host) and
+the row is stored without the `link` part; only a `ChatNotFound` follows
+the usual re-seed-and-retry path. An edit keeps the `link` part only
+while the new text still contains `url` or `original_url`.
 The stored row gets the same `link` part (plus `site_name`) and the
 image / icon files, so our own bubble shows the card.
 
-Hosts that are `localhost`, `*.local`, `*.localhost`, `*.internal`, a
-single label, or a loopback / private / link-local / CGNAT IP literal
-are never fetched (also not as a redirect target): a preview of an
-internal page would send its title to the recipient. Names that resolve
-to private addresses are not checked.
+Private addresses are never fetched: a preview of an internal page
+would send its title, summary and image to the recipient. Hosts that are
+`localhost`, `*.local`, `*.localhost`, `*.internal`, a single label, or
+a private IP literal are refused up front (also as a redirect target),
+and every **name** goes through our own resolver (reqwest's
+`dns_resolver`, `GuardedResolver`): it looks the name up and drops
+loopback, private (10/8, 172.16/12, 192.168/16), link-local
+(169.254/16, fe80::/10), "this network" (0/8), CGNAT (100.64/10),
+broadcast, multicast, unique-local (fc00::/7), site-local (fec0::/10)
+and IPv4-mapped / -compatible forms of those; a name with nothing left
+fails the preview. reqwest connects only to the addresses it returns,
+so this holds for the page, every redirect hop, the image and the icon,
+and a DNS answer that changes between checks (rebinding) cannot slip
+through.
 
 **Privacy.** With `link_previews` on, the daemon contacts the linked
 site when **you send** a link (the site sees your IP address and our
@@ -519,7 +539,12 @@ User-Agent, as with a Mac); it never contacts anything for a link you
 URL balloons (the same `RichLink` archive) and the hidden preview files
 to `ImportMessages`, where the daemon decodes it (rustpush's
 `KeyedArchive`, read leniently) into the same `link` part, so imported
-history gets its cards back.
+history gets its cards back. The archive's image / icon indexes are
+taken as positions among the message's hidden preview files in
+`chat.db` order (not yet confirmed against a real export), so the files
+are checked: only PNG / JPEG are kept; an "icon" over 256 px with a tiny
+(< 64 px) "image" are swapped; otherwise an icon over 256 px is dropped,
+and a tiny image becomes the icon (or is dropped when there is one).
 
 ### Shared names and photos (CloudKit)
 

@@ -14,6 +14,8 @@ enum Canned {
     Redirect(&'static str),
     Slow(Duration),
     Status(u16),
+    /// A complete response as written (headers and body).
+    Raw(Vec<u8>),
 }
 
 /// Requests seen: (path, User-Agent).
@@ -53,6 +55,7 @@ fn serve(routes: Vec<(&'static str, Canned)>) -> (String, RequestLog) {
                         ("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(), vec![])
                     }
                     Canned::Status(s) => (format!("HTTP/1.1 {s} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), vec![]),
+                    Canned::Raw(r) => (String::new(), r),
                 };
                 let _ = conn.write_all(head.as_bytes());
                 let _ = conn.write_all(&body);
@@ -217,6 +220,90 @@ async fn oversize_page_and_images() {
     assert!(p.image.is_none());
 }
 
+/// A name that resolves to a private address is refused although the
+/// literal-host check passes: every connection (page, redirect hop, image,
+/// icon) goes through [`GuardedResolver`]. With private hosts allowed the
+/// same name works.
+#[tokio::test]
+async fn names_resolving_to_private_addresses_are_refused() {
+    let (base, log) = serve(vec![("/page", html("<title>Internal wiki</title>")), ("/hop", Canned::Redirect("/page"))]);
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let wiki = |ip: &str| ("wiki.corp.example.com".to_string(), ip.parse::<IpAddr>().unwrap());
+    let strict = FetchOptions { allow_private_hosts: false, hosts: vec![wiki("127.0.0.1")], ..opts() };
+    let url = format!("http://wiki.corp.example.com:{port}/page");
+    assert!(!is_private_host(&Url::parse(&url).unwrap()), "the literal check alone lets it through");
+    assert_eq!(fetch(&url, &strict).await, Err(PreviewError::PrivateHost));
+    assert!(log.lock().unwrap().is_empty(), "never connected");
+    // a mixed answer keeps only the public address (unreachable here)
+    let mixed = FetchOptions { hosts: vec![wiki("127.0.0.1"), wiki("192.0.2.1")], deadline: Duration::from_millis(300), ..strict.clone() };
+    assert!(fetch(&url, &mixed).await.is_err());
+    assert!(log.lock().unwrap().is_empty(), "127.0.0.1 dropped from the answer");
+    // allowed: the same name works, through a redirect
+    let open = FetchOptions { allow_private_hosts: true, hosts: vec![wiki("127.0.0.1")], ..opts() };
+    let p = fetch(&format!("http://wiki.corp.example.com:{port}/hop"), &open).await.unwrap();
+    assert_eq!(p.title.as_deref(), Some("Internal wiki"));
+    assert_eq!(p.url, url);
+}
+
+#[tokio::test]
+async fn charsets_gzip_and_streamed_bodies() {
+    // ISO-8859-1 declared in the header, and in a <meta> only
+    let latin1 = |s: &str| s.chars().map(|c| c as u32 as u8).collect::<Vec<u8>>();
+    let crc = |d: &[u8]| {
+        let mut c = !0u32;
+        for b in d {
+            c ^= *b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            }
+        }
+        !c
+    };
+    // gzip with one stored deflate block
+    let gz = |d: &[u8]| {
+        let mut v = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1];
+        v.extend_from_slice(&(d.len() as u16).to_le_bytes());
+        v.extend_from_slice(&(!(d.len() as u16)).to_le_bytes());
+        v.extend_from_slice(d);
+        v.extend_from_slice(&crc(d).to_le_bytes());
+        v.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        v
+    };
+    let zipped = gz(b"<title>Zipped page</title>");
+    let mut gzip_resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", zipped.len()).into_bytes();
+    gzip_resp.extend_from_slice(&zipped);
+    // chunked, no Content-Length: an image streamed past the cap
+    let mut chunked = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+    let big = png(100, 100, 300_000);
+    for c in big.chunks(50_000) {
+        chunked.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+        chunked.extend_from_slice(c);
+        chunked.extend_from_slice(b"\r\n");
+    }
+    chunked.extend_from_slice(b"0\r\n\r\n");
+    let (base, _) = serve(vec![
+        ("/l1", Canned::Ok { ctype: "text/html; charset=ISO-8859-1", body: latin1("<title>Caf\u{e9} cr\u{e8}me</title>") }),
+        ("/l2", Canned::Ok { ctype: "text/html", body: latin1("<meta http-equiv=Content-Type content='text/html; charset=iso-8859-1'><title>Gr\u{fc}\u{df}e</title>") }),
+        ("/l3", Canned::Ok { ctype: "text/html", body: [&b"<meta charset=\"windows-1252\"><title>"[..], &[0x93, b'q', 0x94], b"</title>"].concat() }),
+        ("/gz", Canned::Raw(gzip_resp)),
+        ("/stream", html(r#"<title>S</title><meta property="og:image" content="/big.png">"#)),
+        ("/big.png", Canned::Raw(chunked)),
+        ("/huge-px", html(r#"<title>H</title><meta property="og:image" content="/wide.png">"#)),
+        ("/wide.png", Canned::Ok { ctype: "image/png", body: png(8000, 100, 0) }),
+    ]);
+    assert_eq!(fetch(&format!("{base}/l1"), &opts()).await.unwrap().title.as_deref(), Some("Café crème"));
+    assert_eq!(fetch(&format!("{base}/l2"), &opts()).await.unwrap().title.as_deref(), Some("Grüße"));
+    assert_eq!(fetch(&format!("{base}/l3"), &opts()).await.unwrap().title.as_deref(), Some("“q”"));
+    assert_eq!(fetch(&format!("{base}/gz"), &opts()).await.unwrap().title.as_deref(), Some("Zipped page"));
+    let p = fetch(&format!("{base}/stream"), &FetchOptions { max_image_download: 100_000, ..opts() }).await.unwrap();
+    assert!(p.image.is_none(), "streamed past the cap without a Content-Length");
+    let p = fetch(&format!("{base}/stream"), &FetchOptions { max_image_download: 1 << 20, ..opts() }).await.unwrap();
+    assert_eq!(p.image.as_ref().map(|i| i.data.len()), Some(big.len()), "under the cap: read whole");
+    assert!(fetch(&format!("{base}/huge-px"), &opts()).await.unwrap().image.is_none(), "8000 px wide");
+    // UTF-8 by default; invalid bytes replaced
+    assert_eq!(decode_html(b"<title>\xff ok</title>", "text/html"), "<title>\u{fffd} ok</title>");
+}
+
 // ---------------------------------------------------------------------------
 // parser and helpers
 // ---------------------------------------------------------------------------
@@ -285,6 +372,12 @@ fn private_hosts() {
     }
     for p in ["https://example.com/", "http://8.8.8.8/", "https://[2001:4860::8888]/"] {
         assert!(!is_private_host(&Url::parse(p).unwrap()), "{p}");
+    }
+    for ip in ["0.1.2.3", "224.0.0.1", "239.1.1.1", "::127.0.0.1", "::ffff:10.0.0.1", "fec0::1", "ff02::1", "::", "::1"] {
+        assert!(private_ip(ip.parse().unwrap()), "{ip}");
+    }
+    for ip in ["1.1.1.1", "2606:4700::1111", "::ffff:8.8.8.8"] {
+        assert!(!private_ip(ip.parse().unwrap()), "{ip}");
     }
 }
 

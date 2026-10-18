@@ -99,9 +99,9 @@ def png_bytes(width=320, height=200):
             + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
-def link_part(mid, url, title, summary, site_name, image, icon):
+def link_part(mid, url, title, summary, site_name, image, icon, original_url=None):
     """A `link` part; its image / icon are attachments without parts of their own."""
-    return {"type": "link", "url": url, "title": title, "summary": summary, "site_name": site_name,
+    return {"type": "link", "url": url, "original_url": original_url, "title": title, "summary": summary, "site_name": site_name,
             "image_attachment_id": mid + ":link-image" if image else None,
             "icon_attachment_id": mid + ":link-icon" if icon else None}
 
@@ -210,11 +210,12 @@ class Store:
         self.chats[eve] = {"id": eve, "participants": [{"uri": eve, "display": "Eve Adams"}], "display_name": None,
                            "is_group": False, "last_message_at": None, "unread_count": 0, "pinned": False, "pin_order": None}
         # Link previews (before the rest, so Eve's snippet stays the app message):
-        # one message that is only a URL (image + icon), one with text (icon only).
-        url = "https://www.example.org/blog/plasma-release"
-        lm = self._msg(eve, eve, now - 10 * day, url)
-        lm["parts"].append(link_part(lm["id"], url, "Plasma: what's new this spring",
-                                     "Highlights of the release, with screenshots.", "Example Blog", True, True))
+        # one message that is only a URL (image + icon; the typed short URL
+        # redirected to the page), one with text (icon only).
+        typed = "https://example.org/plasma"
+        lm = self._msg(eve, eve, now - 10 * day, typed)
+        lm["parts"].append(link_part(lm["id"], "https://www.example.org/blog/plasma-release", "Plasma: what's new this spring",
+                                     "Highlights of the release, with screenshots.", "Example Blog", True, True, typed))
         url = "https://cooking.example.net/pancakes"
         lm = self._msg(eve, None, now - 10 * day + 5 * minute, "Saturday breakfast? " + url, from_me=True,
                        delivery="read")

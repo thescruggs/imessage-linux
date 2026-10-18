@@ -120,8 +120,10 @@ otherwise the site icon (`icon_attachment_id`, else a globe) beside the
 title; the title in bold, the site name (`site_name`, else the URL's host
 without `www.`) under it. A click opens the URL (http / https only), hover
 shows the full URL, right-click or press and hold opens the message menu,
-which has **Copy Link** for such messages. When the text is nothing but the
-URL (`linkOnly`), the card replaces the text bubble; other text keeps its
+which has **Copy Link** for such messages. When the text is nothing but a
+link (`linkOnly`: one `http(s)` token, or the part's `url` /
+`original_url`; the card's URL may be the page after redirects), the card
+replaces the text bubble; other text keeps its
 clickable links. The chat list and notifications show the title for a
 URL-only message. `MessageListModel` exposes `link` (url, title, summary,
 siteName, host, openable, image / icon download state) and `linkOnly`;
