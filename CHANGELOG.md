@@ -8,6 +8,14 @@
   as you type, the mouse moves it too), Enter adds the highlighted
   address or opens the highlighted group and falls back to what you
   typed, Escape clears the field and goes back when it is already empty.
+* **kmessages: emoji suggestions while typing.** Type `snake` (or
+  `:snake:`) and 🐍 is offered above the text field, as on macOS: Tab, or
+  Enter while the suggestions show, replaces the word with the highlighted
+  emoji, Left / Right pick another, Escape hides them for that word, a
+  click inserts one; emoji you use rank first. The emoji picker gets a
+  search field. On by default; Settings → "Suggest emoji while typing".
+  English keywords from Unicode CLDR 48 / Emoji 17.0, bundled (Unicode
+  License v3; `tools/gen-emoji-keywords.py` regenerates them).
 * **Link previews (as Messages).** A link someone sends with a preview
   now arrives as a card (title, site, image or icon) instead of plain
   text, and a message that was only a preview no longer shows "app

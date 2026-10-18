@@ -6,6 +6,7 @@ pkgbase = imessage-linux
 	install = imessage-linux.install
 	arch = x86_64
 	license = SSPL-1.0
+	license = Unicode-3.0
 	checkdepends = python
 	makedepends = cargo
 	makedepends = clang

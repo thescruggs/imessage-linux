@@ -5,6 +5,7 @@
 #include "chatlistmodel.h"
 #include "contactresolver.h"
 #include "daemonclient.h"
+#include "emojisuggestionmodel.h"
 #include "fakedaemon.h"
 #include "handlelookupmodel.h"
 #include "macsync.h"
@@ -12,6 +13,9 @@
 #include "messagesearchmodel.h"
 #include "outgoingfiles.h"
 #include "recipientpickermodel.h"
+
+#include <KConfigGroup>
+#include <KSharedConfig>
 
 #include <QAbstractItemModelTester>
 #include <QDateTime>
@@ -1515,6 +1519,152 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QCOMPARE(roleOf(picker, 0, RecipientPickerModel::SectionRole).toString(), QString());
         chats.clear();
         QCOMPARE(picker.rowCount(), 0);
+    }
+
+    void emojiSuggestions()
+    {
+        QCOMPARE_GT(EmojiSuggestionModel::tableSize(), 1500);
+        EmojiSuggestionModel m;
+        QAbstractItemModelTester tester(&m, QAbstractItemModelTester::FailureReportingMode::QtTest);
+        const auto emojis = [&] {
+            QStringList out;
+            for (int i = 0; i < m.rowCount(); ++i) {
+                out << roleOf(m, i, EmojiSuggestionModel::EmojiRole).toString();
+            }
+            return out;
+        };
+
+        // Exact short name first, then other exact keywords, prefixes, substrings.
+        m.setWord(u"snake"_s);
+        QVERIFY(m.rowCount() >= 1);
+        QCOMPARE(m.emojiAt(0), u"🐍"_s);
+        QCOMPARE(roleOf(m, 0, EmojiSuggestionModel::NameRole).toString(), u"snake"_s);
+        m.setWord(u"cat"_s);
+        QCOMPARE(m.emojiAt(0), u"🐈"_s); // short name "cat" beats 🐱 (keyword "cat")
+        // Then "cat" as a word of the short name, shorter names first:
+        // "cat face" before "grinning cat", both before "tiger" (keyword only).
+        QCOMPARE(m.emojiAt(1), u"🐱"_s);
+        QVERIFY(emojis().indexOf(u"😺"_s) > 1);
+        QVERIFY(!emojis().contains(u"🐅"_s));
+        QCOMPARE(m.rowCount(), EmojiSuggestionModel::DefaultLimit); // capped
+        m.setWord(u"joy"_s);
+        QVERIFY(emojis().contains(u"😂"_s)); // keyword "joy"
+        m.setWord(u"thumbs_up"_s); // _ matches a space
+        QCOMPARE(m.emojiAt(0), u"👍"_s);
+        m.setWord(u"SNAKE"_s);
+        QCOMPARE(m.emojiAt(0), u"🐍"_s);
+        // Prefix before substring: "rabb" → the rabbits, not something containing it later.
+        m.setWord(u"rabb"_s);
+        QVERIFY(emojis().contains(u"🐇"_s));
+        // Stable: the same word gives the same order.
+        m.setWord(u"heart"_s);
+        const QStringList hearts = emojis();
+        m.setWord(u"hearts"_s);
+        m.setWord(u"heart"_s);
+        QCOMPARE(emojis(), hearts);
+        QCOMPARE(m.emojiAt(0), u"❤️"_s); // "red heart": the shortest short name with the word "heart"
+
+        // A larger limit (the picker's search).
+        m.setLimit(40);
+        m.setWord(u"cat"_s);
+        QVERIFY(m.rowCount() > 8 && m.rowCount() <= 40);
+        m.setLimit(EmojiSuggestionModel::DefaultLimit);
+        QCOMPARE(m.rowCount(), EmojiSuggestionModel::DefaultLimit);
+
+        // Too short, not a word, nothing matching: no rows.
+        for (const auto &w : {u"sn"_s, u""_s, u"12345"_s, u"sn ake"_s, u"zzqqx"_s, u":s"_s, u"::"_s}) {
+            m.setWord(w);
+            QVERIFY2(m.rowCount() == 0, qPrintable(w));
+        }
+        // The colon form: two letters are enough; colons are stripped.
+        m.setWord(u":sn"_s);
+        QVERIFY(m.rowCount() > 0);
+        QCOMPARE(m.query(), u"sn"_s);
+        m.setWord(u":snake:"_s);
+        QCOMPARE(m.query(), u"snake"_s);
+        QCOMPARE(m.emojiAt(0), u"🐍"_s);
+        m.clear();
+        QCOMPARE(m.rowCount(), 0);
+        QCOMPARE(m.query(), QString());
+
+        // Recently used emoji that match come first, most recent first.
+        QTemporaryDir dir;
+        AppSettings settings(KSharedConfig::openConfig(dir.filePath(u"emojirc"_s), KConfig::SimpleConfig));
+        m.setSettings(&settings);
+        QSignalSpy recentChanged(&settings, &AppSettings::recentEmojiChanged);
+        m.setWord(u"cat"_s);
+        QCOMPARE(m.emojiAt(0), u"🐈"_s);
+        settings.addRecentEmoji(u"😺"_s); // grinning cat
+        settings.addRecentEmoji(u"🐱"_s);
+        settings.addRecentEmoji(u"🐍"_s); // does not match "cat": not listed
+        QCOMPARE(recentChanged.count(), 3);
+        QCOMPARE(settings.recentEmoji(), (QStringList{u"🐍"_s, u"🐱"_s, u"😺"_s}));
+        m.setWord(u"cat"_s);
+        QCOMPARE(emojis().mid(0, 3), (QStringList{u"🐱"_s, u"😺"_s, u"🐈"_s}));
+        QCOMPARE(emojis().count(u"🐱"_s), 1);
+        QVERIFY(!emojis().contains(u"🐍"_s));
+        settings.addRecentEmoji(u"😺"_s); // used again: to the front
+        QCOMPARE(settings.recentEmoji().first(), u"😺"_s);
+        QCOMPARE(settings.recentEmoji().size(), 3);
+        for (int i = 0; i < AppSettings::MaxRecentEmoji + 5; ++i) {
+            settings.addRecentEmoji(QString(QChar(0x41 + i)));
+        }
+        QCOMPARE(settings.recentEmoji().size(), AppSettings::MaxRecentEmoji);
+        // Persisted in [Emoji] Recent.
+        QCOMPARE(KSharedConfig::openConfig(dir.filePath(u"emojirc"_s), KConfig::SimpleConfig)->group(u"Emoji"_s).readEntry("Recent", QStringList()).size(), AppSettings::MaxRecentEmoji);
+        QVERIFY(settings.emojiSuggestions()); // on by default
+        settings.setEmojiSuggestions(false);
+        QVERIFY(!settings.emojiSuggestions());
+    }
+
+    void emojiWordBefore_data()
+    {
+        QTest::addColumn<QString>("text");
+        QTest::addColumn<int>("cursor"); // -1 = end
+        QTest::addColumn<int>("start");
+        QTest::addColumn<int>("length");
+        QTest::addColumn<QString>("query");
+
+        QTest::newRow("plain") << u"snake"_s << -1 << 0 << 5 << u"snake"_s;
+        QTest::newRow("after text") << u"I saw a snake"_s << -1 << 8 << 5 << u"snake"_s;
+        QTest::newRow("too short") << u"I saw a sn"_s << -1 << -1 << 0 << QString();
+        QTest::newRow("three letters") << u"a cat"_s << -1 << 2 << 3 << u"cat"_s;
+        QTest::newRow("colon two letters") << u"hi :sn"_s << -1 << 3 << 3 << u"sn"_s;
+        QTest::newRow("colon closed") << u"hi :snake:"_s << -1 << 3 << 7 << u"snake"_s;
+        QTest::newRow("colon one letter") << u"hi :s"_s << -1 << -1 << 0 << QString();
+        QTest::newRow("colon in a word") << u"time:sn"_s << -1 << -1 << 0 << QString();
+        QTest::newRow("url") << u"http://x.org/snake"_s << -1 << -1 << 0 << QString();
+        QTest::newRow("trailing colon only") << u"snake:"_s << -1 << -1 << 0 << QString();
+        QTest::newRow("space after") << u"snake "_s << -1 << -1 << 0 << QString();
+        QTest::newRow("mid word") << u"snakes"_s << 3 << -1 << 0 << QString();
+        QTest::newRow("cursor before space") << u"snake and"_s << 5 << 0 << 5 << u"snake"_s;
+        QTest::newRow("underscore") << u"x thumbs_up"_s << -1 << 2 << 9 << u"thumbs_up"_s;
+        QTest::newRow("digits first") << u"123abc"_s << -1 << -1 << 0 << QString();
+        QTest::newRow("bracket") << u"(snake"_s << -1 << 1 << 5 << u"snake"_s;
+        QTest::newRow("empty") << QString() << -1 << -1 << 0 << QString();
+    }
+
+    void emojiWordBefore()
+    {
+        QFETCH(QString, text);
+        QFETCH(int, cursor);
+        QFETCH(int, start);
+        QFETCH(int, length);
+        QFETCH(QString, query);
+        const auto span = EmojiSuggestionModel::wordBefore(text, cursor < 0 ? int(text.size()) : cursor);
+        QCOMPARE(span.start, start);
+        if (start >= 0) {
+            QCOMPARE(span.length, length);
+            QCOMPARE(span.query, query);
+        }
+        // update() remembers the span for the replacement.
+        EmojiSuggestionModel m;
+        m.update(text, cursor < 0 ? int(text.size()) : cursor);
+        QCOMPARE(m.wordStart(), start);
+        if (start >= 0) {
+            QCOMPARE(m.wordLength(), length);
+            QCOMPARE(m.wordText(), text.mid(start, length));
+        }
     }
 
     void linkifyPunctuation()

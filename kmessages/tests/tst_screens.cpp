@@ -4,6 +4,7 @@
 // screen is grabbed to build/screenshots/<name>.png and checked for being
 // non-blank; QML warnings from our own files fail the test.
 #include "appcontroller.h"
+#include "emojisuggestionmodel.h"
 #include "fakedaemon.h"
 #include "qmlsetup.h"
 
@@ -755,6 +756,105 @@ private Q_SLOTS:
         QTest::keyClick(m_window, Qt::Key_Escape);
         QTRY_COMPARE_WITH_TIMEOUT(pageStack()->property("depth").toInt(), 1, Timeout);
         r->clear();
+    }
+
+    void emojiSuggestions()
+    {
+        invoke("openChat", Bob);
+        auto *msgs = m_controller->messages();
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->isLoaded() && msgs->chatId() == Bob, Timeout);
+        QObject *composer = conversationComposer();
+        QVERIFY(composer);
+        auto *input = composer->findChild<QQuickItem *>(u"composerInput"_s);
+        QVERIFY(input);
+        auto *model = qobject_cast<EmojiSuggestionModel *>(composer->property("emojiSuggestionModel").value<QObject *>());
+        QVERIFY(model);
+        auto *settings = m_controller->settings();
+        QVERIFY(settings->emojiSuggestions()); // on by default
+        const auto popupShown = [&] {
+            return composer->property("emojiPopupVisible").toBool() && visibleItem(u"emojiSuggestionPopup"_s) != nullptr;
+        };
+        const auto text = [&] {
+            return composer->property("text").toString();
+        };
+        composer->setProperty("text", QString());
+        input->forceActiveFocus();
+        QTRY_VERIFY_WITH_TIMEOUT(input->hasActiveFocus(), Timeout);
+        m_fake.control(u"ClearCalls"_s);
+
+        // "snake" offers 🐍 first; Tab puts it in place of the word.
+        typeKeys(u"I saw a sn"_s);
+        QVERIFY(!popupShown()); // two letters are not enough
+        typeKeys(u"ake"_s);
+        QVERIFY(popupShown());
+        QCOMPARE(model->emojiAt(0), u"🐍"_s);
+        QCOMPARE(composer->property("emojiIndex").toInt(), 0);
+        shoot(u"emoji-suggestions"_s);
+        QTest::keyClick(m_window, Qt::Key_Tab);
+        QCOMPARE(text(), u"I saw a 🐍"_s);
+        QVERIFY(!popupShown());
+        QCOMPARE(settings->recentEmoji().value(0), u"🐍"_s);
+
+        // The :colon: form; arrows move the highlight; Enter replaces instead of sending.
+        typeKeys(u" :cat:"_s);
+        QVERIFY(popupShown());
+        QVERIFY(model->rowCount() > 2);
+        const QString second = model->emojiAt(1);
+        QTest::keyClick(m_window, Qt::Key_Right);
+        QTest::keyClick(m_window, Qt::Key_Right);
+        QTest::keyClick(m_window, Qt::Key_Left);
+        QCOMPARE(composer->property("emojiIndex").toInt(), 1);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QCOMPARE(text(), u"I saw a 🐍 "_s + second);
+        QCOMPARE(m_fake.callsOf(u"SendText"_s).size(), 0);
+
+        // Escape hides the suggestions for this word; a changed word shows them again.
+        typeKeys(u" snake"_s);
+        QVERIFY(popupShown());
+        QTest::keyClick(m_window, Qt::Key_Escape);
+        QVERIFY(!popupShown());
+        QVERIFY(text().endsWith(u" snake"_s));
+        QTest::keyClick(m_window, Qt::Key_Space); // a space just continues typing
+        QCOMPARE(text(), u"I saw a 🐍 "_s + second + u" snake "_s);
+        QTest::keyClick(m_window, Qt::Key_Backspace);
+        QVERIFY(!popupShown()); // the same word again: still dismissed
+        QTest::keyClick(m_window, Qt::Key_Backspace);
+        QVERIFY(popupShown()); // "snak"
+
+        // The setting turns them off (and on).
+        settings->setEmojiSuggestions(false);
+        QVERIFY(!popupShown());
+        settings->setEmojiSuggestions(true);
+        QVERIFY(popupShown());
+
+        // A click on a suggestion inserts it too.
+        QCOMPARE(model->emojiAt(0), u"🐍"_s); // recently used: first
+        settle(); // the row lays its buttons out before the next frame
+        QQuickItem *button = nullptr;
+        for (auto *item : visibleItems(u"emojiSuggestion"_s)) {
+            if (item->property("index").toInt() == 0) {
+                button = item;
+            }
+        }
+        QVERIFY(button);
+        QCOMPARE(button->property("emoji").toString(), u"🐍"_s);
+        const QPointF centre = button->mapToScene(QPointF(button->width() / 2, button->height() / 2));
+        QTest::mouseClick(m_window, Qt::LeftButton, {}, centre.toPoint());
+        QCOMPARE(text(), u"I saw a 🐍 "_s + second + u" 🐍"_s);
+        QCOMPARE(m_fake.callsOf(u"SendText"_s).size(), 0);
+
+        // The picker's search uses the same table and records picks.
+        auto *search = m_window->findChild<QObject *>(u"emojiSearchField"_s);
+        QVERIFY(search);
+        search->setProperty("text", u"rabbit"_s);
+        auto *grid = m_window->findChild<QObject *>(u"emojiGrid"_s);
+        QVERIFY(grid);
+        QVERIFY(grid->property("count").toInt() >= 2);
+        search->setProperty("text", QString());
+        QCOMPARE(grid->property("count").toInt(), 56); // the fixed grid
+
+        composer->setProperty("text", QString());
+        settings->setEmojiSuggestions(true);
     }
 
     void login()

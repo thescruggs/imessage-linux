@@ -19,7 +19,7 @@ pkgrel=1
 pkgdesc='Native iMessage client for Linux: daemon, CLI and KDE app (needs your own Mac once)'
 arch=('x86_64')
 url='https://github.com/thescruggs/imessage-linux'
-license=('SSPL-1.0')
+license=('SSPL-1.0' 'Unicode-3.0')
 depends=(
   'curl'  # bootstrap.sh downloads Apple's files with it
   'dbus'
@@ -164,4 +164,7 @@ package() {
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 third_party/rustpush/LICENSE.exceptions \
     "$pkgdir/usr/share/licenses/$pkgname/rustpush-LICENSE.exceptions"
+  # kmessages embeds emoji keywords from Unicode CLDR (Unicode License v3).
+  install -Dm644 kmessages/data/emoji-keywords.LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/emoji-keywords-Unicode-3.0.txt"
 }

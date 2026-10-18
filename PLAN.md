@@ -177,7 +177,7 @@ the row is `ItemDelegate.highlighted` (Kirigami highlight colour) and
 `Accessible.selected`. Tests: `recipientPicker` (tst_models),
 `newMessageKeyboard` + `new-message-keyboard` screenshot (tst_screens).
 
-### C. Emoji suggestions while typing
+### C. Emoji suggestions while typing **[done 2026-10-18]**
 
 Typing `snake` offers 🐍, like macOS's inline emoji replacement.
 
@@ -203,6 +203,27 @@ Typing `snake` offers 🐍, like macOS's inline emoji replacement.
    backed by the same model.
 4. Tests: model ranking; a screenshot with the popup open; the composer
    test types "snake" and checks the suggestion and insertion.
+
+As built: `tools/gen-emoji-keywords.py` pins CLDR `release-48` (annotations
++ annotationsDerived, en) and Emoji 17.0 `emoji-test.txt`; the committed
+`kmessages/data/emoji-keywords.json` is 144 KB, 1914 emoji, one per line,
+short name first; notice + Unicode License v3 in
+`kmessages/data/emoji-keywords.LICENSE` (PKGBUILD installs it, `license`
+gains `Unicode-3.0`). `EmojiSuggestionModel` is creatable in QML (each
+composer and the picker have their own; the recents live in `AppSettings`
+`[Emoji] Recent`, newest first, 24 kept). Ranking refines the planned
+exact / prefix / substring tiers by putting the short name first in each
+tier (the short name itself, then a word of it: "heart" → ❤️ "red heart",
+not 🥰 which merely has the keyword) and, within a rank, the shorter short
+name before the table order; matching recents go first. The word rules
+(start of text or after a space / opening bracket or quote, letter first,
+not inside a word, `:sn` / `:snake:` with a boundary before the colon) live
+in `EmojiSuggestionModel::wordBefore()`. The composer's suggestion row is
+an item above the field inside the composer (not a `Popup`), so the field
+keeps the focus; Escape dismisses for that word (start + text). The
+picker's search uses its own model instance (limit 64, 1 character). Not
+done: other languages (Plasma's `/usr/share/plasma/emoji/*.dict` idea
+stays open), recent emoji in the picker's fixed grid.
 
 ### D. "Sync from Mac" button: contacts, photos, pins (and backgrounds)
 

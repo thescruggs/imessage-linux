@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: SSPL-1.0
 #include "qmlsetup.h"
 #include "appcontroller.h"
+#include "emojisuggestionmodel.h"
 
 #include <KLocalizedQmlContext>
 
@@ -33,6 +34,7 @@ void registerQmlTypes(AppController *controller)
     qmlRegisterUncreatableType<ContactResolver>(uri, 1, 0, "ContactResolver", reason);
     qmlRegisterUncreatableType<ContactSuggestionModel>(uri, 1, 0, "ContactSuggestionModel", reason);
     qmlRegisterUncreatableType<RecipientPickerModel>(uri, 1, 0, "RecipientPickerModel", reason);
+    qmlRegisterType<EmojiSuggestionModel>(uri, 1, 0, "EmojiSuggestionModel");
     qmlRegisterUncreatableType<MacSync>(uri, 1, 0, "MacSync", reason);
     qmlRegisterSingletonInstance(uri, 1, 0, "App", controller);
 }

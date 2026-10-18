@@ -240,6 +240,14 @@ FormCard.FormCardPage {
             checked: App.settings.closeToTray
             onToggled: App.settings.closeToTray = checked
         }
+        FormCard.FormDelegateSeparator {}
+        FormCard.FormSwitchDelegate {
+            objectName: "emojiSuggestionsSwitch"
+            text: i18n("Suggest emoji while typing")
+            description: i18n("Typing a word such as “snake” offers 🐍; Tab or Enter puts it in place of the word.")
+            checked: App.settings.emojiSuggestions
+            onToggled: App.settings.emojiSuggestions = checked
+        }
     }
 
     FormCard.FormHeader {

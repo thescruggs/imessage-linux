@@ -6,8 +6,9 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.imessage.kmessages
 
-// Message entry: attach (file dialog, drop, paste), emoji, Enter sends /
-// Shift+Enter newline, typing indicator with debounce, reply and edit modes.
+// Message entry: attach (file dialog, drop, paste), emoji (picker, and
+// suggestions for the word being typed), Enter sends / Shift+Enter newline,
+// typing indicator with debounce, reply and edit modes.
 // Attachments wait as chips above the field until the message is sent.
 QQC2.Control {
     id: root
@@ -28,6 +29,14 @@ QQC2.Control {
     property bool restoring: false
     /// File URLs (strings) waiting to be sent with the next message.
     property var attachments: []
+    /// Emoji suggestions for the word before the cursor ("snake" → 🐍).
+    readonly property alias emojiSuggestionModel: emojiModel
+    /// The highlighted suggestion.
+    property int emojiIndex: 0
+    // Escape hides the suggestions for this word (where it starts, as typed).
+    property int emojiDismissedStart: -1
+    property string emojiDismissedWord
+    readonly property bool emojiPopupVisible: App.settings.emojiSuggestions && input.activeFocus && emojiModel.count > 0 && input.selectedText.length === 0 && !(emojiModel.wordStart === emojiDismissedStart && emojiModel.wordText === emojiDismissedWord)
 
     signal sendRequested(string text, string replyTo)
     signal editRequested(string messageId, string text)
@@ -96,6 +105,29 @@ QQC2.Control {
         editingId = "";
     }
 
+    function updateEmojiSuggestions() {
+        if (App.settings.emojiSuggestions) {
+            emojiModel.update(input.text, input.cursorPosition);
+        } else {
+            emojiModel.clear();
+        }
+    }
+
+    // Replace the word (plain or :colon: form) with the suggestion at `row`.
+    function insertEmojiSuggestion(row: int) {
+        const emoji = emojiModel.emojiAt(row);
+        const start = emojiModel.wordStart;
+        if (emoji.length === 0 || start < 0) {
+            return;
+        }
+        const end = start + emojiModel.wordLength;
+        input.remove(start, end);
+        input.insert(start, emoji);
+        input.cursorPosition = start + emoji.length;
+        App.settings.addRecentEmoji(emoji);
+        input.forceActiveFocus();
+    }
+
     function setTyping(on: bool) {
         const now = Date.now();
         if (on !== typingSent || (on && now - typingSentAt >= typingRefreshMs)) {
@@ -138,6 +170,78 @@ QQC2.Control {
         Kirigami.Separator {
             anchors.top: parent.top
             width: parent.width
+        }
+    }
+
+    EmojiSuggestionModel {
+        id: emojiModel
+        settings: App.settings
+        onWordChanged: root.emojiIndex = 0
+        onCountChanged: root.emojiIndex = 0
+    }
+
+    Connections {
+        target: App.settings
+        function onChanged() {
+            root.updateEmojiSuggestions();
+        }
+    }
+
+    // Suggestions float above the text field, over the transcript; the
+    // field keeps the focus (Tab / Enter insert, arrows move, Escape hides).
+    QQC2.Control {
+        id: emojiPopup
+        objectName: "emojiSuggestionPopup"
+        visible: root.emojiPopupVisible
+        z: 10
+        x: Math.min(inputScroll.x + root.leftPadding, root.width - width - Kirigami.Units.smallSpacing)
+        y: -height - Kirigami.Units.smallSpacing
+        padding: Kirigami.Units.smallSpacing
+        Accessible.role: Accessible.List
+        Accessible.name: i18n("Emoji suggestions")
+        background: Kirigami.ShadowedRectangle {
+            color: Kirigami.Theme.backgroundColor
+            radius: Kirigami.Units.cornerRadius
+            border.width: 1
+            border.color: Kirigami.ColorUtils.linearInterpolation(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, 0.2)
+            shadow.size: Kirigami.Units.largeSpacing
+            shadow.color: Qt.rgba(0, 0, 0, 0.2)
+            shadow.yOffset: 2
+        }
+        contentItem: Row {
+            spacing: 0
+            Repeater {
+                model: emojiModel
+                delegate: QQC2.AbstractButton {
+                    id: suggestion
+                    required property int index
+                    required property string emoji
+                    required property string name
+                    readonly property bool current: index === root.emojiIndex
+                    objectName: "emojiSuggestion"
+                    width: Kirigami.Units.gridUnit * 2
+                    height: Kirigami.Units.gridUnit * 2
+                    focusPolicy: Qt.NoFocus
+                    hoverEnabled: true
+                    text: emoji
+                    Accessible.name: name
+                    Accessible.selected: current
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.text: name
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    background: Rectangle {
+                        radius: Kirigami.Units.cornerRadius
+                        color: suggestion.current ? Kirigami.Theme.highlightColor : (suggestion.hovered ? Kirigami.ColorUtils.tintWithAlpha(Kirigami.Theme.backgroundColor, Kirigami.Theme.highlightColor, 0.3) : "transparent")
+                    }
+                    contentItem: Text {
+                        text: suggestion.emoji
+                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    onClicked: root.insertEmojiSuggestion(index)
+                }
+            }
         }
     }
 
@@ -246,6 +350,7 @@ QQC2.Control {
             }
 
             QQC2.ScrollView {
+                id: inputScroll
                 Layout.fillWidth: true
                 Layout.maximumHeight: Kirigami.Units.gridUnit * 8
 
@@ -265,6 +370,28 @@ QQC2.Control {
                     }
 
                     Keys.onPressed: event => {
+                        if (root.emojiPopupVisible) {
+                            const n = emojiModel.count;
+                            const enter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier);
+                            if (enter || (event.key === Qt.Key_Tab && event.modifiers === Qt.NoModifier)) {
+                                event.accepted = true;
+                                root.insertEmojiSuggestion(root.emojiIndex);
+                                return;
+                            } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Down) {
+                                event.accepted = true;
+                                root.emojiIndex = (root.emojiIndex + 1) % n;
+                                return;
+                            } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Up) {
+                                event.accepted = true;
+                                root.emojiIndex = (root.emojiIndex + n - 1) % n;
+                                return;
+                            } else if (event.key === Qt.Key_Escape) {
+                                event.accepted = true;
+                                root.emojiDismissedStart = emojiModel.wordStart;
+                                root.emojiDismissedWord = emojiModel.wordText;
+                                return;
+                            }
+                        }
                         if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
                             event.accepted = true;
                             root.send();
@@ -280,7 +407,9 @@ QQC2.Control {
                             }
                         }
                     }
+                    onCursorPositionChanged: root.updateEmojiSuggestions()
                     onTextChanged: {
+                        root.updateEmojiSuggestions();
                         if (root.editingId.length > 0 || root.restoring || root.sms) {
                             return;
                         }
@@ -311,6 +440,7 @@ QQC2.Control {
                     x: emojiButton.width - width
                     onPicked: emoji => {
                         input.insert(input.cursorPosition, emoji);
+                        App.settings.addRecentEmoji(emoji);
                         input.forceActiveFocus();
                     }
                 }

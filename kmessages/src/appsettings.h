@@ -21,6 +21,10 @@ class AppSettings : public QObject
     Q_PROPERTY(QString macHost READ macHost WRITE setMacHost NOTIFY changed)
     /// "Sync from Mac": the `imsg` program to run ("" = `imsg` on PATH).
     Q_PROPERTY(QString imsgPath READ imsgPath WRITE setImsgPath NOTIFY changed)
+    /// The composer offers emoji for the word being typed ("snake" → 🐍).
+    Q_PROPERTY(bool emojiSuggestions READ emojiSuggestions WRITE setEmojiSuggestions NOTIFY changed)
+    /// Emoji inserted from the suggestions or the picker, newest first ([Emoji] Recent).
+    Q_PROPERTY(QStringList recentEmoji READ recentEmoji NOTIFY recentEmojiChanged)
 
 public:
     explicit AppSettings(KSharedConfigPtr config = KSharedConfig::openConfig(), QObject *parent = nullptr);
@@ -39,9 +43,17 @@ public:
     void setMacHost(const QString &host);
     QString imsgPath() const;
     void setImsgPath(const QString &path);
+    bool emojiSuggestions() const;
+    void setEmojiSuggestions(bool on);
+    QStringList recentEmoji() const;
+    /// Moves `emoji` to the front of recentEmoji (at most MaxRecentEmoji kept).
+    Q_INVOKABLE void addRecentEmoji(const QString &emoji);
+
+    static constexpr int MaxRecentEmoji = 24;
 
 Q_SIGNALS:
     void changed();
+    void recentEmojiChanged();
 
 private:
     bool read(const char *key, bool def) const;

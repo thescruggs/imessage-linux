@@ -14,6 +14,7 @@ add_library(kmessages_core STATIC
     contactresolver.cpp contactresolver.h
     contactsuggestionmodel.cpp contactsuggestionmodel.h
     recipientpickermodel.cpp recipientpickermodel.h
+    emojisuggestionmodel.cpp emojisuggestionmodel.h
     macsync.cpp macsync.h
     appcontroller.cpp appcontroller.h
     qmlsetup.cpp qmlsetup.h
@@ -53,6 +54,9 @@ set(KMESSAGES_QML
     qml/StatusFooter.qml
 )
 qt_add_resources(kmessages_core "kmessages_qml" PREFIX "/kmessages" FILES ${KMESSAGES_QML})
+# Emoji keywords from Unicode CLDR (tools/gen-emoji-keywords.py; Unicode
+# License v3, see data/emoji-keywords.LICENSE): qrc:/kmessages/data/…
+qt_add_resources(kmessages_core "kmessages_data" PREFIX "/kmessages/data" BASE ../data FILES ../data/emoji-keywords.json)
 
 add_executable(kmessages main.cpp)
 target_compile_options(kmessages PRIVATE -Wall -Wextra)

@@ -106,6 +106,41 @@ void AppSettings::setImsgPath(const QString &path)
     writeText("ImsgPath", path);
 }
 
+bool AppSettings::emojiSuggestions() const
+{
+    return read("EmojiSuggestions", true);
+}
+
+void AppSettings::setEmojiSuggestions(bool on)
+{
+    write("EmojiSuggestions", on);
+}
+
+QStringList AppSettings::recentEmoji() const
+{
+    return m_config->group(QStringLiteral("Emoji")).readEntry("Recent", QStringList());
+}
+
+void AppSettings::addRecentEmoji(const QString &emoji)
+{
+    if (emoji.isEmpty()) {
+        return;
+    }
+    QStringList list = recentEmoji();
+    if (!list.isEmpty() && list.first() == emoji) {
+        return;
+    }
+    list.removeAll(emoji);
+    list.prepend(emoji);
+    while (list.size() > MaxRecentEmoji) {
+        list.removeLast();
+    }
+    auto group = m_config->group(QStringLiteral("Emoji"));
+    group.writeEntry("Recent", list);
+    group.sync();
+    Q_EMIT recentEmojiChanged();
+}
+
 QStringList AppSettings::otherHandleUris() const
 {
     QStringList out;
