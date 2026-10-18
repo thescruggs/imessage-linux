@@ -1443,10 +1443,16 @@ impl Inner {
     /// the phone number until an iPhone links it); warns when the
     /// configured `sender_handle` is not among the handles.
     fn registration(&self, users: &[IDSUser]) -> RegistrationState {
-        let mut reg = with_sender(registration_from_users(users), self.cfg.sender_handle.as_deref());
+        let reg = self.with_other_handles_view(with_sender(registration_from_users(users), self.cfg.sender_handle.as_deref()));
+        self.warn_unusable_sender(&reg);
+        reg
+    }
+
+    /// `reg` with `other_handles` = the configured ones this device is not
+    /// registered for (the phone number drops out once an iPhone links it).
+    fn with_other_handles_view(&self, mut reg: RegistrationState) -> RegistrationState {
         let registered: Vec<String> = reg.handles.iter().map(|h| Handle::normalize(&h.uri)).collect();
         reg.other_handles = self.cfg.other_handles.iter().filter(|o| !registered.contains(&Handle::normalize(o))).cloned().collect();
-        self.warn_unusable_sender(&reg);
         reg
     }
 
@@ -1465,9 +1471,8 @@ impl Inner {
     /// The saved registration with `sender` for the current configuration
     /// (a saved state may predate the setting or a config change).
     fn registration_view(&self) -> RegistrationState {
-        let mut reg = with_sender(lock(&self.saved).registration.clone(), self.cfg.sender_handle.as_deref());
-        reg.other_handles = self.cfg.other_handles.clone();
-        reg
+        let reg = with_sender(lock(&self.saved).registration.clone(), self.cfg.sender_handle.as_deref());
+        self.with_other_handles_view(reg)
     }
 
     fn remember_conversation(&self, id: ChatId, conv: ConversationData) {
