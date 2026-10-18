@@ -67,6 +67,9 @@ pub enum Command {
     Logout,
     /// Show connection and registration status.
     Status,
+    /// Register with iMessage again now (picks up addresses the account
+    /// gained, such as your iPhone's number), then show the status.
+    Register,
     /// List conversations, most recent first.
     Chats {
         /// Maximum number of chats (daemon default 50, max 500).
@@ -399,6 +402,7 @@ mod tests {
         assert_eq!(parse(&["sms", "enable"]).unwrap().command, Command::Sms { command: SmsCommand::Enable });
         assert_eq!(parse(&["sms", "status"]).unwrap().command, Command::Sms { command: SmsCommand::Status });
         assert!(parse(&["sms"]).is_err());
+        assert_eq!(parse(&["register"]).unwrap().command, Command::Register);
         let c = parse(&["send", "bob@x.com", "--", "-1", "--not-a-flag"]).unwrap();
         assert!(matches!(c.command, Command::Send { text, .. } if text == vec!["-1".to_string(), "--not-a-flag".to_string()]));
         let c = parse(&["send", "bob@x.com", "-"]).unwrap();

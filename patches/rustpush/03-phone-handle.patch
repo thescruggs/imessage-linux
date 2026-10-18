@@ -1,0 +1,37 @@
+diff --git a/src/ids/user.rs b/src/ids/user.rs
+--- a/src/ids/user.rs
++++ b/src/ids/user.rs
+@@ -1041,13 +1041,28 @@
+     for user in users.iter() {
+         possible_handles.insert(user.user_id.clone(), user.get_possible_handles(aps).await?);
+     }
+-    // Mac-class validation data only registers EMAIL handles; a tel: handle comes back with
+-    // status 6001 ("incompatible") and drags the whole request down with it. Phone-number
+-    // iMessage needs iPhone-class validation data, which this path can't produce.
+-    for h in possible_handles.values_mut() {
+-        h.retain(|x| !x.starts_with("tel:"));
++    for (user, handles) in &possible_handles {
++        info!("handles offered for {user}: {}", handles.join(", "));
+     }
++    // A phone number the account's iPhone linked is offered as a tel: handle. A Mac
++    // registers it along with the emails; Text Message Forwarding (and iMessages to the
++    // number) are addressed to it. Not every Mac-class identity is allowed to: Apple then
++    // answers status 6001 ("incompatible") for the whole request, so retry with the email
++    // handles alone rather than lose the registration.
++    let has_tel = possible_handles.values().any(|h| h.iter().any(|x| x.starts_with("tel:")));
++    if has_tel {
++        match register_handles(config, aps, id_services, users, identity, &possible_handles).await {
++            Ok(()) => return Ok(()),
++            Err(e) => warn!("registering with the phone number failed ({e}); registering the email handles only"),
++        }
++        for h in possible_handles.values_mut() {
++            h.retain(|x| !x.starts_with("tel:"));
++        }
++    }
++    register_handles(config, aps, id_services, users, identity, &possible_handles).await
++}
+ 
++async fn register_handles(config: &dyn OSConfig, aps: &APSState, id_services: &[&'static IDSService], users: &mut [IDSUser], identity: &IDSNGMIdentity, possible_handles: &HashMap<String, Vec<String>>) -> Result<(), PushError> {
+     let identity_key = identity.legacy.encode()?;
+     let predata_key = identity.build_prekey_data()?;
+     // versions also in registration

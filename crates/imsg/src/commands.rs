@@ -27,6 +27,7 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             Ok(exit::OK)
         }
         Command::Status => status(&client, ctx).await,
+        Command::Register => register(&client, ctx).await,
         Command::Chats { limit, offset } => {
             let chats = client.list_chats(limit, offset).await?;
             if ctx.json {
@@ -303,6 +304,15 @@ async fn sms(client: &Client, ctx: &Ctx, command: SmsCommand) -> anyhow::Result<
         );
     }
     Ok(exit::OK)
+}
+
+async fn register(client: &Client, ctx: &Ctx) -> anyhow::Result<u8> {
+    let r = client.reregister().await?;
+    if ctx.json {
+        println!("{}", r.raw);
+        return Ok(exit::OK);
+    }
+    status(client, ctx).await
 }
 
 async fn status(client: &Client, ctx: &Ctx) -> anyhow::Result<u8> {

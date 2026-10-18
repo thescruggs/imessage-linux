@@ -363,9 +363,14 @@ token changes.
    with IDS alone (logged; profiles are then unavailable). The silent
    re-login takes the same path.
 6. `register(config, aps_state, [MADRID_SERVICE], users, identity)`
-   (identity = saved `IDSNGMIdentity` or a new one). Phone (`tel:`) handles
-   are dropped by our rustpush patch: Mac-class validation data registers
-   email handles only.
+   (identity = saved `IDSNGMIdentity` or a new one). It registers every
+   handle Apple offers: the account's email addresses and, when an iPhone
+   on the account has linked it, its phone number (`tel:`), as a Mac does
+   (`patches/rustpush/03-phone-handle.patch`; the handles offered are
+   logged). If Apple refuses the request with the number (status 6001, seen
+   with some Mac identities) it registers the emails alone. The number
+   being registered is what makes Text Message Forwarding reach this
+   device. `Reregister` (`imsg register`) runs this again on demand.
 7. Save, then `IMClient::new(aps, users, identity, [MADRID], id_cache.plist,
    config, keys_updated)` and the receive loop.
 

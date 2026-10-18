@@ -352,8 +352,8 @@ pub fn registration_from_users(users: &[IDSUser]) -> RegistrationState {
     let mut expires_at: Option<u64> = None;
     for u in users {
         let Some(reg) = u.registration.get(MADRID) else { continue };
-        for h in convert::email_handles(&reg.handles) {
-            let h = Handle::new(&h);
+        for h in &reg.handles {
+            let h = Handle::new(h);
             if !handles.contains(&h) {
                 handles.push(h);
             }
@@ -370,17 +370,18 @@ pub fn registration_from_users(users: &[IDSUser]) -> RegistrationState {
 }
 
 /// The handle new messages go out from: `preferred` (the configured
-/// `sender_handle`) if it is one of the registered email handles, else the
-/// first registered email handle. Returns the registered spelling.
+/// `sender_handle`) if it is one of the registered handles (an email or
+/// the phone number the iPhone linked), else the first registered email
+/// handle (the number is never the default), else the first handle.
+/// Returns the registered spelling.
 pub fn pick_sender(registered: &[String], preferred: Option<&str>) -> Option<String> {
-    let emails = convert::email_handles(registered);
     if let Some(p) = preferred {
         let p = Handle::normalize(p);
-        if let Some(h) = emails.iter().find(|h| Handle::normalize(h) == p) {
+        if let Some(h) = registered.iter().find(|h| Handle::normalize(h) == p) {
             return Some(h.clone());
         }
     }
-    emails.into_iter().next()
+    convert::email_handles(registered).into_iter().next().or_else(|| registered.first().cloned())
 }
 
 /// Whether a configured `sender_handle` cannot be used with these
@@ -389,7 +390,7 @@ fn sender_unusable(registered: &[String], preferred: Option<&str>) -> bool {
     match preferred {
         Some(p) if !registered.is_empty() => {
             let p = Handle::normalize(p);
-            !convert::email_handles(registered).iter().any(|h| Handle::normalize(h) == p)
+            !registered.iter().any(|h| Handle::normalize(h) == p)
         }
         _ => false,
     }
@@ -1438,11 +1439,13 @@ impl Inner {
     }
 
     /// Registration summary for `users` (with the effective sender and the
-    /// configured `other_handles`); warns when the configured
-    /// `sender_handle` is not among the handles.
+    /// configured `other_handles` this device is not registered for, e.g.
+    /// the phone number until an iPhone links it); warns when the
+    /// configured `sender_handle` is not among the handles.
     fn registration(&self, users: &[IDSUser]) -> RegistrationState {
         let mut reg = with_sender(registration_from_users(users), self.cfg.sender_handle.as_deref());
-        reg.other_handles = self.cfg.other_handles.clone();
+        let registered: Vec<String> = reg.handles.iter().map(|h| Handle::normalize(&h.uri)).collect();
+        reg.other_handles = self.cfg.other_handles.iter().filter(|o| !registered.contains(&Handle::normalize(o))).cloned().collect();
         self.warn_unusable_sender(&reg);
         reg
     }
@@ -2229,18 +2232,21 @@ mod tests {
         assert_eq!(gconv.participants.len(), 2);
     }
 
-    /// sender_handle: used when registered, else the first email handle.
+    /// sender_handle: used when registered (email or the linked phone
+    /// number), else the first email handle; the number is never the default.
     #[test]
     fn sender_choice_and_fallback() {
-        let reg = vec!["mailto:me@icloud.example".to_string(), "tel:+15551234567".to_string(), "mailto:me@example.com".to_string()];
+        let reg = vec!["tel:+15551234567".to_string(), "mailto:me@icloud.example".to_string(), "mailto:me@example.com".to_string()];
         assert_eq!(pick_sender(&reg, None).as_deref(), Some("mailto:me@icloud.example"));
         assert_eq!(pick_sender(&reg, Some("mailto:me@example.com")).as_deref(), Some("mailto:me@example.com"));
         assert_eq!(pick_sender(&reg, Some("Me@Example.com")).as_deref(), Some("mailto:me@example.com"));
-        // not registered (or a phone number, which Mac-class registration
-        // cannot send from) -> default, and flagged for a warning
+        assert_eq!(pick_sender(&reg, Some("+1 (555) 123-4567")).as_deref(), Some("tel:+15551234567"));
+        assert!(!sender_unusable(&reg, Some("tel:+15551234567")));
+        // not registered -> default, and flagged for a warning
         assert_eq!(pick_sender(&reg, Some("mailto:other@example.com")).as_deref(), Some("mailto:me@icloud.example"));
-        assert_eq!(pick_sender(&reg, Some("tel:+15551234567")).as_deref(), Some("mailto:me@icloud.example"));
+        assert_eq!(pick_sender(&reg, Some("tel:+15550000000")).as_deref(), Some("mailto:me@icloud.example"));
         assert!(sender_unusable(&reg, Some("mailto:other@example.com")));
+        assert_eq!(pick_sender(&["tel:+15551234567".to_string()], None).as_deref(), Some("tel:+15551234567"), "only the number registered");
         assert!(!sender_unusable(&reg, Some("mailto:me@example.com")));
         assert!(!sender_unusable(&reg, None));
         assert!(!sender_unusable(&[], Some("mailto:x@y.z")), "nothing registered yet: no warning");

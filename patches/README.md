@@ -37,6 +37,15 @@ generated against `f35c4ee`:
 Ours. Points rustpush's `open-absinthe` dependency at
 `../../crates/open-absinthe` (still `optional = true, features = ["serde"]`).
 
+## rustpush/03-phone-handle.patch
+
+Ours; applies on top of 01. `src/ids/user.rs`: `register()` keeps the `tel:`
+handle Apple offers (the phone number the account's iPhone linked) and
+registers it with the emails, as a Mac does; Text Message Forwarding and
+iMessages to the number are addressed to it. If Apple refuses the request
+with the number (status 6001, the case 01 guards against), it registers the
+email handles alone instead of failing. Logs the handles offered.
+
 ## apple-private-apis/01-local-anisette.patch
 
 Verbatim copy of relay's `02-apple-private-apis.patch`. Restores the on-device

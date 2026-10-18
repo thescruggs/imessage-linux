@@ -165,6 +165,7 @@ pub trait Daemon1 {
     fn send_file_as(&self, chat_id_or_empty: &str, participants_json: &str, path: &str, mime: &str, service: &str) -> zbus::Result<String>;
     fn enable_sms_forwarding(&self, enable: bool) -> zbus::Result<String>;
     fn get_sms_forwarding(&self) -> zbus::Result<String>;
+    fn reregister(&self) -> zbus::Result<String>;
     fn react(&self, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> zbus::Result<()>;
     fn edit(&self, chat_id: &str, message_id: &str, text: &str) -> zbus::Result<()>;
     fn unsend(&self, chat_id: &str, message_id: &str) -> zbus::Result<()>;
@@ -431,6 +432,11 @@ impl Client {
 
     pub async fn enable_sms_forwarding(&self, enable: bool) -> Result<Json<imessage_common::model::SmsForwarding>> {
         parse("sms forwarding", long_call("asking the iPhone", self.proxy.enable_sms_forwarding(enable)).await?)
+    }
+
+    /// `Reregister`: register with iMessage again now.
+    pub async fn reregister(&self) -> Result<Json<RegistrationState>> {
+        parse("registration", long_call("registering", self.proxy.reregister()).await?)
     }
 
     pub async fn sms_forwarding(&self) -> Result<Json<imessage_common::model::SmsForwarding>> {

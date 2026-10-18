@@ -472,6 +472,12 @@ impl Hub {
         self.engine.sms_forwarding().await
     }
 
+    /// Register with IDS again right now (e.g. to pick up a handle the
+    /// account gained) and return the new registration.
+    pub async fn reregister(&self) -> OpResult<RegistrationState> {
+        Ok(self.engine.register().await?)
+    }
+
     /// Our own addresses (registered + `other_handles`), normalized.
     async fn own_handles(&self) -> HashSet<String> {
         let reg = self.engine.registration_state().await;

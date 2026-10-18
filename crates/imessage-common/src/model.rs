@@ -520,7 +520,8 @@ pub struct DeliveryReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RegistrationState {
-    /// Registered iMessage handles (email only; see docs/RESEARCH.md).
+    /// Registered iMessage handles: the account's email addresses and, when
+    /// an iPhone on the account has linked it, its phone number.
     pub handles: Vec<Handle>,
     /// Seconds since epoch of the last successful IDS registration.
     pub registered_at: Option<u64>,

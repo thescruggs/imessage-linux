@@ -61,10 +61,12 @@ it for registration on 2026-10-16.
   were banned from iMessage. OpenBubbles' FAQ: sharing with >20 users or for
   spam → device block (temporary 1–2 days, or permanent; Apple support calls
   have reversed permanent ones). Single-user use is not reported to cause bans.
-* A Mac-class identity registers **email handles only**. Your **phone number**
-  needs iPhone-class validation data, which needs an iPhone running a relay
-  app continuously. Out of scope: the Linux client will send/receive as your
-  Apple ID email address.
+* A Mac-class identity registers the account's **email handles** and the
+  **phone number an iPhone on the account has linked** (Apple offers it in
+  `id-get-handles` and accepted it for registration on 2026-10-17; the
+  relay project's patch had assumed status 6001 for any `tel:` handle, so
+  the daemon falls back to emails alone if that happens). A number *without*
+  such an iPhone needs iPhone-class validation data, which is out of scope.
 * Apple can force re-registration at any time; the daemon must handle it
   automatically (it can, since the emulator runs locally).
 * Apple **Contact Key Verification** must be off on the account (third-party

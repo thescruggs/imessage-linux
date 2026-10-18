@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+* **Your phone number is registered too (fixes Text Message Forwarding).**
+  The vendored rustpush patch dropped the `tel:` handle Apple offers
+  (the number your iPhone linked to the account), so this device was
+  registered for its email addresses only and the iPhone, which addresses
+  forwarded texts to the number, never had a key for it: `imsg sms enable`
+  stayed `requested` with the device switched on in the iPhone's settings.
+  The daemon now registers every handle Apple offers, as a Mac does (and
+  falls back to the emails alone if Apple refuses the number, status 6001).
+  `imsg status` lists the number under `handles`; messages still go out
+  from an email address unless `sender_handle` names the number. New
+  D-Bus `Reregister` / `imsg register` re-register on demand so the new
+  handle is picked up without waiting for the renewal.
 * **kmessages: scrolling up no longer jumps back to the newest message.**
   The transcript only noticed a scroll away from the bottom when a
   touch flick ended; wheel, scroll-bar and keyboard scrolling (the

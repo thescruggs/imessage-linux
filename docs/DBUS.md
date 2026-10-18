@@ -79,6 +79,7 @@ fails during an interactive `Login`, the call fails at once with
 | `SendFileAs` | `chat_id_or_empty s`, `participants_json s`, `path s`, `mime s`, `service s` | `s` | `SendFile` over a chosen service (`"sms"` = MMS). |
 | `EnableSmsForwarding` | `enable b` | `s` | Ask the iPhone to relay text messages to this device (`true`), or stop (`false`). Returns [SmsForwarding](#smsforwarding) (`requested` / `off`); the user then turns this device on in the iPhone's Settings > Messages > Text Message Forwarding, and the state becomes `active` (`SmsForwardingChanged`). `InvalidInput` if no relay number is configured; `Unsupported` if no device of the account carries it. Slow (IDS round trips): 120 s timeout. |
 | `GetSmsForwarding` | — | `s` | [SmsForwarding](#smsforwarding) JSON (also `GetStatus.sms`). |
+| `Reregister` | — | `s` | Register with IDS again now and return the new [`registration`](#getstatus) JSON (as `GetStatus.registration`); picks up a handle the account gained (e.g. the phone number an iPhone linked). rustpush skips it when the identity was (re)generated less than 15 s ago (then the current registration comes back). `NotLoggedIn` without an account. Slow: 120 s timeout. |
 | `React` | `chat_id s`, `message_id s`, `kind s`, `remove b` | — | `kind`: `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, `emoji:<emoji>` or a bare emoji. Stored and announced with `MessageUpdated`. `Unsupported` on a text message (SMS), like `Edit` and `Unsend`. |
 | `Edit` | `chat_id s`, `message_id s`, `text s` | — | Own messages only (`InvalidInput` otherwise). `MessageUpdated` with `edited: true`. |
 | `Unsend` | `chat_id s`, `message_id s` | — | Own messages only. Text, parts, attachments and reactions are dropped; `unsent: true`. |
@@ -166,11 +167,13 @@ photos".
 
 `connection` is `{"state": "<name>"}` or, for errors,
 `{"state": "error", "detail": "registration failing, retrying: …"}`.
-Our handles are `registration.handles`. `registration.sender` is the
-handle new conversations start from (replies in a known chat use the
-handle of ours that chat names): the daemon's `sender_handle` setting if
-it is registered, else the first handle (`null` when not registered; see
-docs/DAEMON.md, Configuration). `registration.other_handles` (array of
+Our handles are `registration.handles`: the account's email addresses
+and, when an iPhone on the account has linked it, its phone number.
+`registration.sender` is the handle new conversations start from (replies
+in a known chat use the handle of ours that chat names): the daemon's
+`sender_handle` setting if it is registered (an email or the number), else
+the first email handle (`null` when not registered; see docs/DAEMON.md,
+Configuration). `registration.other_handles` (array of
 IDS URIs, `[]` if unset; older daemons omit it) is the daemon's
 `other_handles` setting: addresses of the user that this device is not
 registered for (e.g. the iPhone's number). The daemon already treats

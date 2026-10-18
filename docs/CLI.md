@@ -106,9 +106,8 @@ $ imsg status
 daemon         0.1.0
 connection     connected
 registered     yes
-handles        me@icloud.com, me@example.com
+handles        +15551234567, me@icloud.com, me@example.com
 sends as       me@example.com
-also mine      +15551234567
 registered at  2026-10-11 09:00 +02:00
 renews at      2026-11-10 09:00 +01:00
 unread         3
@@ -123,16 +122,26 @@ photos can be fetched: `ready`, `not tried yet`, `unavailable (…)`, or
 "needs `imsg login`" when Apple wants a fresh sign-in for iCloud (run it
 once; messaging keeps working meanwhile).
 
-`sends as` is the handle new conversations start from (a reply in a known
-chat goes out from the handle of yours that chat names, e.g. the address
-the other person wrote to): the daemon's `sender_handle` setting
-(`config.toml`, `--sender-handle`, `IMESSAGED_SENDER_HANDLE`) if it is
-registered, else the first handle. `also mine` (only when set) is the
-daemon's `other_handles`: addresses of yours this computer is not
-registered for, e.g. your iPhone's number; messages from them count as
-yours.
+`handles` are the addresses this computer is registered for: your Apple
+ID's email addresses and, when an iPhone signed in to the account has
+linked it, your phone number. `sends as` is the handle new conversations
+start from (a reply in a known chat goes out from the handle of yours that
+chat names, e.g. the address the other person wrote to): the daemon's
+`sender_handle` setting (`config.toml`, `--sender-handle`,
+`IMESSAGED_SENDER_HANDLE`) if it is registered, else the first email
+handle. `also mine` (only when set) is the daemon's `other_handles`:
+addresses of yours this computer is not registered for; messages from
+them count as yours.
 
 `--json`: the `GetStatus` JSON.
+
+### `register`
+
+Registers with iMessage again right now and prints the status. Normally
+not needed (the daemon renews its registration by itself); use it to pick
+up an address the account gained, such as your phone number after an
+iPhone linked it, without waiting for the renewal. Takes a few seconds.
+`--json`: the new `registration` object of `GetStatus`.
 
 ### `chats [-n/--limit N] [--offset N]`
 

@@ -47,10 +47,12 @@ On Arch / CachyOS, see "Install on Arch" below for a package.
 * **Use your own Mac's identity, for your own account only.** Apple blocks
   Mac identities that are shared across many users or used for spam. The
   block can be temporary (1–2 days) or permanent.
-* **Email handle only.** A Mac-class identity registers your Apple ID email
-  address. iMessages to your phone number keep going to your iPhone; SMS
-  can be relayed by the iPhone (Text Message Forwarding, below) while it
-  is on and online.
+* **Your addresses.** The daemon registers your Apple ID email addresses
+  and, if an iPhone signed in to the account has linked it, your phone
+  number (like a Mac; `imsg status` lists the handles). Messages still go
+  out from an email address unless you set `sender_handle` to the number.
+  SMS can be relayed by the iPhone (Text Message Forwarding, below) while
+  it is on and online.
 * Turn off **Contact Key Verification** on the account.
 
 ## One-time step on a Mac
@@ -187,10 +189,12 @@ otherwise the daemon logs a warning and keeps the default. Chats you are
 already in keep the address they use (1:1: the one the other person wrote
 to; groups: the one you are a member under).
 
-Your phone number cannot be registered on Linux, so messages you send from
-your iPhone's number would look like someone else's (unread, and a message
-from the phone to Bob would land in a "group" of Bob and your phone). Tell
-the daemon about such addresses; `imsg status` shows them as `also mine`:
+An address of yours that this device is not registered for (your phone
+number when no iPhone has linked it to the account, a second Apple ID's
+email) makes messages you send from it look like someone else's (unread,
+and a message from the phone to Bob would land in a "group" of Bob and your
+phone). Tell the daemon about such addresses; `imsg status` shows them as
+`also mine`:
 
 ```toml
 other_handles = ["+15551234567"]     # or IMESSAGED_OTHER_HANDLES=a,b / --other-handle (repeatable)
@@ -278,6 +282,7 @@ cargo install --path crates/imsg                  # -> ~/.cargo/bin/imsg
 imsg doctor                                       # setup + daemon checks
 imsg login --apple-id you@icloud.com              # prompts for password and 2FA code
 imsg status
+imsg register                                     # re-register now (e.g. to pick up your phone number)
 imsg chats                                        # conversations, newest first
 imsg messages bob@example.com                     # a chat by handle, id or name
 imsg chat bob@example.com                         # one chat's details (incl. background)

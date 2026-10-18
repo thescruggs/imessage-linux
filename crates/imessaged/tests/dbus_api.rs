@@ -573,6 +573,17 @@ async fn purge_invalid_chats() {
     h.shutdown().await;
 }
 
+/// Reregister registers again and returns the registration (as GetStatus.registration).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reregister_returns_the_registration() {
+    let Some(h) = Harness::logged_in().await else { return };
+    let before = h.mock.calls().iter().filter(|c| matches!(c, MockCall::Register)).count();
+    let r = h.call_json("Reregister", &()).await;
+    assert_eq!(r, h.call_json("GetStatus", &()).await["registration"]);
+    assert!(!r["handles"].as_array().unwrap().is_empty());
+    assert_eq!(h.mock.calls().iter().filter(|c| matches!(c, MockCall::Register)).count(), before + 1);
+}
+
 /// Text Message Forwarding over D-Bus: EnableSmsForwarding + its signal,
 /// GetStatus.sms, SendTextAs with an explicit service.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

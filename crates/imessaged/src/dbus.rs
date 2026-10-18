@@ -191,6 +191,13 @@ impl Daemon1 {
         to_json(&self.hub.sms_forwarding().await)
     }
 
+    /// Register with iMessage again now (picks up handles the account
+    /// gained, e.g. the iPhone's number). -> RegistrationState JSON (as
+    /// GetStatus.registration). Slow: 120 s timeout.
+    async fn reregister(&self) -> Result<String> {
+        Ok(to_json(&self.hub.reregister().await?))
+    }
+
     async fn react(&self, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> Result<()> {
         Ok(self.hub.react(chat_id, message_id, kind, remove).await?)
     }
