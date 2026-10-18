@@ -325,13 +325,14 @@ Forwarding** turns the relay on or off.
 **Keyboard.** Ctrl+N starts a new message, Ctrl+F searches the chat
 list, Ctrl+Q quits. In the new message's To: field, Up / Down pick a
 suggested contact or conversation, Enter adds it (or what you typed, when
-nothing matches), Escape clears the field and, when it is empty, goes back.
+nothing matches, or when you typed a whole address), Escape clears the field and, when it is empty, goes back.
 In the composer Enter sends and Shift+Enter starts a new line.
 
 **Emoji.** While you type, kmessages offers emoji for the word before the
 cursor, like macOS: type `snake` (or `:snake:`) and 🐍 shows above the text
-field; Tab, or Enter while the suggestions show, replaces the word with the
-highlighted emoji, the arrow keys pick another one and Escape hides them.
+field; Tab replaces the word with the highlighted emoji, the arrow keys
+pick another one (Enter then inserts it) and Escape hides them. Enter on a
+plain word still sends the message; after `:snake:` it inserts the emoji.
 Emoji you use come first next time. The emoji button's picker has a search
 field. Turn the suggestions off in **Settings → Suggest emoji while
 typing**. The keywords come from Unicode CLDR (Unicode License v3, see

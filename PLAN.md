@@ -176,6 +176,13 @@ did before); Escape clears, then goes back (`popToList`). Hover highlights;
 the row is `ItemDelegate.highlighted` (Kirigami highlight colour) and
 `Accessible.selected`. Tests: `recipientPicker` (tst_models),
 `newMessageKeyboard` + `new-message-keyboard` screenshot (tst_screens).
+Review fixes: the highlight survives row changes by item (`rowData().key`,
+`indexOfKey`, re-applied after `rowsChanged`; gone → row 0); hover moves it
+only on real pointer movement (a `HoverHandler` on the list compares the
+position with the last one); Enter with a complete address typed and no
+row picked adds the typed text, and `ContactResolver::search` lists the
+addresses matched beyond the name first and only the typed one when it is
+complete; moves in the sources are treated as resets (none occur).
 
 ### C. Emoji suggestions while typing **[done 2026-10-18]**
 
@@ -221,7 +228,18 @@ not inside a word, `:sn` / `:snake:` with a boundary before the colon) live
 in `EmojiSuggestionModel::wordBefore()`. The composer's suggestion row is
 an item above the field inside the composer (not a `Popup`), so the field
 keeps the focus; Escape dismisses for that word (start + text). The
-picker's search uses its own model instance (limit 64, 1 character). Not
+picker's search uses its own model instance (limit 64, 1 character).
+Review fixes: Enter no longer hijacks sending: for plain words it inserts
+only after an arrow key picked one, otherwise it sends (Tab inserts); in
+the `:colon:` form Enter inserts. Plain words in the composer skip bare
+substring matches (`plainWordSubstrings: false`; "now" offers no
+snowman); the colon form and the picker keep every rank, the picker also
+allows digits ("100" → 💯). The inserted emoji is followed by a space;
+emoji characters end a word in `wordBefore()`. The replacement is two undo
+steps (TextEdit has no replace; setting `text` would clear the history).
+The recents are cached per model. The emoji-test.txt URL stays
+`Public/17.0.0/emoji/` (`Public/emoji/17.0/` is a 404; that tree ends at
+16.0). Not
 done: other languages (Plasma's `/usr/share/plasma/emoji/*.dict` idea
 stays open), recent emoji in the picker's fixed grid.
 

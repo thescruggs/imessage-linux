@@ -244,7 +244,7 @@ FormCard.FormCardPage {
         FormCard.FormSwitchDelegate {
             objectName: "emojiSuggestionsSwitch"
             text: i18n("Suggest emoji while typing")
-            description: i18n("Typing a word such as “snake” offers 🐍; Tab or Enter puts it in place of the word.")
+            description: i18n("Typing a word such as “snake” offers 🐍; Tab puts it in place of the word (Enter still sends, unless you picked one with the arrow keys or typed “:snake:”).")
             checked: App.settings.emojiSuggestions
             onToggled: App.settings.emojiSuggestions = checked
         }

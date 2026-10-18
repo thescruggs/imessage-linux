@@ -15,7 +15,9 @@ class AppSettings;
 /// prefix, substring, with the short name ahead in each: the short name
 /// equal to the word, a word of the short name equal to it ("red heart"),
 /// another keyword equal to it, a word of the short name starting with it,
-/// another keyword starting with it, any keyword containing it. Within a
+/// another keyword starting with it, a word inside a keyword starting with
+/// it, any keyword containing it (that last rank only for the `:colon:` form
+/// unless `plainWordSubstrings`). Within a
 /// rank the shorter short name first, then the table's order (emoji
 /// keyboard order; stable). The user's
 /// recent emoji (AppSettings::recentEmoji) that match come first. At most
@@ -32,6 +34,14 @@ class EmojiSuggestionModel : public QAbstractListModel
     Q_PROPERTY(int limit READ limit WRITE setLimit NOTIFY limitChanged)
     /// Characters a word needs without the colon form (the colon form needs 2).
     Q_PROPERTY(int minimumLength READ minimumLength WRITE setMinimumLength NOTIFY minimumLengthChanged)
+    /// Plain words (not the `:colon:` form) also match inside keywords
+    /// ("now" → ☃️ snowman). The composer turns this off: a plain word then
+    /// matches only at the start of a keyword word.
+    Q_PROPERTY(bool plainWordSubstrings READ plainWordSubstrings WRITE setPlainWordSubstrings NOTIFY optionsChanged)
+    /// Words must start with a letter (the picker's search allows "100").
+    Q_PROPERTY(bool requireLetterStart READ requireLetterStart WRITE setRequireLetterStart NOTIFY optionsChanged)
+    /// The current word is in the `:colon:` form (explicit intent).
+    Q_PROPERTY(bool colonForm READ colonForm NOTIFY wordChanged)
     /// For the recent emoji (optional).
     Q_PROPERTY(km::AppSettings *settings READ settings WRITE setSettings NOTIFY settingsChanged)
     /// The query matched (lower case, colons stripped), "" = none.
@@ -66,6 +76,11 @@ public:
     void setLimit(int limit);
     int minimumLength() const { return m_minimumLength; }
     void setMinimumLength(int length);
+    bool plainWordSubstrings() const { return m_plainWordSubstrings; }
+    void setPlainWordSubstrings(bool on);
+    bool requireLetterStart() const { return m_requireLetterStart; }
+    void setRequireLetterStart(bool on);
+    bool colonForm() const { return m_colonForm; }
     AppSettings *settings() const { return m_settings; }
     void setSettings(AppSettings *settings);
     QString query() const { return m_query; }
@@ -89,7 +104,7 @@ public:
     static Span wordBefore(const QString &text, int cursor, int minimumLength = DefaultMinimumLength);
     /// `word` lower case, colons stripped, `_` → space; "" when it is not a
     /// word or too short (see wordBefore()).
-    static QString normalize(const QString &word, int minimumLength = DefaultMinimumLength);
+    static QString normalize(const QString &word, int minimumLength = DefaultMinimumLength, bool requireLetterStart = true);
     /// Entries in the bundled table (tests).
     static int tableSize();
 
@@ -101,6 +116,7 @@ Q_SIGNALS:
     void limitChanged();
     void minimumLengthChanged();
     void settingsChanged();
+    void optionsChanged();
     void wordChanged();
 
 private:
@@ -109,7 +125,11 @@ private:
     QList<int> m_rows; ///< indexes into the table
     int m_limit = DefaultLimit;
     int m_minimumLength = DefaultMinimumLength;
+    bool m_plainWordSubstrings = true;
+    bool m_requireLetterStart = true;
+    bool m_colonForm = false;
     QPointer<AppSettings> m_settings;
+    QStringList m_recent; ///< m_settings->recentEmoji(), kept up to date
     QString m_query;
     QString m_wordText;
     Span m_span;

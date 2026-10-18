@@ -35,6 +35,9 @@ CLDR_BASE = f"https://raw.githubusercontent.com/unicode-org/cldr/{CLDR_RELEASE}/
 SOURCES = {
     "en.xml": f"{CLDR_BASE}/annotations/en.xml",
     "en-derived.xml": f"{CLDR_BASE}/annotationsDerived/en.xml",
+    # Since Unicode 17 the emoji data sits with the version's other files:
+    # Public/emoji/ ends at 16.0 (Public/emoji/17.0/ is a 404, checked
+    # 2026-10-18; Public/emoji/latest/ is not pinned).
     "emoji-test.txt": f"https://unicode.org/Public/{EMOJI_VERSION}/emoji/emoji-test.txt",
 }
 

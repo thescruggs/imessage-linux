@@ -53,6 +53,17 @@ Kirigami.Page {
         }
     }
 
+    // The highlighted item, kept across model resets ("c:<uri>" / "v:<chat id>").
+    property string highlightKey
+    /// The user moved the highlight (arrow keys or the pointer) since the text changed.
+    property bool highlightChosen: false
+    property point lastPointer: Qt.point(-1, -1)
+
+    function setHighlight(row: int) {
+        suggestions.currentIndex = row;
+        highlightKey = row >= 0 ? App.recipientPicker.rowData(row).key : "";
+    }
+
     // Down / Up: wraps around, keeps the row in view.
     function moveHighlight(step: int) {
         const n = suggestions.count;
@@ -60,14 +71,42 @@ Kirigami.Page {
             return;
         }
         const from = suggestions.currentIndex < 0 ? (step > 0 ? -1 : n) : suggestions.currentIndex;
-        suggestions.currentIndex = ((from + step) % n + n) % n;
+        setHighlight(((from + step) % n + n) % n);
+        highlightChosen = true;
         suggestions.positionViewAtIndex(suggestions.currentIndex, ListView.Contain);
     }
 
     function resetHighlight() {
-        suggestions.currentIndex = suggestions.count > 0 ? 0 : -1;
+        highlightChosen = false;
+        setHighlight(suggestions.count > 0 ? 0 : -1);
         if (suggestions.currentIndex === 0) {
             suggestions.positionViewAtBeginning();
+        }
+    }
+
+    // Rows changed without a text change (lookups, contacts, chat updates):
+    // stay on the same item if it is still there, else the first row.
+    function restoreHighlight() {
+        const row = App.recipientPicker.indexOfKey(highlightKey);
+        if (row >= 0) {
+            suggestions.currentIndex = row;
+        } else {
+            resetHighlight();
+        }
+    }
+
+    // Only a pointer that really moves takes the highlight: rows created or
+    // scrolled under a resting pointer must not.
+    function pointerAt(pos: point) {
+        const moved = lastPointer.x >= 0 && (pos.x !== lastPointer.x || pos.y !== lastPointer.y);
+        lastPointer = pos;
+        if (!moved) {
+            return;
+        }
+        const row = suggestions.indexAt(pos.x + suggestions.contentX, pos.y + suggestions.contentY);
+        if (row >= 0 && row !== suggestions.currentIndex) {
+            setHighlight(row);
+            highlightChosen = true;
         }
     }
 
@@ -164,9 +203,12 @@ Kirigami.Page {
                             page.resetHighlight();
                         }
                     }
-                    // Enter: the highlighted suggestion, else the typed text.
+                    // Enter: a complete address typed (and no row picked) as
+                    // typed, else the highlighted suggestion, else the text.
                     onAccepted: {
-                        if (suggestions.visible && suggestions.currentIndex >= 0) {
+                        if (!page.highlightChosen && App.recipientPicker.looksLikeAddress(text)) {
+                            page.addRecipient(text);
+                        } else if (suggestions.visible && suggestions.currentIndex >= 0) {
                             page.activate(suggestions.currentIndex);
                         } else {
                             page.addRecipient(text);
@@ -220,6 +262,13 @@ Kirigami.Page {
             keyNavigationEnabled: false
             highlightMoveDuration: 0
             section.property: "section"
+            HoverHandler {
+                onPointChanged: {
+                    if (hovered) {
+                        page.pointerAt(point.position);
+                    }
+                }
+            }
             section.delegate: Kirigami.ListSectionHeader {
                 required property string section
                 width: ListView.view.width
@@ -246,11 +295,6 @@ Kirigami.Page {
                 Accessible.name: i18nc("recipient suggestion: name, address", "%1, %2", name, address)
                 Accessible.role: Accessible.ListItem
                 Accessible.selected: highlighted
-                onHoveredChanged: {
-                    if (hovered) {
-                        suggestions.currentIndex = row.rowIndex;
-                    }
-                }
                 contentItem: RowLayout {
                     spacing: Kirigami.Units.largeSpacing
                     Components.Avatar {
@@ -328,17 +372,10 @@ Kirigami.Page {
         }
     }
 
-    // Rows coming and going later (lookups, chat updates) keep a valid highlight.
     Connections {
         target: App.recipientPicker
-        function onCountChanged() {
-            Qt.callLater(page.keepHighlight);
-        }
-    }
-
-    function keepHighlight() {
-        if (suggestions.currentIndex < 0 || suggestions.currentIndex >= suggestions.count) {
-            page.resetHighlight();
+        function onRowsChanged() {
+            Qt.callLater(page.restoreHighlight);
         }
     }
 

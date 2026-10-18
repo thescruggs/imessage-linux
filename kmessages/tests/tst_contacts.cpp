@@ -80,6 +80,27 @@ private Q_SLOTS:
         QCOMPARE(r.nameFor(u"tel:+12055550100"_s), u"Nat National"_s); // +1 still matches a national number
     }
 
+    void searchMatchedAddressFirst()
+    {
+        ContactResolver r(false);
+        r.setPeople({{u"2"_s, u"Dave Miller"_s, u"Dave"_s, {u"dave@example.net"_s}, {u"(555) 123-4567"_s}, {}}});
+        // A name: phones, then emails.
+        auto hits = r.search(u"dav"_s);
+        QCOMPARE(hits.size(), 2);
+        QCOMPARE(hits.at(0).uri, u"tel:+15551234567"_s);
+        // Part of the email (beyond the name): the email first.
+        hits = r.search(u"dave@exa"_s);
+        QCOMPARE(hits.size(), 2);
+        QCOMPARE(hits.at(0).uri, u"mailto:dave@example.net"_s);
+        // The complete address: only that one.
+        hits = r.search(u"Dave@Example.net"_s);
+        QCOMPARE(hits.size(), 1);
+        QCOMPARE(hits.at(0).uri, u"mailto:dave@example.net"_s);
+        hits = r.search(u"555-123-4567"_s);
+        QCOMPARE(hits.size(), 1);
+        QCOMPARE(hits.at(0).uri, u"tel:+15551234567"_s);
+    }
+
     void lookupAndGroupNames()
     {
         ContactResolver r(false);

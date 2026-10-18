@@ -5,14 +5,18 @@
 * **kmessages: pick recipients with the keyboard.** On the new-message
   page Up / Down move a highlight over the suggestions (contacts, then
   conversations; wrapping, scrolled into view, the first one highlighted
-  as you type, the mouse moves it too), Enter adds the highlighted
-  address or opens the highlighted group and falls back to what you
-  typed, Escape clears the field and goes back when it is already empty.
+  as you type, staying on the same row while suggestions update, a
+  moving mouse moves it too), Enter adds the highlighted address or opens
+  the highlighted group and falls back to what you typed (a complete
+  address typed is added as typed; suggestions list the address you typed
+  first), Escape clears the field and goes back when it is already empty.
 * **kmessages: emoji suggestions while typing.** Type `snake` (or
-  `:snake:`) and 🐍 is offered above the text field, as on macOS: Tab, or
-  Enter while the suggestions show, replaces the word with the highlighted
-  emoji, Left / Right pick another, Escape hides them for that word, a
-  click inserts one; emoji you use rank first. The emoji picker gets a
+  `:snake:`) and 🐍 is offered above the text field, as on macOS: Tab
+  replaces the word with the highlighted emoji (and a space), Left / Right
+  pick another (then Enter inserts it too), Escape hides them for that
+  word, a click inserts one; emoji you use rank first. Enter on a plain
+  word still sends; after `:snake:` it inserts. Plain words only offer
+  emoji whose name or keyword starts with them. The emoji picker gets a
   search field. On by default; Settings → "Suggest emoji while typing".
   English keywords from Unicode CLDR 48 / Emoji 17.0, bundled (Unicode
   License v3; `tools/gen-emoji-keywords.py` regenerates them).

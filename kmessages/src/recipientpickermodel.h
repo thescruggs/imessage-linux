@@ -12,8 +12,9 @@ namespace km
 /// matches (ContactSuggestionModel, one row per address) first, then the
 /// matching existing conversations (a ChatFilterModel). One list means one
 /// `currentIndex` for the keyboard highlight. Structural changes of either
-/// source are forwarded (inserts / removals / moves with the offset, resets
-/// and layout changes as resets), data changes per row.
+/// source are forwarded (inserts / removals with the offset; resets, layout
+/// changes and moves, which neither source makes, as resets), data changes
+/// per row.
 class RecipientPickerModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -43,12 +44,19 @@ public:
     QHash<int, QByteArray> roleNames() const override;
     int count() const { return rowCount(); }
 
-    /// What activating `row` means: {kind, uri, chatId, isGroup,
-    /// participantUris}; empty for a row out of range.
+    /// What activating `row` means: {key, kind, uri, chatId, isGroup,
+    /// participantUris}; empty for a row out of range. `key` identifies the
+    /// item across resets ("c:<uri>" / "v:<chat id>").
     Q_INVOKABLE QVariantMap rowData(int row) const;
+    /// The row of the item with `key`, -1 = gone.
+    Q_INVOKABLE int indexOfKey(const QString &key) const;
+    /// `text` is a complete email address or phone number (≥ 7 digits).
+    Q_INVOKABLE static bool looksLikeAddress(const QString &text);
 
 Q_SIGNALS:
     void countChanged();
+    /// After every structural change (reset, rows added or removed).
+    void rowsChanged();
 
 private:
     int contactCount() const;

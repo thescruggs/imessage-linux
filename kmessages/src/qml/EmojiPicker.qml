@@ -36,6 +36,7 @@ QQC2.Popup {
         settings: App.settings
         limit: 64
         minimumLength: 1
+        requireLetterStart: false // "100" → 💯
     }
 
     contentItem: ColumnLayout {

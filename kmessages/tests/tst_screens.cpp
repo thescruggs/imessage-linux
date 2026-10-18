@@ -747,6 +747,87 @@ private Q_SLOTS:
         QTest::keyClick(m_window, Qt::Key_Return);
         QCOMPARE(r->handles(), (QStringList{Dave, Carol, u"mailto:zed@example.org"_s}));
 
+        // A complete address typed: exactly that one, not the person's first address.
+        typeKeys(u"dave@example.net"_s);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QCOMPARE(r->handles(), (QStringList{Dave, Carol, u"mailto:zed@example.org"_s, u"mailto:dave@example.net"_s}));
+        r->removeLast();
+
+        // A pointer resting over the list does not take the highlight from
+        // the keyboard; only real movement does.
+        const QStringList kept = r->handles();
+        r->clear();
+        typeKeys(u"dav"_s);
+        settle(100);
+        auto *list = visibleItem(u"recipientSuggestionList"_s);
+        QVERIFY(list);
+        QQuickItem *third = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(list, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, third), Q_ARG(int, 2)));
+        QVERIFY(third);
+        const QPoint over = third->mapToScene(QPointF(third->width() / 2, third->height() / 2)).toPoint();
+        QTest::mouseMove(m_window, over - QPoint(0, 3));
+        QTest::mouseMove(m_window, over);
+        QTRY_COMPARE_WITH_TIMEOUT(page->property("highlightedIndex").toInt(), 2, Timeout);
+        typeKeys(u"e"_s); // "dave": new rows under the resting pointer
+        settle(100);
+        QCOMPARE(page->property("highlightedIndex").toInt(), 0);
+        const QString first = picker->rowData(0).value(u"uri"_s).toString();
+        QCOMPARE(first, Dave);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        QCOMPARE(r->handles(), QStringList{first});
+        r->clear();
+        for (const auto &h : kept) {
+            r->add(h);
+        }
+        QCOMPARE(r->handles(), kept);
+        QTest::mouseMove(m_window, QPoint(2, m_window->height() - 2));
+
+        // Rows changing under the highlight (contacts reloaded): it stays on
+        // the same item, else goes to the first row.
+        const auto people = [](bool daveEmail, bool zed) {
+            QList<ContactResolver::Person> out{
+                {u"1"_s, u"Bob Smith"_s, u"Bob"_s, {u"bob@example.com"_s}, {}, photo(QColor(0x3d, 0xae, 0xe9), QColor(0xf5, 0xd0, 0xa9))},
+                {u"2"_s, u"Dave Miller"_s, u"Dave"_s, {}, {u"(555) 123-4567"_s}, photo(QColor(0x2e, 0xcc, 0x71), QColor(0x8d, 0x5b, 0x3c))},
+                {u"3"_s, u"Carol Jones"_s, u"Carol"_s, {u"carol@example.com"_s}, {}, {}},
+            };
+            if (daveEmail) {
+                out[1].phones << u"dave@example.net"_s;
+            }
+            if (zed) {
+                out << ContactResolver::Person{u"4"_s, u"Zed Zulu"_s, u"Zed"_s, {u"zed@example.org"_s}, {}, {}};
+            }
+            return out;
+        };
+        typeKeys(u"dav"_s);
+        QCOMPARE(picker->rowCount(), 4);
+        for (int i = 0; i < 3; ++i) {
+            QTest::keyClick(m_window, Qt::Key_Down);
+        }
+        QCOMPARE(page->property("highlightedIndex").toInt(), 3); // the 1:1 chat with Dave
+        m_controller->contacts()->setPeople(people(false, false));
+        QCOMPARE(picker->rowCount(), 3);
+        QTRY_COMPARE_WITH_TIMEOUT(page->property("highlightedIndex").toInt(), 2, Timeout);
+        QCOMPARE(picker->rowData(2).value(u"chatId"_s).toString(), Dave);
+        m_controller->contacts()->setPeople(people(true, false));
+        QTRY_COMPARE_WITH_TIMEOUT(page->property("highlightedIndex").toInt(), 3, Timeout);
+        QTest::keyClick(m_window, Qt::Key_Up);
+        QTest::keyClick(m_window, Qt::Key_Up);
+        QCOMPARE(page->property("highlightedIndex").toInt(), 1); // Dave's email
+        m_controller->contacts()->setPeople(people(false, false));
+        QTRY_COMPARE_WITH_TIMEOUT(page->property("highlightedIndex").toInt(), 0, Timeout); // gone: the first row
+        m_controller->contacts()->setPeople(people(true, false));
+        field->setProperty("text", QString());
+        // Rows arriving later for the typed text: the first one is highlighted.
+        typeKeys(u"zulu"_s);
+        QCOMPARE(picker->rowCount(), 0);
+        QCOMPARE(page->property("highlightedIndex").toInt(), -1);
+        m_controller->contacts()->setPeople(people(true, true));
+        QCOMPARE(picker->rowCount(), 1);
+        QTRY_COMPARE_WITH_TIMEOUT(page->property("highlightedIndex").toInt(), 0, Timeout);
+        m_controller->contacts()->setPeople(people(true, false));
+        QTRY_COMPARE_WITH_TIMEOUT(page->property("highlightedIndex").toInt(), -1, Timeout);
+        field->setProperty("text", QString());
+
         // Escape clears the text; with nothing typed it goes back to the list.
         typeKeys(u"bo"_s);
         QVERIFY(picker->rowCount() > 0);
@@ -782,7 +863,23 @@ private Q_SLOTS:
         QTRY_VERIFY_WITH_TIMEOUT(input->hasActiveFocus(), Timeout);
         m_fake.control(u"ClearCalls"_s);
 
-        // "snake" offers 🐍 first; Tab puts it in place of the word.
+        const auto sentTexts = [&] {
+            QStringList out;
+            const auto calls = m_fake.callsOf(u"SendText"_s);
+            for (const auto &c : calls) {
+                out << c.at(3).toString();
+            }
+            return out;
+        };
+        const auto enterSends = [&](const QString &word) {
+            const int before = sentTexts().size();
+            QTest::keyClick(m_window, Qt::Key_Return);
+            QTRY_COMPARE_WITH_TIMEOUT(sentTexts().size(), before + 1, Timeout);
+            QCOMPARE(sentTexts().last(), word);
+            QCOMPARE(text(), QString());
+        };
+
+        // "snake" offers 🐍 first; Tab puts it in place of the word, plus a space.
         typeKeys(u"I saw a sn"_s);
         QVERIFY(!popupShown()); // two letters are not enough
         typeKeys(u"ake"_s);
@@ -791,13 +888,14 @@ private Q_SLOTS:
         QCOMPARE(composer->property("emojiIndex").toInt(), 0);
         shoot(u"emoji-suggestions"_s);
         QTest::keyClick(m_window, Qt::Key_Tab);
-        QCOMPARE(text(), u"I saw a 🐍"_s);
+        QCOMPARE(text(), u"I saw a 🐍 "_s);
         QVERIFY(!popupShown());
         QCOMPARE(settings->recentEmoji().value(0), u"🐍"_s);
 
         // The :colon: form; arrows move the highlight; Enter replaces instead of sending.
-        typeKeys(u" :cat:"_s);
+        typeKeys(u":cat:"_s);
         QVERIFY(popupShown());
+        QVERIFY(model->colonForm());
         QVERIFY(model->rowCount() > 2);
         const QString second = model->emojiAt(1);
         QTest::keyClick(m_window, Qt::Key_Right);
@@ -805,17 +903,34 @@ private Q_SLOTS:
         QTest::keyClick(m_window, Qt::Key_Left);
         QCOMPARE(composer->property("emojiIndex").toInt(), 1);
         QTest::keyClick(m_window, Qt::Key_Return);
-        QCOMPARE(text(), u"I saw a 🐍 "_s + second);
+        QString expected = u"I saw a 🐍 "_s + second + u" "_s;
+        QCOMPARE(text(), expected);
+        // ":cat:" + Enter: the first one.
+        typeKeys(u":cat:"_s);
+        const QString firstCat = model->emojiAt(0);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        expected += firstCat + u" "_s;
+        QCOMPARE(text(), expected);
+        // A plain word picked with an arrow key: Enter inserts it.
+        typeKeys(u"snake"_s);
+        QVERIFY(popupShown());
+        QVERIFY(!model->colonForm());
+        QVERIFY(model->rowCount() >= 2);
+        const QString otherSnake = model->emojiAt(1);
+        QTest::keyClick(m_window, Qt::Key_Down);
+        QTest::keyClick(m_window, Qt::Key_Return);
+        expected += otherSnake + u" "_s;
+        QCOMPARE(text(), expected);
         QCOMPARE(m_fake.callsOf(u"SendText"_s).size(), 0);
 
         // Escape hides the suggestions for this word; a changed word shows them again.
-        typeKeys(u" snake"_s);
+        typeKeys(u"snake"_s);
         QVERIFY(popupShown());
         QTest::keyClick(m_window, Qt::Key_Escape);
         QVERIFY(!popupShown());
         QVERIFY(text().endsWith(u" snake"_s));
         QTest::keyClick(m_window, Qt::Key_Space); // a space just continues typing
-        QCOMPARE(text(), u"I saw a 🐍 "_s + second + u" snake "_s);
+        QCOMPARE(text(), expected + u"snake "_s);
         QTest::keyClick(m_window, Qt::Key_Backspace);
         QVERIFY(!popupShown()); // the same word again: still dismissed
         QTest::keyClick(m_window, Qt::Key_Backspace);
@@ -828,7 +943,8 @@ private Q_SLOTS:
         QVERIFY(popupShown());
 
         // A click on a suggestion inserts it too.
-        QCOMPARE(model->emojiAt(0), u"🐍"_s); // recently used: first
+        QCOMPARE(model->emojiAt(0), otherSnake); // the most recently used match first
+        QCOMPARE(model->emojiAt(1), u"🐍"_s);
         settle(); // the row lays its buttons out before the next frame
         QQuickItem *button = nullptr;
         for (auto *item : visibleItems(u"emojiSuggestion"_s)) {
@@ -837,11 +953,44 @@ private Q_SLOTS:
             }
         }
         QVERIFY(button);
-        QCOMPARE(button->property("emoji").toString(), u"🐍"_s);
+        QCOMPARE(button->property("emoji").toString(), otherSnake);
         const QPointF centre = button->mapToScene(QPointF(button->width() / 2, button->height() / 2));
         QTest::mouseClick(m_window, Qt::LeftButton, {}, centre.toPoint());
-        QCOMPARE(text(), u"I saw a 🐍 "_s + second + u" 🐍"_s);
+        QCOMPARE(text(), expected + otherSnake + u" "_s);
         QCOMPARE(m_fake.callsOf(u"SendText"_s).size(), 0);
+        composer->setProperty("text", QString());
+        input->forceActiveFocus();
+
+        // Plain words + Enter send as typed: with the row shown ...
+        typeKeys(u"yes"_s);
+        QVERIFY(popupShown()); // 👍 has the keyword "yes"
+        enterSends(u"yes"_s);
+        // ... with nothing matching ...
+        typeKeys(u"zzqqx"_s);
+        QVERIFY(!popupShown());
+        enterSends(u"zzqqx"_s);
+        // ... after Escape ...
+        typeKeys(u"hello"_s);
+        if (popupShown()) {
+            QTest::keyClick(m_window, Qt::Key_Escape);
+        }
+        QVERIFY(!popupShown());
+        enterSends(u"hello"_s);
+        // ... and with the setting off.
+        settings->setEmojiSuggestions(false);
+        typeKeys(u"snake"_s);
+        QVERIFY(!popupShown());
+        enterSends(u"snake"_s);
+        settings->setEmojiSuggestions(true);
+        // "hello" + Enter: sent, no emoji.
+        typeKeys(u"hello"_s);
+        enterSends(u"hello"_s);
+        // Plain words match at word starts only: "now" offers no snowman.
+        model->update(u"now"_s, 3);
+        for (int i = 0; i < model->rowCount(); ++i) {
+            QVERIFY2(!model->emojiAt(i).contains(QChar(0x2603)) && !model->emojiAt(i).contains(QChar(0x26C4)), qPrintable(model->emojiAt(i)));
+        }
+        model->clear();
 
         // The picker's search uses the same table and records picks.
         auto *search = m_window->findChild<QObject *>(u"emojiSearchField"_s);
@@ -850,6 +999,8 @@ private Q_SLOTS:
         auto *grid = m_window->findChild<QObject *>(u"emojiGrid"_s);
         QVERIFY(grid);
         QVERIFY(grid->property("count").toInt() >= 2);
+        search->setProperty("text", u"100"_s); // digits: 💯
+        QVERIFY(grid->property("count").toInt() >= 1);
         search->setProperty("text", QString());
         QCOMPARE(grid->property("count").toInt(), 56); // the fixed grid
 

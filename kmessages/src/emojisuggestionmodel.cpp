@@ -60,7 +60,8 @@ bool isBoundary(const QString &text, int pos)
         return true;
     }
     const QChar c = text.at(pos - 1);
-    return c.isSpace() || u"([{\"'«“‘"_s.contains(c);
+    // An emoji (surrogates, U+FE0F, U+200D) ends a word too.
+    return c.isSpace() || c.isSurrogate() || c == QChar(0xFE0F) || c == QChar(0x200D) || u"([{\"'«“‘"_s.contains(c);
 }
 }
 
@@ -124,13 +125,40 @@ void EmojiSuggestionModel::setMinimumLength(int length)
 
 void EmojiSuggestionModel::setSettings(AppSettings *settings)
 {
-    if (settings != m_settings) {
-        m_settings = settings;
-        Q_EMIT settingsChanged();
+    if (settings == m_settings) {
+        return;
+    }
+    if (m_settings) {
+        disconnect(m_settings, nullptr, this, nullptr);
+    }
+    m_settings = settings;
+    m_recent = settings ? settings->recentEmoji() : QStringList();
+    if (settings) {
+        connect(settings, &AppSettings::recentEmojiChanged, this, [this] {
+            m_recent = m_settings ? m_settings->recentEmoji() : QStringList();
+        });
+    }
+    Q_EMIT settingsChanged();
+}
+
+void EmojiSuggestionModel::setPlainWordSubstrings(bool on)
+{
+    if (on != m_plainWordSubstrings) {
+        m_plainWordSubstrings = on;
+        Q_EMIT optionsChanged();
+        search();
     }
 }
 
-QString EmojiSuggestionModel::normalize(const QString &word, int minimumLength)
+void EmojiSuggestionModel::setRequireLetterStart(bool on)
+{
+    if (on != m_requireLetterStart) {
+        m_requireLetterStart = on;
+        Q_EMIT optionsChanged();
+    }
+}
+
+QString EmojiSuggestionModel::normalize(const QString &word, int minimumLength, bool requireLetterStart)
 {
     QString w = word;
     bool colon = false;
@@ -141,7 +169,7 @@ QString EmojiSuggestionModel::normalize(const QString &word, int minimumLength)
             w.chop(1);
         }
     }
-    if (w.isEmpty() || !w.at(0).isLetter() || w.size() < (colon ? 2 : minimumLength)) {
+    if (w.isEmpty() || (requireLetterStart && !w.at(0).isLetter()) || w.size() < (colon ? 2 : minimumLength)) {
         return {};
     }
     for (const QChar c : std::as_const(w)) {
@@ -189,10 +217,12 @@ EmojiSuggestionModel::Span EmojiSuggestionModel::wordBefore(const QString &text,
 
 void EmojiSuggestionModel::setWord(const QString &word)
 {
-    const QString q = normalize(word, m_minimumLength);
-    const bool changed = q != m_query || m_wordText != word;
+    const QString q = normalize(word, m_minimumLength, m_requireLetterStart);
+    const bool colon = !q.isEmpty() && word.startsWith(u':');
+    const bool changed = q != m_query || m_wordText != word || colon != m_colonForm;
     m_query = q;
     m_wordText = word;
+    m_colonForm = colon;
     m_span = Span{};
     search();
     if (changed) {
@@ -209,9 +239,10 @@ void EmojiSuggestionModel::update(const QString &text, int cursor)
     }
     const QString typed = text.mid(span.start, span.length);
     const QString q = normalize(typed, m_minimumLength);
-    const bool changed = q != m_query || typed != m_wordText || span.start != m_span.start || span.length != m_span.length;
+    const bool changed = q != m_query || typed != m_wordText || span.start != m_span.start || span.length != m_span.length || span.colonForm != m_colonForm;
     m_query = q;
     m_wordText = typed;
+    m_colonForm = span.colonForm;
     m_span = span;
     search();
     if (changed) {
@@ -222,6 +253,7 @@ void EmojiSuggestionModel::update(const QString &text, int cursor)
 void EmojiSuggestionModel::clear()
 {
     const bool changed = !m_query.isEmpty() || !m_wordText.isEmpty() || m_span.start >= 0;
+    m_colonForm = false;
     m_query.clear();
     m_wordText.clear();
     m_span = Span{};
@@ -239,9 +271,11 @@ void EmojiSuggestionModel::search()
         // Ranks, three tiers (exact, prefix, substring), the short name
         // first in each: 0 the short name == q, 1 a word of the short name
         // == q ("red heart"), 2 another keyword == q, 3 a word of the short
-        // name starts with q, 4 another keyword starts with q, 5 a keyword
-        // contains q.
-        constexpr int Ranks = 6;
+        // name starts with q, 4 another keyword starts with q, 5 a word
+        // inside a keyword starts with q, 6 a keyword contains q (plain
+        // words only with plainWordSubstrings).
+        constexpr int Ranks = 7;
+        const bool substrings = m_colonForm || m_plainWordSubstrings;
         QList<int> ranked[Ranks];
         for (int i = 0; i < entries.size(); ++i) {
             const QStringList &kw = entries.at(i).keywords;
@@ -271,10 +305,19 @@ void EmojiSuggestionModel::search()
             }
             if (rank == Ranks) {
                 for (const QString &w : kw) {
-                    if (w.contains(m_query)) {
-                        rank = 5;
-                        break;
+                    const qsizetype at = w.indexOf(m_query);
+                    if (at < 0) {
+                        continue;
                     }
+                    if (at > 0 && w.at(at - 1).isLetterOrNumber()) {
+                        rank = std::min(rank, 6); // inside a word
+                        continue;
+                    }
+                    rank = 5;
+                    break;
+                }
+                if (rank == 6 && !substrings) {
+                    rank = Ranks;
                 }
             }
             if (rank < Ranks) {
@@ -293,8 +336,7 @@ void EmojiSuggestionModel::search()
         }
         // Recent emoji that match go first, most recent first.
         if (m_settings) {
-            const QStringList recent = m_settings->recentEmoji();
-            for (const QString &emoji : recent) {
+            for (const QString &emoji : std::as_const(m_recent)) {
                 for (int j = 0; j < matches.size(); ++j) {
                     if (entries.at(matches.at(j)).emoji == emoji) {
                         rows << matches.takeAt(j);

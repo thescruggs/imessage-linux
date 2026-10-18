@@ -33,6 +33,10 @@ QQC2.Control {
     readonly property alias emojiSuggestionModel: emojiModel
     /// The highlighted suggestion.
     property int emojiIndex: 0
+    /// The user moved the highlight (arrow keys) for this word: then Enter
+    /// inserts; otherwise Enter inserts only in the :colon: form and sends
+    /// for a plain word ("yes" + Enter sends "yes").
+    property bool emojiChosen: false
     // Escape hides the suggestions for this word (where it starts, as typed).
     property int emojiDismissedStart: -1
     property string emojiDismissedWord
@@ -121,9 +125,13 @@ QQC2.Control {
             return;
         }
         const end = start + emojiModel.wordLength;
+        // Followed by a space (as macOS does) unless one is there already,
+        // so the next word gets its own suggestions. Two undo steps
+        // (TextEdit has no replace; setting `text` would drop the undo history).
+        const insert = input.getText(end, end + 1) === " " ? emoji : emoji + " ";
         input.remove(start, end);
-        input.insert(start, emoji);
-        input.cursorPosition = start + emoji.length;
+        input.insert(start, insert);
+        input.cursorPosition = start + insert.length;
         App.settings.addRecentEmoji(emoji);
         input.forceActiveFocus();
     }
@@ -176,7 +184,13 @@ QQC2.Control {
     EmojiSuggestionModel {
         id: emojiModel
         settings: App.settings
-        onWordChanged: root.emojiIndex = 0
+        // Plain words: only matches at the start of a keyword word ("now"
+        // must not offer ☃️ snowman); the :colon: form ranks everything.
+        plainWordSubstrings: false
+        onWordChanged: {
+            root.emojiIndex = 0;
+            root.emojiChosen = false;
+        }
         onCountChanged: root.emojiIndex = 0
     }
 
@@ -373,17 +387,22 @@ QQC2.Control {
                         if (root.emojiPopupVisible) {
                             const n = emojiModel.count;
                             const enter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier);
-                            if (enter || (event.key === Qt.Key_Tab && event.modifiers === Qt.NoModifier)) {
+                            // Tab inserts; Enter only for :colon: or a picked emoji
+                            // (plain words + Enter send as usual).
+                            const tab = event.key === Qt.Key_Tab && event.modifiers === Qt.NoModifier;
+                            if (tab || (enter && (emojiModel.colonForm || root.emojiChosen))) {
                                 event.accepted = true;
                                 root.insertEmojiSuggestion(root.emojiIndex);
                                 return;
                             } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Down) {
                                 event.accepted = true;
                                 root.emojiIndex = (root.emojiIndex + 1) % n;
+                                root.emojiChosen = true;
                                 return;
                             } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Up) {
                                 event.accepted = true;
                                 root.emojiIndex = (root.emojiIndex + n - 1) % n;
+                                root.emojiChosen = true;
                                 return;
                             } else if (event.key === Qt.Key_Escape) {
                                 event.accepted = true;

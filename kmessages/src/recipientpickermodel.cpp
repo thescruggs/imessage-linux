@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: SSPL-1.0
 #include "recipientpickermodel.h"
 
+#include "types.h"
+
 #include <KLocalizedString>
 
 using namespace Qt::StringLiterals;
@@ -69,6 +71,7 @@ void RecipientPickerModel::connectSource(QAbstractItemModel *source, bool isCont
             m_resetting = false;
             endResetModel();
             Q_EMIT countChanged();
+            Q_EMIT rowsChanged();
         }
     };
     connect(source, &QAbstractItemModel::modelAboutToBeReset, this, beginReset);
@@ -85,6 +88,7 @@ void RecipientPickerModel::connectSource(QAbstractItemModel *source, bool isCont
         if (!parent.isValid()) {
             endInsertRows();
             Q_EMIT countChanged();
+            Q_EMIT rowsChanged();
             sectionsMaybeChanged();
         }
     });
@@ -98,15 +102,15 @@ void RecipientPickerModel::connectSource(QAbstractItemModel *source, bool isCont
         if (!parent.isValid()) {
             endRemoveRows();
             Q_EMIT countChanged();
+            Q_EMIT rowsChanged();
             sectionsMaybeChanged();
         }
     });
-    connect(source, &QAbstractItemModel::rowsAboutToBeMoved, this, [this, offset](const QModelIndex &, int first, int last, const QModelIndex &, int dest) {
-        beginMoveRows({}, offset() + first, offset() + last, {}, offset() + dest);
-    });
-    connect(source, &QAbstractItemModel::rowsMoved, this, [this] {
-        endMoveRows();
-    });
+    // Neither source moves rows (ContactSuggestionModel resets, a
+    // QSortFilterProxyModel turns moves into layout changes); should one
+    // ever do, a reset is always correct.
+    connect(source, &QAbstractItemModel::rowsAboutToBeMoved, this, beginReset);
+    connect(source, &QAbstractItemModel::rowsMoved, this, endReset);
     connect(source, &QAbstractItemModel::dataChanged, this, [this, offset](const QModelIndex &tl, const QModelIndex &br) {
         if (m_resetting || tl.parent().isValid()) {
             return;
@@ -207,13 +211,45 @@ QVariantMap RecipientPickerModel::rowData(int row) const
         return {};
     }
     const QModelIndex i = index(row);
+    const bool contact = data(i, KindRole).toString() == "contact"_L1;
     return {
+        {u"key"_s, QString(contact ? u"c:"_s + data(i, UriRole).toString() : u"v:"_s + data(i, ChatIdRole).toString())},
         {u"kind"_s, data(i, KindRole)},
         {u"uri"_s, data(i, UriRole)},
         {u"chatId"_s, data(i, ChatIdRole)},
         {u"isGroup"_s, data(i, IsGroupRole)},
         {u"participantUris"_s, data(i, ParticipantUrisRole)},
     };
+}
+
+int RecipientPickerModel::indexOfKey(const QString &key) const
+{
+    if (key.isEmpty()) {
+        return -1;
+    }
+    for (int row = 0; row < rowCount(); ++row) {
+        if (rowData(row).value(u"key"_s).toString() == key) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+bool RecipientPickerModel::looksLikeAddress(const QString &text)
+{
+    const QString t = text.trimmed();
+    const QString uri = normalizeHandle(t);
+    if (uri.startsWith("mailto:"_L1)) {
+        return uri.indexOf(u'.', uri.indexOf(u'@')) > 0; // a dot in the domain
+    }
+    if (uri.startsWith("tel:"_L1)) {
+        int digits = 0;
+        for (const QChar c : uri) {
+            digits += c.isDigit() ? 1 : 0;
+        }
+        return digits >= 7;
+    }
+    return false;
 }
 
 } // namespace km

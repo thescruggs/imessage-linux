@@ -92,7 +92,9 @@ public:
     /// without `profile` shares nothing); one contactsChanged() at most.
     void setSharedProfiles(const QList<Handle> &handles);
     /// People whose name or address contains every word of `text`, one row
-    /// per email / phone number, best matches first.
+    /// per email / phone number, best matches first. Within a person the
+    /// addresses the words matched come first; when `text` is one of their
+    /// addresses (as a URI), only that one is listed.
     QList<Candidate> search(const QString &text, int limit = 30) const;
 
     /// Replace the index (used by the KPeople loader, and by tests).

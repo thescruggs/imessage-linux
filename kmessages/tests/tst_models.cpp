@@ -1503,6 +1503,16 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QCOMPARE(picker.rowData(0).value(u"uri"_s).toString(), Carol);
         QCOMPARE(picker.rowData(1).value(u"isGroup"_s).toBool(), true);
         QCOMPARE(picker.rowData(2).value(u"participantUris"_s).toStringList(), QStringList{Bob});
+        QCOMPARE(picker.rowData(0).value(u"key"_s).toString(), u"c:"_s + Carol);
+        QCOMPARE(picker.rowData(1).value(u"key"_s).toString(), u"v:"_s + Team);
+        QCOMPARE(picker.indexOfKey(u"v:"_s + Bob), 2);
+        QCOMPARE(picker.indexOfKey(u"v:nope"_s), -1);
+        QCOMPARE(picker.indexOfKey(QString()), -1);
+        QVERIFY(RecipientPickerModel::looksLikeAddress(u"dave@example.net"_s));
+        QVERIFY(RecipientPickerModel::looksLikeAddress(u" (555) 123-4567 "_s));
+        QVERIFY(!RecipientPickerModel::looksLikeAddress(u"dave@example"_s));
+        QVERIFY(!RecipientPickerModel::looksLikeAddress(u"dav"_s));
+        QVERIFY(!RecipientPickerModel::looksLikeAddress(u"555"_s));
         QVERIFY(picker.rowData(3).isEmpty());
         QVERIFY(picker.rowData(-1).isEmpty());
 
@@ -1563,6 +1573,41 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         m.setWord(u"heart"_s);
         QCOMPARE(emojis(), hearts);
         QCOMPARE(m.emojiAt(0), u"❤️"_s); // "red heart": the shortest short name with the word "heart"
+
+        // Plain words in the composer: no bare substrings ("now" ⊂ "snowman"),
+        // but word starts inside keywords; the colon form keeps everything.
+        const auto hasSnowman = [&] {
+            for (const auto &e : emojis()) {
+                if (e.contains(QChar(0x2603)) || e.contains(QChar(0x26C4))) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        m.setLimit(200);
+        m.setWord(u"now"_s);
+        QVERIFY(hasSnowman()); // default: substrings too (the picker)
+        m.setPlainWordSubstrings(false);
+        QVERIFY(!hasSnowman());
+        QVERIFY(!m.colonForm());
+        m.setWord(u":now"_s);
+        QVERIFY(m.colonForm());
+        QVERIFY(hasSnowman());
+        m.setWord(u"joy"_s);
+        QVERIFY(emojis().contains(u"😂"_s)); // the keyword "joy"
+        m.setWord(u"tears"_s);
+        QVERIFY(emojis().contains(u"😂"_s)); // a word start inside "face with tears of joy"
+        m.setPlainWordSubstrings(true);
+        m.setLimit(EmojiSuggestionModel::DefaultLimit);
+        // Digits first only when allowed (the picker's search).
+        m.setWord(u"100"_s);
+        QCOMPARE(m.rowCount(), 0);
+        m.setRequireLetterStart(false);
+        m.setMinimumLength(1);
+        m.setWord(u"100"_s);
+        QVERIFY(emojis().mid(0, 3).contains(u"💯"_s));
+        m.setRequireLetterStart(true);
+        m.setMinimumLength(EmojiSuggestionModel::DefaultMinimumLength);
 
         // A larger limit (the picker's search).
         m.setLimit(40);
@@ -1642,6 +1687,9 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QTest::newRow("digits first") << u"123abc"_s << -1 << -1 << 0 << QString();
         QTest::newRow("bracket") << u"(snake"_s << -1 << 1 << 5 << u"snake"_s;
         QTest::newRow("empty") << QString() << -1 << -1 << 0 << QString();
+        QTest::newRow("after an emoji") << u"🐍snake"_s << -1 << 2 << 5 << u"snake"_s;
+        QTest::newRow("after U+FE0F") << u"❤️snake"_s << -1 << 2 << 5 << u"snake"_s;
+        QTest::newRow("colon after an emoji") << u"🐍:sn"_s << -1 << 2 << 3 << u"sn"_s;
     }
 
     void emojiWordBefore()

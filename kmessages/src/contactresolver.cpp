@@ -335,10 +335,44 @@ QList<ContactResolver::Candidate> ContactResolver::search(const QString &text, i
         }
         return QString::localeAwareCompare(a.p->name, b.p->name) < 0;
     });
+    // Per person: a complete address typed is the only one offered; else
+    // the addresses matched by words that are not in the name come first
+    // (then phones, emails, as written).
+    const QString typedUri = uriForAddress(text);
+    const auto addressMatches = [&words](const QString &name, const QString &addr) {
+        static const QRegularExpression phoneChars(u"^[0-9+() .-]+$"_s);
+        const QString ad = digitsOf(addr);
+        for (const auto &w : words) {
+            if (name.contains(w, Qt::CaseInsensitive)) {
+                continue;
+            }
+            const QString wd = digitsOf(w);
+            const bool phoneLike = wd.size() >= 3 && phoneChars.match(w).hasMatch();
+            if (addr.contains(w, Qt::CaseInsensitive) || (phoneLike && ad.contains(wd))) {
+                return true;
+            }
+        }
+        return false;
+    };
     QList<Candidate> out;
     QSet<QString> seen;
     for (const auto &h : std::as_const(hits)) {
-        for (const auto &addr : h.p->phones + h.p->emails) {
+        const QStringList all = h.p->phones + h.p->emails;
+        QStringList ordered;
+        for (const auto &addr : all) {
+            if (!typedUri.isEmpty() && uriForAddress(addr) == typedUri) {
+                ordered = {addr};
+                break;
+            }
+        }
+        if (ordered.isEmpty()) {
+            QStringList rest;
+            for (const auto &addr : all) {
+                (addressMatches(h.p->name, addr) ? ordered : rest) << addr;
+            }
+            ordered << rest;
+        }
+        for (const auto &addr : std::as_const(ordered)) {
             const QString uri = uriForAddress(addr);
             if (uri.isEmpty() || seen.contains(uri)) {
                 continue;
