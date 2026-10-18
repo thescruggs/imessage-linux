@@ -121,7 +121,7 @@ chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
    unpinned here too, while pins made here stay; group pins that are not a
    GUID (`chat123…`) are looked up in the Mac's `chat.db` and mapped like
    the history import.
-3. **kmessages**: `ChatListModel` sorts pinned chats first by `pin_order`,
+3. **[done 2026-10-18]** **kmessages**: `ChatListModel` sorts pinned chats first by `pin_order`,
    then the rest by time as now; a "Pinned" section header (Kirigami
    `ListSectionHeader`) when any exist; `ChatListDelegate` gets a context
    menu (right-click / long-press) with Pin / Unpin (and later Mute);
@@ -129,6 +129,17 @@ chat GUIDs for groups; `pR`/`pV` are format versions). Contacts carry no
    a stretch goal (use `ReorderPins`). Tests: model ordering with mixed
    pins (tst_models), a `pinned-chats` screenshot (tst_screens), fake
    daemon `SetChatPinned`.
+   As built: roles `pinned`, `pinOrder`, `section` ("Pinned" /
+   "Conversations", empty while nothing is pinned, so the plain list has
+   no header); a pin change re-sorts the whole list with row moves (the
+   daemon renumbers several pins, one `ChatUpdated` each), new activity
+   only repositions within its block. Context menu = right-click or press
+   and hold → Pin / Unpin (`SetChatPinned`, order -1); a Pin / Unpin button
+   under the heading of the details page; a small `pin` icon next to the
+   time. Not built: drag to reorder the pins (`ReorderPins` is wired in
+   `DaemonClient::reorderPins` but has no UI yet; the Mac's order arrives
+   through the sync, `imsg chat CHAT --pin --position N` reorders by hand),
+   and Mute (the daemon has no mute).
 
 ### B. Keyboard: Ctrl+N and picking recipients with ↑ ↓ Enter
 
@@ -206,7 +217,7 @@ button.
    its error; only changed vCards are rewritten; `imsg doctor` suggests
    `mac_host` (it does not write config.toml). The wrapper falls back to
    running the exporter itself when `imsg` is not installed.
-2. **kmessages**: a "Sync from Mac" toolbar button next to "New message"
+2. **[done 2026-10-18]** **kmessages**: a "Sync from Mac" toolbar button next to "New message"
    (icon `view-refresh`, tooltip with the host and the last sync time) runs
    `imsg sync-mac` through `QProcess` (imsg is installed with the app;
    `KMESSAGES_IMSG` env / Settings path override for development), with a
@@ -216,6 +227,19 @@ button.
    (defaults to the daemon's `mac_host`). Also `Tools > Sync from Mac` in
    the menu. The last sync time lives in the app's KConfig. Group photos
    and shared names already come from iCloud and need no sync.
+   As built: `MacSync` (`kmessages/src/macsync.{h,cpp}`, `App.macSync`)
+   runs `imsg sync-mac --json [-- HOST]` (HOST only when set in Settings;
+   otherwise imsg reads the daemon's `mac_host` itself) and turns the JSON
+   into one line ("Synced from mac.local: 312 contacts (4 updated), 3
+   pins (1 not found)"; part errors as "Sync from Mac incomplete: …";
+   `{"error"}` and exit code 5 have their own messages; non-JSON output
+   falls back to imsg's last stderr line); a 10-minute timeout kills a
+   hung ssh. There is no menu bar, so the second entry point is the tray
+   menu ("Sync from Mac"); Settings has a Sync from Mac card (Mac host,
+   Sync Now with the last sync time, the imsg path). The toolbar button
+   is the action's `displayComponent`, with a busy indicator in place of
+   the icon while running; kmessagesrc keys `MacHost`, `ImsgPath`
+   (`[General]`) and `[MacSync] LastSync`.
 3. **Tests**: the Rust side like `import-mac` (tar fixture → vCards, pins
    mapping, dry run); kmessages tests with a fake `imsg` script on `PATH`
    that prints a summary (button busy state, notification, failure path).

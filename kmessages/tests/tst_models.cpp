@@ -7,6 +7,7 @@
 #include "daemonclient.h"
 #include "fakedaemon.h"
 #include "handlelookupmodel.h"
+#include "macsync.h"
 #include "messagelistmodel.h"
 #include "messagesearchmodel.h"
 #include "outgoingfiles.h"
@@ -171,6 +172,116 @@ private Q_SLOTS:
         QCOMPARE(filter.rowCount(), 1);
         filter.setFilterText(QString());
         QCOMPARE(filter.rowCount(), 4);
+    }
+
+    void pinnedChatsFirst()
+    {
+        const QString eve = u"mailto:eve@example.org"_s;
+        auto client = connectedClient();
+        ChatListModel chats(client.get());
+        QAbstractItemModelTester tester(&chats);
+        QTRY_COMPARE_WITH_TIMEOUT(chats.rowCount(), 4, Timeout);
+        const auto order = [&] {
+            QStringList ids;
+            for (int i = 0; i < chats.rowCount(); ++i) {
+                ids << roleOf(chats, i, ChatListModel::ChatIdRole).toString();
+            }
+            return ids;
+        };
+        QCOMPARE(order(), (QStringList{Bob, Team, Dave, eve}));
+        QVERIFY(!chats.hasPinned());
+        QCOMPARE(roleOf(chats, 0, ChatListModel::SectionRole).toString(), QString()); // no sections without pins
+        QVERIFY(!roleOf(chats, 0, ChatListModel::PinnedRole).toBool());
+        QCOMPARE(roleOf(chats, 0, ChatListModel::PinOrderRole).toInt(), -1);
+
+        // Pinning moves the row into the pinned block, new pins last.
+        QSignalSpy hasPinned(&chats, &ChatListModel::hasPinnedChanged);
+        client->setChatPinned(eve, true);
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{eve, Bob, Team, Dave}), Timeout);
+        QVERIFY(chats.hasPinned());
+        QCOMPARE(hasPinned.count(), 1);
+        client->setChatPinned(Dave, true);
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{eve, Dave, Bob, Team}), Timeout);
+        QVERIFY(roleOf(chats, 1, ChatListModel::PinnedRole).toBool());
+        QCOMPARE(roleOf(chats, 0, ChatListModel::PinOrderRole).toInt(), 0);
+        QCOMPARE(roleOf(chats, 1, ChatListModel::PinOrderRole).toInt(), 1);
+        QCOMPARE(roleOf(chats, 1, ChatListModel::SectionRole).toString(), u"Pinned"_s);
+        QCOMPARE(roleOf(chats, 2, ChatListModel::SectionRole).toString(), u"Conversations"_s);
+        QCOMPARE(chats.get(Dave).value(u"pinned"_s).toBool(), true);
+
+        // Moving a pin first renumbers the others (one ChatUpdated each).
+        client->setChatPinned(Dave, true, 0);
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{Dave, eve, Bob, Team}), Timeout);
+        QCOMPARE(roleOf(chats, 1, ChatListModel::PinOrderRole).toInt(), 1);
+
+        // New activity sorts the rest, never above or out of the pinned block.
+        m_fake.control(u"InjectMessage"_s, {Team, Carol, u"pins stay put"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{Dave, eve, Team, Bob}), Timeout);
+        m_fake.control(u"InjectMessage"_s, {eve, eve, u"I am pinned"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(roleOf(chats, 1, ChatListModel::SnippetRole).toString(), u"I am pinned"_s, Timeout);
+        QTest::qWait(200); // and the ChatUpdated that follows
+        QCOMPARE(order(), (QStringList{Dave, eve, Team, Bob}));
+
+        // ReorderPins
+        client->reorderPins({eve});
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{eve, Dave, Team, Bob}), Timeout);
+
+        // A fresh ListChats sorts the same way.
+        {
+            ChatListModel fresh(client.get());
+            QTRY_COMPARE_WITH_TIMEOUT(fresh.rowCount(), 4, Timeout);
+            QCOMPARE(roleOf(fresh, 0, ChatListModel::ChatIdRole).toString(), eve);
+            QCOMPARE(roleOf(fresh, 1, ChatListModel::ChatIdRole).toString(), Dave);
+            QCOMPARE(roleOf(fresh, 2, ChatListModel::ChatIdRole).toString(), Team);
+            QVERIFY(fresh.hasPinned());
+        }
+
+        // Unpinned, a chat goes back to its place by time (Eve has the newest message).
+        client->setChatPinned(eve, false);
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{Dave, eve, Team, Bob}), Timeout);
+        QVERIFY(!roleOf(chats, 1, ChatListModel::PinnedRole).toBool());
+        client->setChatPinned(Dave, false);
+        QTRY_COMPARE_WITH_TIMEOUT(order(), (QStringList{eve, Team, Bob, Dave}), Timeout);
+        QVERIFY(!chats.hasPinned());
+        QCOMPARE(hasPinned.count(), 2);
+        QCOMPARE(roleOf(chats, 3, ChatListModel::SectionRole).toString(), QString());
+
+        // Failures are reported (unknown chat).
+        QSignalSpy failed(client.get(), &DaemonClient::operationFailed);
+        client->setChatPinned(u"mailto:nobody@example.com"_s, true);
+        QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 1, Timeout);
+        QCOMPARE(failed.first().at(0).toString(), u"SetChatPinned"_s);
+    }
+
+    void macSyncSummary()
+    {
+        bool ok = false;
+        const QByteArray full = R"({"host":"mac.local","dry_run":false,
+            "contacts":{"dir":"/x","received":312,"photos":200,"written":3,"unchanged":308,"removed":1},
+            "pins":{"mac":[{"pin":"+12055550100","chat_id":"tel:+12055550100","result":"pinned"},
+                           {"pin":"bob@example.com","chat_id":"mailto:bob@example.com","result":"pinned"},
+                           {"pin":"9F1C","chat_id":"group:9F1C","result":"not-in-daemon"}],
+                    "order":[],"kept_local":[],"unpin":[]}})";
+        QCOMPARE(MacSync::summarize(full, 0, QString(), &ok), u"Synced from mac.local: 312 contacts (4 updated), 2 pins (1 not found)"_s);
+        QVERIFY(ok);
+        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"received":1,"written":0,"removed":0},"pins":{"mac":[]}})", 0, QString(), &ok),
+                 u"Synced from m: 1 contact, 0 pins"_s);
+        QVERIFY(ok);
+        // A part failed (exit 1): what worked and the error.
+        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"error":"no Full Disk Access"},"pins":{"mac":[{"result":"pinned"}]}})", 1, QString(), &ok),
+                 u"Sync from Mac incomplete: 1 pin; contacts: no Full Disk Access"_s);
+        QVERIFY(!ok);
+        // Nothing applied: {"host", "error"}.
+        QCOMPARE(MacSync::summarize(R"({"host":null,"error":"no Mac host given"})", 2, QString(), &ok), u"Sync from Mac failed: no Mac host given"_s);
+        QVERIFY(!ok);
+        QCOMPARE(MacSync::summarize(R"({"host":"m","error":"daemon not running"})", MacSync::ExitNoDaemon, QString(), &ok),
+                 u"Sync from Mac: imessaged is not running. Start it and try again."_s);
+        QVERIFY(!ok);
+        // Not JSON (an old imsg): the last stderr line.
+        QCOMPARE(MacSync::summarize("", 2, u"warning\nimsg: error: unrecognized subcommand 'sync-mac'\n"_s, &ok),
+                 u"Sync from Mac failed: unrecognized subcommand 'sync-mac'"_s);
+        QCOMPARE(MacSync::summarize("", 1, QString(), &ok), u"Sync from Mac failed (imsg exited with code 1)."_s);
+        QVERIFY(!ok);
     }
 
     void sharedProfilesAndGroupIcons()

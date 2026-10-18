@@ -8,8 +8,17 @@
   pinned chat without a position keeps its place); `imsg chats`
   marks pinned chats with 📌. New D-Bus `SetChatPinned` and
   `ReorderPins`; `Chat` JSON gains `pinned` and `pin_order`
-  (`ChatUpdated` when they change); store schema 6. The kmessages side
-  (pinned chats first, a context menu) comes next.
+  (`ChatUpdated` when they change); store schema 6.
+* **kmessages: pinned conversations and a "Sync from Mac" button.**
+  Pinned chats stay at the top of the list under a "Pinned" header, in
+  pin order (new messages do not move them out), with a small pin mark;
+  right-click a chat (press and hold on touch) or use its details page to
+  Pin / Unpin. The new Sync from Mac toolbar button (and tray menu entry)
+  runs `imsg sync-mac --json` and reports the result ("Synced from
+  mac.local: 312 contacts (4 updated), 3 pins", or the error) in a passive
+  notification; the tooltip shows the last sync. Settings → Sync from Mac
+  sets the Mac (default: the daemon's `mac_host`) and, for development
+  builds, the `imsg` program (`KMESSAGES_IMSG` overrides it).
 * **`imsg sync-mac`: contacts and pins from your Mac in one go.** One ssh
   connection copies the Mac's contacts (the same `mac-<uid>.vcf` vCards
   with photos as `tools/mac-contacts-export.sh`, now rewriting only the

@@ -514,6 +514,11 @@ std::optional<Chat> chat(const QJsonObject &o, QString *error)
         c.backgroundPath = optString(bg.value("path"_L1));
     }
     c.iconPath = optString(o.value("icon_path"_L1));
+    c.pinned = o.value("pinned"_L1).toBool();
+    if (c.pinned) {
+        const auto order = o.value("pin_order"_L1);
+        c.pinOrder = order.isDouble() ? qMax(0, order.toInt()) : 0;
+    }
     return c;
 }
 
@@ -670,6 +675,7 @@ std::optional<Status> parseStatus(const QString &json, QString *error)
     s.profilesState = optString(profiles.value("state"_L1));
     s.profilesDetail = optString(profiles.value("detail"_L1));
     applySms(o->value("sms"_L1).toObject(), &s);
+    s.macHost = optString(o->value("mac_host"_L1));
     s.registeredAt = optInt(reg.value("registered_at"_L1));
     s.expiresAt = optInt(reg.value("expires_at"_L1));
     const auto unread = o->value("unread"_L1);

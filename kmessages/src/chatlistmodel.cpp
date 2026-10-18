@@ -3,8 +3,12 @@
 #include "contactresolver.h"
 #include "daemonclient.h"
 
+#include <KLocalizedString>
+
 #include <QLoggingCategory>
 #include <QUrl>
+
+#include <algorithm>
 
 using namespace Qt::StringLiterals;
 
@@ -80,6 +84,9 @@ QHash<int, QByteArray> ChatListModel::roleNames() const
         {ParticipantSharedNamesRole, "participantSharedNames"},
         {ParticipantSharedPhotosRole, "participantSharedPhotos"},
         {IconSourceRole, "iconSource"},
+        {PinnedRole, "pinned"},
+        {PinOrderRole, "pinOrder"},
+        {SectionRole, "section"},
     };
 }
 
@@ -158,6 +165,17 @@ QVariant ChatListModel::data(const QModelIndex &index, int role) const
     }
     case IconSourceRole:
         return groupIconSource(c);
+    case PinnedRole:
+        return c.pinned;
+    case PinOrderRole:
+        return c.pinned ? c.pinOrder : -1;
+    case SectionRole:
+        // No sections at all while nothing is pinned (ListView shows a header
+        // whenever the value changes from the previous row's).
+        if (!m_hasPinned) {
+            return QString();
+        }
+        return c.pinned ? i18nc("chat list section", "Pinned") : i18nc("chat list section: the chats that are not pinned", "Conversations");
     case ParticipantSharedNamesRole: {
         const auto *contacts = ContactResolver::instance();
         QStringList names;
@@ -245,9 +263,10 @@ void ChatListModel::refresh()
             self->m_entries.append(e);
         }
         std::stable_sort(self->m_entries.begin(), self->m_entries.end(), [](const Entry &a, const Entry &b) {
-            return a.chat.lastMessageAt > b.chat.lastMessageAt;
+            return precedes(a.chat, b.chat);
         });
         self->endResetModel();
+        self->updateHasPinned();
         self->m_loading = false;
         self->m_loaded = true;
         Q_EMIT self->loadingChanged();
@@ -420,13 +439,25 @@ void ChatListModel::emitRowChanged(int row)
     Q_EMIT dataChanged(idx, idx);
 }
 
+bool ChatListModel::precedes(const Chat &a, const Chat &b)
+{
+    if (a.pinned != b.pinned) {
+        return a.pinned;
+    }
+    if (a.pinned) {
+        return a.pinOrder < b.pinOrder;
+    }
+    return a.lastMessageAt > b.lastMessageAt;
+}
+
 int ChatListModel::reposition(int row)
 {
-    // The list is sorted newest first; ours goes before others with equal time.
-    const qint64 t = m_entries.at(row).chat.lastMessageAt;
+    // The list is sorted (precedes()); ours goes before others that tie with it
+    // (equal time; a pinned chat's activity does not move it at all).
+    const Chat &c = m_entries.at(row).chat;
     int newRow = 0;
     for (int i = 0; i < m_entries.size(); ++i) {
-        if (i != row && m_entries.at(i).chat.lastMessageAt > t) {
+        if (i != row && precedes(m_entries.at(i).chat, c)) {
             ++newRow;
         }
     }
@@ -440,17 +471,51 @@ int ChatListModel::reposition(int row)
     return newRow;
 }
 
+void ChatListModel::resort()
+{
+    // Selection sort with one row move per misplaced row: stable, keeps the
+    // views' items (and the filter proxy) in step; pins change rarely.
+    for (int target = 0; target < m_entries.size(); ++target) {
+        int best = target;
+        for (int i = target + 1; i < m_entries.size(); ++i) {
+            if (precedes(m_entries.at(i).chat, m_entries.at(best).chat)) {
+                best = i;
+            }
+        }
+        if (best != target) {
+            beginMoveRows(QModelIndex(), best, best, QModelIndex(), target);
+            m_entries.move(best, target);
+            endMoveRows();
+        }
+    }
+}
+
+void ChatListModel::updateHasPinned()
+{
+    const bool any = std::any_of(m_entries.cbegin(), m_entries.cend(), [](const Entry &e) {
+        return e.chat.pinned;
+    });
+    if (any != m_hasPinned) {
+        m_hasPinned = any;
+        if (!m_entries.isEmpty()) {
+            Q_EMIT dataChanged(index(0), index(int(m_entries.size()) - 1), {SectionRole});
+        }
+        Q_EMIT hasPinnedChanged();
+    }
+}
+
 void ChatListModel::upsert(const Chat &chat, bool fetchSnippetIfNew)
 {
     int row = indexOf(chat.id);
     if (row < 0) {
         int pos = 0;
-        while (pos < m_entries.size() && m_entries.at(pos).chat.lastMessageAt >= chat.lastMessageAt) {
+        while (pos < m_entries.size() && !precedes(chat, m_entries.at(pos).chat)) {
             ++pos;
         }
         beginInsertRows(QModelIndex(), pos, pos);
         m_entries.insert(pos, Entry{chat, {}, {}, false, {}});
         endInsertRows();
+        updateHasPinned();
         Q_EMIT countChanged();
         Q_EMIT totalUnreadChanged();
         Q_EMIT unreadChanged(chat.id, shownUnread(chat));
@@ -467,9 +532,18 @@ void ChatListModel::upsert(const Chat &chat, bool fetchSnippetIfNew)
     const bool unreadChangedNow = unreadBefore != shownUnread(chat);
     // Never move last activity backwards (a ChatUpdated can lag a MessageReceived).
     const qint64 last = qMax(e.chat.lastMessageAt, chat.lastMessageAt);
+    const bool pinChanged = e.chat.pinned != chat.pinned || (chat.pinned && e.chat.pinOrder != chat.pinOrder);
     e.chat = chat;
     e.chat.lastMessageAt = last;
-    row = reposition(row);
+    if (pinChanged) {
+        // Pinning renumbers other pins too (each its own ChatUpdated), so the
+        // rest of the list may be momentarily out of order: sort it all.
+        resort();
+        row = indexOf(chat.id);
+        updateHasPinned();
+    } else {
+        row = reposition(row);
+    }
     emitRowChanged(row);
     if (unreadChangedNow) {
         Q_EMIT totalUnreadChanged();

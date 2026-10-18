@@ -53,6 +53,16 @@ Kirigami.ScrollablePage {
                 text: page.chat.name ?? ""
                 elide: Text.ElideRight
             }
+            QQC2.Button {
+                objectName: "detailsPinButton"
+                Layout.alignment: Qt.AlignHCenter
+                readonly property bool pinned: page.chat.pinned ?? false
+                flat: true
+                icon.name: pinned ? "window-unpin" : "pin"
+                text: pinned ? i18n("Unpin") : i18n("Pin")
+                Accessible.description: pinned ? i18n("Remove this conversation from the top of the list") : i18n("Keep this conversation at the top of the list")
+                onClicked: App.daemon.setChatPinned(page.chatId, !pinned, -1)
+            }
             Kirigami.ListSectionHeader {
                 Layout.fillWidth: true
                 text: i18np("%1 participant", "%1 participants", (page.chat.participants ?? []).length)

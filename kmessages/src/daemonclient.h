@@ -39,6 +39,8 @@ class DaemonClient : public QObject
     Q_PROPERTY(QString smsNumber READ smsNumber NOTIFY statusChanged)
     Q_PROPERTY(QString smsDetail READ smsDetail NOTIFY statusChanged)
     Q_PROPERTY(bool smsActive READ isSmsActive NOTIFY statusChanged)
+    /// The daemon's `mac_host` setting (the Mac `imsg sync-mac` copies from), "" = unset.
+    Q_PROPERTY(QString macHost READ macHost NOTIFY statusChanged)
     Q_PROPERTY(bool registered READ isRegistered NOTIFY statusChanged)
     Q_PROPERTY(QString version READ version NOTIFY statusChanged)
     Q_PROPERTY(QStringList ownHandles READ ownHandles NOTIFY statusChanged)
@@ -75,6 +77,7 @@ public:
     QString smsNumber() const { return m_status.smsNumber; }
     QString smsDetail() const { return m_status.smsDetail; }
     bool isSmsActive() const { return m_status.smsState == QLatin1String("active"); }
+    QString macHost() const { return m_status.macHost; }
     bool isRegistered() const { return m_status.registered; }
     QString version() const { return m_status.version; }
     QStringList ownHandles() const { return m_status.handles; }
@@ -154,6 +157,12 @@ public:
     Q_INVOKABLE void unsend(const QString &chatId, const QString &messageId);
     Q_INVOKABLE void setTyping(const QString &chatId, bool typing);
     Q_INVOKABLE void markRead(const QString &chatId, const QString &upToMessageId = QString());
+    /// Pin a chat to the top of the list or unpin it (local only). `order`:
+    /// position among the pins, negative = last for a new pin / unchanged for
+    /// a pinned chat. The change arrives as ChatUpdated; failures as operationFailed.
+    Q_INVOKABLE void setChatPinned(const QString &chatId, bool pinned, int order = -1);
+    /// Put these chats first among the pins, in this order (ChatUpdated for each change).
+    Q_INVOKABLE void reorderPins(const QStringList &chatIds);
     Q_INVOKABLE void refreshStatus();
     /// Ask the iPhone to relay text messages here (or stop). Emits smsForwardingFinished.
     Q_INVOKABLE void enableSmsForwarding(bool enable);

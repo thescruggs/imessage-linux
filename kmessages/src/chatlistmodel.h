@@ -14,9 +14,11 @@ namespace km
 {
 class DaemonClient;
 
-/// All conversations, newest activity first (ListChats + live ChatUpdated /
-/// MessageReceived / Typing). The snippet is the newest message's preview,
-/// fetched with ListMessages(limit 1) for chats whose activity changed.
+/// All conversations: pinned chats first in pin order, then the rest newest
+/// activity first (ListChats + live ChatUpdated / MessageReceived / Typing).
+/// New activity never moves a pinned chat out of the pinned block. The
+/// snippet is the newest message's preview, fetched with ListMessages(limit 1)
+/// for chats whose activity changed.
 class ChatListModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -27,6 +29,8 @@ class ChatListModel : public QAbstractListModel
     /// Bumped on every change to any row (reset, insert, remove, move, dataChanged),
     /// so QML bindings over get()/titleFor() can depend on it.
     Q_PROPERTY(int revision READ revision NOTIFY revisionChanged)
+    /// Some chat is pinned (the list shows "Pinned" / "Conversations" sections).
+    Q_PROPERTY(bool hasPinned READ hasPinned NOTIFY hasPinnedChanged)
 
 public:
     enum Roles {
@@ -51,6 +55,9 @@ public:
         ParticipantSharedNamesRole, ///< the name each participant shared with us ("" = none)
         ParticipantSharedPhotosRole, ///< URL of the photo each participant shared ("" = none)
         IconSourceRole, ///< the group photo's URL, "" = none
+        PinnedRole,
+        PinOrderRole, ///< position among the pins, -1 = not pinned
+        SectionRole, ///< "Pinned" or "Conversations" (translated; ListView.section), "" while nothing is pinned
     };
     Q_ENUM(Roles)
 
@@ -64,6 +71,7 @@ public:
     bool isLoading() const { return m_loading; }
     bool isLoaded() const { return m_loaded; }
     int revision() const { return m_revision; }
+    bool hasPinned() const { return m_hasPinned; }
 
     Q_INVOKABLE void refresh();
     /// refresh() after a short delay, coalescing several triggers (daemon
@@ -92,6 +100,7 @@ Q_SIGNALS:
     void totalUnreadChanged();
     void loadingChanged();
     void revisionChanged();
+    void hasPinnedChanged();
     /// A chat's unread count changed (also emitted for new chats).
     void unreadChanged(const QString &chatId, int unread);
 
@@ -114,8 +123,14 @@ private:
     void fetchSnippet(const QString &chatId);
     void applyMessage(Entry &e, const Message &msg);
     void upsert(const Chat &chat, bool fetchSnippetIfNew);
-    /// Move row `row` to keep the newest-first order; returns its new row.
+    /// `a` goes above `b`: pinned before the rest, pins by pin order, the rest newest first.
+    static bool precedes(const Chat &a, const Chat &b);
+    /// Move row `row` to keep the order (precedes()); returns its new row.
     int reposition(int row);
+    /// Restore the order of the whole list with row moves (after pins changed:
+    /// the daemon renumbers several chats, one ChatUpdated each).
+    void resort();
+    void updateHasPinned();
     void emitRowChanged(int row);
 
     QPointer<DaemonClient> m_client;
@@ -124,6 +139,7 @@ private:
     bool m_loaded = false;
     quint64 m_generation = 0;
     int m_revision = 0;
+    bool m_hasPinned = false;
     QTimer m_refreshTimer;
 };
 

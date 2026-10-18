@@ -11,6 +11,7 @@
 #include "contactsuggestionmodel.h"
 #include "daemonclient.h"
 #include "handlelookupmodel.h"
+#include "macsync.h"
 #include "messagelistmodel.h"
 #include "messagesearchmodel.h"
 
@@ -47,6 +48,8 @@ class AppController : public QObject
     Q_PROPERTY(km::AppSettings *settings READ settings CONSTANT)
     Q_PROPERTY(km::ContactResolver *contacts READ contacts CONSTANT)
     Q_PROPERTY(km::ContactSuggestionModel *contactSuggestions READ contactSuggestions CONSTANT)
+    /// "Sync from Mac" (`imsg sync-mac`).
+    Q_PROPERTY(km::MacSync *macSync READ macSync CONSTANT)
     Q_PROPERTY(QString currentChatId READ currentChatId WRITE setCurrentChatId NOTIFY currentChatIdChanged)
     Q_PROPERTY(QString currentChatTitle READ currentChatTitle NOTIFY currentChatTitleChanged)
     /// File URL of the current chat's background image, "" = none.
@@ -71,6 +74,7 @@ public:
     AppSettings *settings() const { return m_settings; }
     ContactResolver *contacts() const { return m_contacts; }
     ContactSuggestionModel *contactSuggestions() const { return m_contactSuggestions; }
+    MacSync *macSync() const { return m_macSync; }
     QString currentChatId() const { return m_currentChatId; }
     void setCurrentChatId(const QString &chatId);
     QString currentChatTitle() const;
@@ -137,6 +141,7 @@ private:
     AppOptions m_options;
     ContactResolver *m_contacts = nullptr; ///< created first: the models consult it
     ContactSuggestionModel *m_contactSuggestions = nullptr;
+    MacSync *m_macSync = nullptr;
     DaemonClient *m_client = nullptr;
     ChatListModel *m_chatList = nullptr;
     ChatFilterModel *m_chats = nullptr;

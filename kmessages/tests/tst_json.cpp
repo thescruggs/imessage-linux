@@ -148,6 +148,28 @@ private Q_SLOTS:
         QVERIFY(c->backgroundId.isEmpty()); // no "background" key
     }
 
+    void chatPins()
+    {
+        // `pinned` / `pin_order` (older daemons: missing = not pinned).
+        auto old = Json::parseChat(fixture("chat.json"));
+        QVERIFY(old && !old->pinned && old->pinOrder == -1);
+        const QString base = uR"({"id":"mailto:bob@example.com","participants":[],"is_group":false,"unread_count":0,%1})"_s;
+        auto c = Json::parseChat(base.arg(uR"("pinned":true,"pin_order":2)"_s));
+        QVERIFY(c && c->pinned && c->pinOrder == 2);
+        c = Json::parseChat(base.arg(uR"("pinned":false,"pin_order":null)"_s));
+        QVERIFY(c && !c->pinned && c->pinOrder == -1);
+        c = Json::parseChat(base.arg(uR"("pinned":true,"pin_order":null)"_s)); // defensive: first
+        QVERIFY(c && c->pinned && c->pinOrder == 0);
+
+        // GetStatus.mac_host
+        QVERIFY(Json::parseStatus(fixture("status.json"))->macHost.isEmpty());
+        auto s = Json::parseStatus(uR"({"version":"1","connection":{"state":"connected"},"registered":true,"registration":{"handles":[]},"unread":0,"mac_host":"me@mac.local"})"_s);
+        QVERIFY(s);
+        QCOMPARE(s->macHost, u"me@mac.local"_s);
+        s = Json::parseStatus(uR"({"version":"1","connection":{"state":"connected"},"registered":true,"registration":{"handles":[]},"unread":0,"mac_host":null})"_s);
+        QVERIFY(s && s->macHost.isEmpty());
+    }
+
     void chatBackground()
     {
         const QString base = uR"({"id":"mailto:bob@example.com","participants":[],"is_group":false,"unread_count":0,"background":%1})"_s;

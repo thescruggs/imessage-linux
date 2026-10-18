@@ -363,6 +363,14 @@ doctor` suggests it) to leave out the host. Details: [docs/CLI.md](docs/CLI.md),
 (it runs `imsg sync-mac --contacts`). The files are your address book:
 keep them out of git and backups you share.
 
+In kmessages, the **Sync from Mac** button (the circular arrows next to
+New Message, also in the tray menu) runs the same `imsg sync-mac` and shows
+what it copied ("Synced from mac.local: 312 contacts (4 updated), 3 pins")
+or why it failed; its tooltip says when it last ran. The Mac defaults to the
+daemon's `mac_host` and can be set in Settings → Sync from Mac. Pin or
+unpin a conversation in kmessages with a right-click (press and hold on a
+touch screen) on it in the list, or from its details page.
+
 ## Importing history from the Mac
 
 The daemon only sees messages that arrive after it registered. To bring

@@ -155,6 +155,13 @@ Kirigami.ApplicationWindow {
     }
 
     Connections {
+        target: App.macSync
+        function onFinished(ok: bool, message: string) {
+            root.showPassiveNotification(message, ok ? "short" : "long");
+        }
+    }
+
+    Connections {
         target: App.daemon
         function onTwoFactorRequired() {
             if (!loginDialog.opened || loginDialog.step !== 1) {

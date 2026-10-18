@@ -65,6 +65,8 @@ struct Chat {
     QString backgroundId; ///< transcript background, empty = none
     QString backgroundPath; ///< its image (absolute path), empty = none / not downloaded
     QString iconPath; ///< the group's photo (absolute path), empty = none / not downloaded
+    bool pinned = false; ///< pinned to the top of the chat list (local, `SetChatPinned`)
+    int pinOrder = -1; ///< position among the pins (0 = first), -1 = not pinned
 
     /// Name to show: display name, else the participants' names.
     QString title() const;
@@ -156,6 +158,7 @@ struct Status {
     QString smsNumber; ///< `sms.number`: the iPhone number that relays texts
     QString smsDetail;
     qint64 smsSince = 0; ///< ms
+    QString macHost; ///< `mac_host`: the Mac `imsg sync-mac` copies from ("" = unset / older daemon)
 };
 
 struct SentMessage {

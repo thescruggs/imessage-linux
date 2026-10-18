@@ -468,6 +468,16 @@ void DaemonClient::markRead(const QString &chatId, const QString &upToMessageId)
     callVoid(u"MarkRead"_s, {chatId, upToMessageId}, MediumTimeoutMs);
 }
 
+void DaemonClient::setChatPinned(const QString &chatId, bool pinned, int order)
+{
+    callVoid(u"SetChatPinned"_s, {chatId, pinned, order});
+}
+
+void DaemonClient::reorderPins(const QStringList &chatIds)
+{
+    callVoid(u"ReorderPins"_s, {participantsJson(chatIds)});
+}
+
 void DaemonClient::enableSmsForwarding(bool enable)
 {
     call(u"EnableSmsForwarding"_s, {enable}, [this](const QDBusMessage &r) {

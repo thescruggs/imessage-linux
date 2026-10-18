@@ -180,6 +180,41 @@ FormCard.FormCardPage {
     }
 
     FormCard.FormHeader {
+        title: i18n("Sync from Mac")
+    }
+    FormCard.FormCard {
+        objectName: "macSyncCard"
+        FormCard.FormTextFieldDelegate {
+            objectName: "macHostField"
+            label: i18n("Mac")
+            placeholderText: App.daemon.macHost.length > 0 ? App.daemon.macHost : i18n("e.g. me@my-mac.local")
+            text: App.settings.macHost
+            description: App.daemon.macHost.length > 0
+                ? i18n("The ssh address of your Mac, to copy contacts (with photos) and pinned conversations from. Leave empty to use the daemon's setting, %1.", App.daemon.macHost)
+                : i18n("The ssh address of your Mac, to copy contacts (with photos) and pinned conversations from. The Mac needs Remote Login and Full Disk Access for ssh. You can also set mac_host in the daemon's config.toml.")
+            onEditingFinished: App.settings.macHost = text
+        }
+        FormCard.FormDelegateSeparator {}
+        FormCard.FormButtonDelegate {
+            objectName: "macSyncNowButton"
+            icon.name: "view-refresh"
+            text: App.macSync.running ? i18n("Syncing…") : i18n("Sync Now")
+            enabled: !App.macSync.running
+            description: App.macSync.lastSyncText.length > 0 ? i18n("Last synced %1", App.macSync.lastSyncText) : i18n("Not synced yet")
+            onClicked: App.macSync.start()
+        }
+        FormCard.FormDelegateSeparator {}
+        FormCard.FormTextFieldDelegate {
+            objectName: "imsgPathField"
+            label: i18n("imsg program (advanced)")
+            placeholderText: i18n("imsg (found on PATH)")
+            text: App.settings.imsgPath
+            description: i18n("The command-line tool that does the sync. Only needed when imsg is not installed on your PATH, e.g. a development build. The KMESSAGES_IMSG environment variable overrides it.")
+            onEditingFinished: App.settings.imsgPath = text
+        }
+    }
+
+    FormCard.FormHeader {
         title: i18n("General")
     }
     FormCard.FormCard {

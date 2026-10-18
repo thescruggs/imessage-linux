@@ -12,6 +12,8 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDir>
+#include <functional>
+#include <QFile>
 #include <QPainter>
 #include <QQmlApplicationEngine>
 #include <QQuickItem>
@@ -122,6 +124,75 @@ class TestScreens : public QObject
             }
         }
         return n;
+    }
+
+    /// Visible items in the scene (view delegates and toolbar items have no
+    /// QObject parent in the window, so findChildren() misses them).
+    QList<QQuickItem *> visibleItems(const QString &objectName = QString())
+    {
+        QList<QQuickItem *> out;
+        std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+            if (!item->isVisible()) {
+                return;
+            }
+            if (objectName.isEmpty() || item->objectName() == objectName) {
+                out << item;
+            }
+            const auto children = item->childItems();
+            for (auto *child : children) {
+                walk(child);
+            }
+        };
+        walk(m_window->contentItem());
+        return out;
+    }
+
+    /// The visible item named `objectName` (first one), or null.
+    QQuickItem *visibleItem(const QString &objectName)
+    {
+        const auto items = visibleItems(objectName);
+        return items.isEmpty() ? nullptr : items.first();
+    }
+
+    /// The chat list row (ChatListDelegate) of `chatId`.
+    QQuickItem *chatRow(const QString &chatId)
+    {
+        QQuickItem *found = nullptr;
+        (void)QTest::qWaitFor([&] {
+            const auto rows = visibleItems(u"chatListDelegate"_s);
+            for (auto *row : rows) {
+                if (row->property("chatId").toString() == chatId) {
+                    found = row;
+                    return true;
+                }
+            }
+            return false;
+        }, Timeout);
+        return found;
+    }
+
+    /// A visible item showing exactly `text` (headers, passive notifications).
+    bool showsText(const QString &text)
+    {
+        const auto items = visibleItems();
+        for (auto *item : items) {
+            if (item->height() > 0 && item->property("text").toString() == text) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void rightClick(QQuickItem *item)
+    {
+        const QPointF centre = item->mapToScene(QPointF(item->width() / 2, item->height() / 2));
+        QTest::mouseClick(m_window, Qt::RightButton, {}, centre.toPoint());
+    }
+
+    void click(QObject *button)
+    {
+        QVERIFY(button);
+        QVERIFY(QMetaObject::invokeMethod(button, "click"));
     }
 
     void shoot(const QString &name)
@@ -714,6 +785,168 @@ private Q_SLOTS:
         m_fake.control(u"SetSms"_s, {u"off"_s, u"tel:+15555550100"_s});
         QTRY_VERIFY_WITH_TIMEOUT(!msgs->smsMode(), Timeout);
         QCOMPARE(composer->property("placeholderText").toString(), u"iMessage"_s);
+    }
+
+    // Late: the message injected below would change the transcripts above.
+    void pinnedChats()
+    {
+        invoke("openChat", Bob);
+        settle();
+        auto *chats = m_controller->chatList();
+        QVERIFY(!chats->hasPinned());
+        QVERIFY(!showsText(u"Pinned"_s));
+        m_fake.control(u"ClearCalls"_s);
+
+        // Right-click a row → Pin.
+        QQuickItem *dave = chatRow(Dave);
+        QVERIFY(dave);
+        rightClick(dave);
+        auto *menu = m_window->findChild<QObject *>(u"chatContextMenu"_s);
+        QVERIFY(menu);
+        QTRY_VERIFY_WITH_TIMEOUT(menu->property("opened").toBool(), Timeout);
+        auto *pin = m_window->findChild<QObject *>(u"pinChatAction"_s);
+        QVERIFY(pin);
+        QCOMPARE(pin->property("text").toString(), u"Pin"_s);
+        click(pin);
+        QTRY_COMPARE_WITH_TIMEOUT(m_fake.callsOf(u"SetChatPinned"_s).size(), 1, Timeout);
+        const auto call = m_fake.callsOf(u"SetChatPinned"_s).first();
+        QCOMPARE(call.at(1).toString(), Dave);
+        QCOMPARE(call.at(2).toBool(), true);
+        QCOMPARE(call.at(3).toInt(), -1);
+        QTRY_COMPARE_WITH_TIMEOUT(chats->data(chats->index(0), ChatListModel::ChatIdRole).toString(), Dave, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(showsText(u"Pinned"_s) && showsText(u"Conversations"_s), Timeout);
+
+        // The details page has the same toggle.
+        invoke("openChat", Team);
+        QTRY_VERIFY_WITH_TIMEOUT(m_controller->messages()->isLoaded() && m_controller->messages()->chatId() == Team, Timeout);
+        invoke("toggleDetails");
+        settle();
+        auto *detailsPin = m_window->findChild<QObject *>(u"detailsPinButton"_s);
+        QVERIFY(detailsPin);
+        QCOMPARE(detailsPin->property("text").toString(), u"Pin"_s);
+        click(detailsPin);
+        QTRY_COMPARE_WITH_TIMEOUT(chats->data(chats->index(1), ChatListModel::ChatIdRole).toString(), Team, Timeout);
+        QTRY_COMPARE_WITH_TIMEOUT(detailsPin->property("text").toString(), u"Unpin"_s, Timeout);
+        // A new message elsewhere does not push the pins down.
+        m_fake.control(u"InjectMessage"_s, {Bob, Bob, u"still below the pins"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(chats->data(chats->index(2), ChatListModel::SnippetRole).toString(), u"still below the pins"_s, Timeout);
+        QCOMPARE(chats->data(chats->index(0), ChatListModel::ChatIdRole).toString(), Dave);
+        QCOMPARE(visibleItems(u"pinnedIcon"_s).size(), 2);
+        settle(800);
+        shoot(u"pinned-chats"_s);
+
+        // Unpin again: context menu says "Unpin" now; the details toggle too.
+        rightClick(chatRow(Dave));
+        QTRY_VERIFY_WITH_TIMEOUT(menu->property("opened").toBool(), Timeout);
+        QCOMPARE(pin->property("text").toString(), u"Unpin"_s);
+        click(pin);
+        click(detailsPin);
+        QTRY_VERIFY_WITH_TIMEOUT(!chats->hasPinned(), Timeout);
+        const auto calls = m_fake.callsOf(u"SetChatPinned"_s);
+        QCOMPARE(calls.size(), 4);
+        QCOMPARE(calls.at(2).at(2).toBool(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(!showsText(u"Pinned"_s), Timeout);
+        invoke("toggleDetails");
+        invoke("popToList");
+        settle();
+    }
+
+    void syncFromMac()
+    {
+        // A stand-in imsg on PATH: prints a summary (or fails) after a moment.
+        QTemporaryDir bin;
+        QVERIFY(bin.isValid());
+        const QString script = bin.filePath(u"imsg"_s);
+        {
+            QFile f(script);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(R"SH(#!/bin/sh
+echo "$@" > "$(dirname "$0")/args"
+sleep 1
+if [ "$FAKE_IMSG_MODE" = fail ]; then
+    echo "ssh: connect to host mac.local port 22: Connection refused" >&2
+    echo '{"host": "mac.local", "error": "ssh mac.local failed (exit 255)"}'
+    exit 1
+fi
+echo '{"host": "mac.local", "dry_run": false,'
+echo ' "contacts": {"dir": "/tmp/x", "received": 312, "photos": 200, "written": 3, "unchanged": 308, "removed": 1},'
+echo ' "pins": {"mac": [{"pin": "a", "chat_id": "mailto:a@x", "result": "pinned"}, {"pin": "b", "chat_id": "mailto:b@x", "result": "pinned"},'
+echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"}], "order": [], "kept_local": [], "unpin": []}}'
+)SH");
+            f.close();
+            QVERIFY(f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        }
+        const QByteArray oldPath = qgetenv("PATH");
+        qputenv("PATH", QByteArray(QFile::encodeName(bin.path()) + ':' + oldPath));
+        qunsetenv("KMESSAGES_IMSG");
+        qunsetenv("FAKE_IMSG_MODE");
+        auto *sync = m_controller->macSync();
+        QCOMPARE(sync->program(), script);
+        m_fake.control(u"SetMacHost"_s, {u"mac.local"_s});
+        m_controller->daemon()->refreshStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(sync->host(), u"mac.local"_s, Timeout);
+
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((button = visibleItem(u"syncFromMacButton"_s)), Timeout);
+        const auto busyItems = button->findChildren<QQuickItem *>(u"macSyncBusy"_s);
+        QCOMPARE(busyItems.size(), 1);
+        auto *busy = busyItems.first();
+        QVERIFY(button->isEnabled());
+        QVERIFY(!busy->isVisible());
+        QVERIFY(sync->lastSyncText().isEmpty());
+        auto *action = m_window->findChild<QObject *>(u"syncFromMacAction"_s);
+        QVERIFY(action);
+        QVERIFY(action->property("tooltip").toString().contains(u"mac.local"_s));
+        QVERIFY(action->property("tooltip").toString().contains(u"Not synced yet"_s));
+
+        // Success.
+        QSignalSpy finished(sync, &MacSync::finished);
+        click(button);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isRunning(), Timeout);
+        QVERIFY(busy->isVisible());
+        QVERIFY(!button->isEnabled());
+        QVERIFY(!action->property("enabled").toBool());
+        shoot(u"sync-from-mac"_s);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, Timeout);
+        const QString summary = u"Synced from mac.local: 312 contacts (4 updated), 3 pins"_s;
+        QCOMPARE(finished.first().at(0).toBool(), true);
+        QCOMPARE(finished.first().at(1).toString(), summary);
+        QTRY_VERIFY_WITH_TIMEOUT(showsText(summary), Timeout); // the passive notification
+        QVERIFY(!busy->isVisible());
+        QVERIFY(button->isEnabled());
+        QVERIFY(!sync->lastSyncText().isEmpty());
+        QVERIFY(action->property("tooltip").toString().contains(u"Last synced "_s));
+        auto readArgs = [&] {
+            QFile f(bin.filePath(u"args"_s));
+            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed() : QString();
+        };
+        QCOMPARE(readArgs(), u"sync-mac --json"_s); // the daemon's mac_host: imsg finds it itself
+        const QDateTime last = sync->lastSync();
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // Failure, with a host from Settings: the error is shown, the last sync kept.
+        m_controller->settings()->setMacHost(u"me@other.local"_s);
+        QCOMPARE(sync->host(), u"me@other.local"_s);
+        qputenv("FAKE_IMSG_MODE", "fail");
+        click(button);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isRunning(), Timeout);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 2, Timeout);
+        QCOMPARE(finished.at(1).at(0).toBool(), false);
+        const QString error = u"Sync from Mac failed: ssh mac.local failed (exit 255)"_s;
+        QCOMPARE(finished.at(1).at(1).toString(), error);
+        QTRY_VERIFY_WITH_TIMEOUT(showsText(error), Timeout);
+        QCOMPARE(readArgs(), u"sync-mac --json -- me@other.local"_s);
+        QCOMPARE(sync->lastSync(), last);
+        QVERIFY(button->isEnabled());
+
+        // Back to how the other tests expect it.
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+        qunsetenv("FAKE_IMSG_MODE");
+        qputenv("PATH", oldPath);
+        m_controller->settings()->setMacHost(QString());
+        m_fake.control(u"SetMacHost"_s, {QString()});
+        m_controller->daemon()->refreshStatus();
+        QTRY_VERIFY_WITH_TIMEOUT(sync->host().isEmpty(), Timeout);
     }
 
     void needsLogin()

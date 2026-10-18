@@ -8,6 +8,7 @@ import org.imessage.kmessages
 
 QQC2.ItemDelegate {
     id: delegate
+    objectName: "chatListDelegate"
 
     required property int index
     required property string chatId
@@ -20,6 +21,10 @@ QQC2.ItemDelegate {
     required property string avatarSource
     required property bool isGroup
     required property bool typing
+    required property bool pinned
+
+    /// Right-click, or press and hold on touch: the row's context menu.
+    signal menuRequested
 
     width: ListView.view ? ListView.view.width : implicitWidth
     highlighted: chatId === App.currentChatId && applicationWindow().pageStack.wideMode
@@ -27,6 +32,12 @@ QQC2.ItemDelegate {
     rightPadding: Kirigami.Units.largeSpacing
     topPadding: Kirigami.Units.smallSpacing * 1.5
     bottomPadding: Kirigami.Units.smallSpacing * 1.5
+
+    onPressAndHold: menuRequested()
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        onTapped: delegate.menuRequested()
+    }
 
     Accessible.name: hasUnread ? i18n("%1, %2 unread: %3", name, unreadCount, snippet) : i18n("%1: %2", name, snippet)
 
@@ -65,6 +76,17 @@ QQC2.ItemDelegate {
                     elide: Text.ElideRight
                     font.weight: delegate.hasUnread ? Font.Bold : Font.DemiBold
                     color: delegate.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                }
+                Kirigami.Icon {
+                    objectName: "pinnedIcon"
+                    visible: delegate.pinned
+                    source: "pin"
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    opacity: 0.6
+                    color: delegate.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                    isMask: true
+                    Accessible.name: i18n("Pinned")
                 }
                 QQC2.Label {
                     text: delegate.time

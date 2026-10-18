@@ -23,6 +23,8 @@
     <method name="Unsend"><arg name="chat_id" type="s" direction="in"/><arg name="message_id" type="s" direction="in"/></method>
     <method name="SetTyping"><arg name="chat_id" type="s" direction="in"/><arg name="typing" type="b" direction="in"/></method>
     <method name="MarkRead"><arg name="chat_id" type="s" direction="in"/><arg name="up_to_message_id" type="s" direction="in"/></method>
+    <method name="SetChatPinned"><arg name="chat_id" type="s" direction="in"/><arg name="pinned" type="b" direction="in"/><arg name="order" type="i" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="ReorderPins"><arg name="chat_ids_json" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="LookupHandles"><arg name="handles_json" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="DownloadAttachment"><arg name="attachment_id" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="ImportChatBackground"><arg name="chat_id" type="s" direction="in"/><arg name="path" type="s" direction="in"/><arg type="s" direction="out"/></method>

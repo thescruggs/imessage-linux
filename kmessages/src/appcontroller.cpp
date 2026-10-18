@@ -37,7 +37,8 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
     m_messages = new MessageListModel(m_client, m_chatList, this);
     m_recipients = new HandleLookupModel(m_client, this);
     m_search = new MessageSearchModel(m_client, m_chatList, this);
-    m_settings = new AppSettings(std::move(config), this);
+    m_settings = new AppSettings(config, this);
+    m_macSync = new MacSync(m_client, m_settings, std::move(config), this);
     m_contactSuggestions = new ContactSuggestionModel(m_client, m_contacts, this);
 
     // "My other addresses" (the iPhone's number …) count as the user's own.
@@ -94,6 +95,11 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
         connect(newMessage, &QAction::triggered, this, [this] {
             showWindow();
             Q_EMIT newMessageRequested();
+        });
+        auto *sync = m_tray->contextMenu()->addAction(QIcon::fromTheme(u"view-refresh"_s), i18n("Sync from Mac"));
+        connect(sync, &QAction::triggered, m_macSync, &MacSync::start);
+        connect(m_macSync, &MacSync::runningChanged, sync, [this, sync] {
+            sync->setEnabled(!m_macSync->isRunning());
         });
         updateTray();
     }

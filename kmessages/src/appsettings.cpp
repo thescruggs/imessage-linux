@@ -59,21 +59,51 @@ void AppSettings::setCloseToTray(bool on)
     write("CloseToTray", on);
 }
 
+QString AppSettings::readText(const char *key) const
+{
+    return m_config->group(QStringLiteral("General")).readEntry(key, QString());
+}
+
+void AppSettings::writeText(const char *key, const QString &text)
+{
+    const QString value = text.trimmed();
+    if (value == readText(key)) {
+        return;
+    }
+    auto group = m_config->group(QStringLiteral("General"));
+    group.writeEntry(key, value);
+    group.sync();
+    Q_EMIT changed();
+}
+
 QString AppSettings::otherHandles() const
 {
-    return m_config->group(QStringLiteral("General")).readEntry("OtherHandles", QString());
+    return readText("OtherHandles");
 }
 
 void AppSettings::setOtherHandles(const QString &text)
 {
-    const QString value = text.trimmed();
-    if (value == otherHandles()) {
-        return;
-    }
-    auto group = m_config->group(QStringLiteral("General"));
-    group.writeEntry("OtherHandles", value);
-    group.sync();
-    Q_EMIT changed();
+    writeText("OtherHandles", text);
+}
+
+QString AppSettings::macHost() const
+{
+    return readText("MacHost");
+}
+
+void AppSettings::setMacHost(const QString &host)
+{
+    writeText("MacHost", host);
+}
+
+QString AppSettings::imsgPath() const
+{
+    return readText("ImsgPath");
+}
+
+void AppSettings::setImsgPath(const QString &path)
+{
+    writeText("ImsgPath", path);
 }
 
 QStringList AppSettings::otherHandleUris() const

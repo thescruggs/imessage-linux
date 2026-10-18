@@ -32,6 +32,7 @@ void registerQmlTypes(AppController *controller)
     qmlRegisterUncreatableType<AppSettings>(uri, 1, 0, "AppSettings", reason);
     qmlRegisterUncreatableType<ContactResolver>(uri, 1, 0, "ContactResolver", reason);
     qmlRegisterUncreatableType<ContactSuggestionModel>(uri, 1, 0, "ContactSuggestionModel", reason);
+    qmlRegisterUncreatableType<MacSync>(uri, 1, 0, "MacSync", reason);
     qmlRegisterSingletonInstance(uri, 1, 0, "App", controller);
 }
 
