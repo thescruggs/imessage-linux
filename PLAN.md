@@ -214,6 +214,55 @@ button.
 Order: D (CLI first, then the button) together with A's daemon part, then
 A's app part, B, C. Release as 0.1.13.
 
+## Future: easy install and a Mac companion app (not scheduled)
+
+Goal: someone installs imessage-linux without a terminal on either machine.
+
+### Linux: one-click install
+
+* **Flatpak** (`org.imessage.kmessages`) bundling kmessages, imsg and the
+  daemon (daemon started as a user service from inside the sandbox via the
+  Background portal, or installed as a user unit on first run), on Flathub
+  once the SSPL question for Flathub is settled; AppImage/AUR as fallbacks.
+  Apple's `IMDAppleServices` still cannot be redistributed: the first-run
+  wizard downloads it (as `bootstrap.sh` does) and shows the license note.
+* **First-run wizard in kmessages**: Apple download, Mac pairing (below),
+  Apple ID login with 2FA, contacts sync, done. Replaces the README steps
+  `bootstrap.sh` → `mac-hwinfo.sh` → `hwconfig import` → `imsg login`.
+
+### macOS: "iMessage Linux Helper" companion app
+
+A small signed-and-notarized menu-bar app on the Mac that replaces every ssh
+script. Setup becomes: install the helper, click Pair, scan or type the code
+shown by kmessages.
+
+* **Pairing** over the local network: the helper advertises itself with
+  Bonjour (`_imessage-linux._tcp`); kmessages finds it, shows a 6-digit code,
+  the user confirms on the Mac; both sides keep a key pair, traffic is mutual
+  TLS (the same `rtc`/TLS stack the daemon already has). Works off-LAN later
+  through a relay only if ever needed; not planned.
+* **Hardware identity on demand**: the helper reads the same fields
+  `tools/mac-hwinfo.sh` reads (IOKit, no root) and sends `hwconfig.plist` to
+  the Linux side during setup, and again when the daemon reports a
+  registration refusal that a refreshed identity can fix. The identity never
+  leaves the pair.
+* **Anisette**: the helper serves anisette headers to the paired daemon
+  (what `.local/bin/imessage-anisette` over ssh does today), so no Remote
+  Login is needed on the Mac. The Mac still has to be on for logins and
+  re-registrations; messaging itself does not need it.
+* **Contacts, photos, pins, backgrounds, history**: the helper uses the
+  Contacts framework (one normal permission prompt instead of Full Disk
+  Access for the address book), reads the pinning plist, and, with Full
+  Disk Access granted once to the helper, exports `chat.db` history and
+  backgrounds. It pushes changes to the paired Linux side (Contacts and
+  pin changes trigger a sync automatically; a manual Sync button remains).
+  The Linux side keeps the `imsg sync-mac` logic; the transport changes from
+  ssh+tar to the paired connection with the same payload.
+* **Distribution**: Swift/SwiftUI, Developer ID signed, notarized, Sparkle
+  or a plain download; Homebrew cask. Separate repository or `mac-helper/` in
+  this one; the protocol (pairing, payloads) documented in `docs/HELPER.md`
+  so the ssh tools stay a supported fallback.
+
 ## Non-goals / known limits
 
 * A phone number of your own without an iPhone on the account (iPhone-class
