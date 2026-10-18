@@ -84,6 +84,7 @@ Kirigami.Page {
 
             ListView {
                 id: transcript
+                objectName: "transcript"
 
                 model: App.messages
                 verticalLayoutDirection: ListView.BottomToTop
@@ -111,18 +112,45 @@ Kirigami.Page {
                 }
 
                 // Stay on the newest message while the user has not scrolled away
-                // (images loading and the typing bubble change heights).
+                // (images loading and the typing bubble change heights). The
+                // user scrolls by flicking, with the wheel (the desktop style's
+                // Kirigami.WheelHandler sets contentY directly, so there is no
+                // movementEnded), by dragging the scroll bar or with the
+                // keyboard: all of them change contentY, so the pin follows
+                // contentY and ignores only our own snap. Reaching the end by
+                // any means pins again (a model reset moves contentY before
+                // the rows are laid out, so atYEnd lags behind it).
                 property bool pinnedToNewest: true
-                onMovementEnded: pinnedToNewest = atYEnd
+                property bool snapping: false
+                function snapToNewest() {
+                    snapping = true;
+                    positionViewAtBeginning();
+                    if (!atYEnd) {
+                        // positionViewAtBeginning() ignores bottomMargin; land on
+                        // the Flickable's end so atYEnd (and the pin) hold.
+                        contentY = originY + contentHeight + bottomMargin - height;
+                    }
+                    snapping = false;
+                }
+                onContentYChanged: {
+                    if (!snapping) {
+                        pinnedToNewest = atYEnd;
+                    }
+                }
+                onAtYEndChanged: {
+                    if (atYEnd) {
+                        pinnedToNewest = true;
+                    }
+                }
                 onContentHeightChanged: {
                     if (pinnedToNewest) {
-                        Qt.callLater(positionViewAtBeginning);
+                        Qt.callLater(snapToNewest);
                     }
                     Qt.callLater(maybeLoadOlder);
                 }
                 onHeightChanged: {
                     if (pinnedToNewest) {
-                        Qt.callLater(positionViewAtBeginning);
+                        Qt.callLater(snapToNewest);
                     }
                 }
 
@@ -155,7 +183,7 @@ Kirigami.Page {
                     function onNewestMessageAdded(fromMe: bool) {
                         if (fromMe || transcript.pinnedToNewest) {
                             transcript.pinnedToNewest = true;
-                            Qt.callLater(transcript.positionViewAtBeginning);
+                            Qt.callLater(transcript.snapToNewest);
                         }
                     }
                     function onChatIdChanged() {

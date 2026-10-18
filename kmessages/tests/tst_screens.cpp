@@ -331,6 +331,67 @@ private Q_SLOTS:
         msgs->setPageSize(50);
     }
 
+    void scrolledUpStaysUp()
+    {
+        // Wheel and scroll-bar scrolling set contentY directly (the desktop
+        // style's Kirigami.WheelHandler), with no movementEnded. Scrolled up,
+        // the view must stay put when the older page lands and when the
+        // typing bubble changes the content height; back at the newest
+        // message, it follows those changes again.
+        auto *msgs = m_controller->messages();
+        msgs->setPageSize(20); // Bob has 31 messages
+        invoke("openChat", Team); // re-opening the open chat keeps its transcript
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->chatId() == Team && msgs->isLoaded(), Timeout);
+        invoke("openChat", Bob);
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->chatId() == Bob && msgs->isLoaded() && msgs->rowCount() == 20 && msgs->canLoadMore(), Timeout);
+        auto *transcript = qobject_cast<QQuickItem *>(m_window->findChild<QObject *>(u"transcript"_s));
+        QVERIFY(transcript);
+        settle();
+        QVERIFY(transcript->property("contentHeight").toReal() > transcript->height()); // else paging needs no scrolling
+        QVERIFY(transcript->property("atYEnd").toBool());
+        QVERIFY(transcript->property("pinnedToNewest").toBool());
+
+        auto rowInView = [&](int row) {
+            QQuickItem *item = nullptr;
+            if (!QMetaObject::invokeMethod(transcript, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, row)) || !item) {
+                return false;
+            }
+            const qreal y = transcript->property("contentY").toReal();
+            return item->y() + item->height() > y && item->y() < y + transcript->height();
+        };
+
+        // Scroll to the oldest loaded message the way the wheel handler does.
+        transcript->setProperty("contentY", transcript->property("originY").toReal() - transcript->property("topMargin").toReal());
+        QVERIFY(transcript->property("atYBeginning").toBool());
+        QVERIFY(!transcript->property("pinnedToNewest").toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->rowCount() == 31 && !msgs->canLoadMore(), Timeout);
+        settle();
+        // The older page went above; the view stayed on the oldest row of the first page.
+        QVERIFY(rowInView(19));
+        QVERIFY(!rowInView(0));
+        QVERIFY(!transcript->property("atYBeginning").toBool());
+        m_fake.control(u"InjectTyping"_s, {Bob, Bob, true});
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->someoneTyping(), Timeout);
+        settle();
+        QVERIFY(rowInView(19));
+        m_fake.control(u"InjectTyping"_s, {Bob, Bob, false});
+        QTRY_VERIFY_WITH_TIMEOUT(!msgs->someoneTyping(), Timeout);
+
+        // Scrolled back to the newest message, the view sticks to it again.
+        transcript->setProperty("contentY", transcript->property("originY").toReal() + transcript->property("contentHeight").toReal()
+                                                + transcript->property("bottomMargin").toReal() - transcript->height());
+        settle();
+        QVERIFY(transcript->property("atYEnd").toBool());
+        QVERIFY(transcript->property("pinnedToNewest").toBool());
+        m_fake.control(u"InjectTyping"_s, {Bob, Bob, true});
+        QTRY_VERIFY_WITH_TIMEOUT(msgs->someoneTyping(), Timeout);
+        settle();
+        QVERIFY(transcript->property("atYEnd").toBool());
+        m_fake.control(u"InjectTyping"_s, {Bob, Bob, false});
+        QTRY_VERIFY_WITH_TIMEOUT(!msgs->someoneTyping(), Timeout);
+        msgs->setPageSize(50);
+    }
+
     void composerKeepsFailedText()
     {
         invoke("openChat", Bob);

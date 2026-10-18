@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+* **kmessages: scrolling up no longer jumps back to the newest message.**
+  The transcript only noticed a scroll away from the bottom when a
+  touch flick ended; wheel, scroll-bar and keyboard scrolling (the
+  desktop style sets the position directly) left it "pinned", so the
+  first content-height change while reading history (delegates
+  appearing, an older page landing, the typing bubble) snapped the view
+  back down. The pin now follows the scroll position itself and comes
+  back once the view reaches the newest message again.
 * **Text messages through your iPhone** (Text Message Forwarding, like a
   Mac): `imsg sms enable` / kmessages Settings → Text Message Forwarding
   asks the iPhone to relay SMS / MMS / RCS; turn this computer on under the
