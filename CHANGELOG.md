@@ -24,6 +24,22 @@
   terminal's OSC 52. Docs: [docs/TUI.md](docs/TUI.md). The one-shot
   `--list` / `--to` flags of the Mac version are not carried over: that
   is what `imsg` is for.
+* **Windows port, first steps** ([docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md),
+  phases W0 and W1; nothing runs end to end on Windows yet). The whole
+  workspace now compiles for `x86_64-pc-windows-msvc`
+  (`tools/windows/xcargo.sh` cross-checks it from Linux with cargo-xwin;
+  a GitHub Actions workflow builds and tests it on `windows-latest`). New
+  `imessage_common::platform` module for what differs: owner-only files
+  (mode 0600 / 0700 on Linux as before; the per-user `%LOCALAPPDATA%` ACL
+  on Windows), the shell that runs `anisette_command` (`sh -c`; `cmd.exe
+  /c` on Windows), opening files and links and the clipboard for
+  `imsg-tui`, and DPAPI. On Windows all paths live under
+  `%LOCALAPPDATA%`, the state key is a DPAPI-wrapped `state.key.dpapi`
+  (there is no Secret Service), `imsg doctor` reports that autostart is
+  not set up yet instead of asking systemd, and the daemon stops on
+  Ctrl+C, console close, logoff and shutdown. The NAC emulator produces
+  the same 338-byte request on Windows (checked under wine). No change on
+  Linux.
 * **Refactor: `imsg-client` crate.** The D-Bus proxy and typed client
   that `imsg` had in `client.rs` are now a small library crate shared by
   `imsg` and `imsg-tui` (no behaviour change for `imsg`).

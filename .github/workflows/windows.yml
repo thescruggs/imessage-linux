@@ -1,0 +1,88 @@
+# Windows compile gate (docs/WINDOWS-PLAN.md, phase W0) plus the Linux
+# tests. Locally the same Windows check runs from Linux with
+# tools/windows/xcargo.sh.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      # The patches must apply byte for byte: no CRLF conversion.
+      - run: git config --global core.autocrlf false
+
+      # Not `submodules: recursive`: rustpush's nested `open-absinthe` (the
+      # closed stub crates/open-absinthe replaces) and apple-private-apis use
+      # git@github.com: URLs. tools/bootstrap.sh initialises exactly the
+      # submodules we build, over https, and applies patches/ (the same step
+      # packaging/arch/PKGBUILD runs).
+      - uses: actions/checkout@v4
+      - name: Submodules and patches
+        shell: bash
+        run: tools/bootstrap.sh --no-download
+
+      # openssl-src (vendored by rustpush) needs NASM for VC-WIN64A; it also
+      # needs a Windows perl, and the preinstalled Strawberry Perl is first on
+      # PATH in pwsh steps (Git Bash's perl is not, so cargo runs in pwsh).
+      - uses: ilammy/setup-nasm@v1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test imessage-common, imsg-client, open-absinthe
+        run: cargo test --locked -p imessage-common -p imsg-client -p open-absinthe
+
+      # Apple's IMDAppleServices + cert into %LOCALAPPDATA%\imessage-linux,
+      # so the emulator tests run instead of printing SKIP.
+      - name: Download Apple's files
+        continue-on-error: true
+        shell: bash
+        run: XDG_DATA_HOME="$(cygpath -u "$LOCALAPPDATA")" tools/bootstrap.sh --download-only
+      - name: NAC emulator (offline request size, 338 bytes)
+        run: cargo test --locked -p open-absinthe --test reference_offline -- --nocapture
+      # Network test against Apple's initializeValidation with the public
+      # reference identity (registers nothing): sizes must match Linux
+      # (338 / 698 / 517).
+      - name: NAC emulator live (network)
+        continue-on-error: true
+        run: cargo test --locked --release -p open-absinthe --test reference_live -- --ignored --nocapture reference_validation_data_is_517_bytes
+
+      # The daemon's unit tests (keyring DPAPI, state, store, hub) have not
+      # run on Windows before; a few may still assume `/` separators.
+      - name: Test imessaged (lib)
+        continue-on-error: true
+        run: cargo test --locked -p imessaged --lib
+      # Integration tests: the D-Bus ones print SKIP (no dbus-daemon; the
+      # Windows transport is phase W2), the rest are not yet Windows-clean.
+      - name: Test imessaged, imsg, imsg-tui (all)
+        continue-on-error: true
+        run: cargo test --locked -p imessaged -p imsg -p imsg-tui
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Submodules and patches
+        run: tools/bootstrap.sh --no-download
+      - name: dbus-daemon (D-Bus integration tests)
+        run: sudo apt-get update && sudo apt-get install -y dbus
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked

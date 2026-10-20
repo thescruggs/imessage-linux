@@ -1,0 +1,3 @@
+#!/bin/sh
+# MASM stand-in for cross builds: unicorn assembles setjmp-wrapper-win32.asm with ml64.
+exec llvm-ml -m64 "$@"
