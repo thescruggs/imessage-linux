@@ -4,6 +4,7 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -450,6 +451,7 @@ async fn download_attachment() {
     assert!(path.starts_with(h.dir.path().join("attachments").to_str().unwrap()), "{path}");
     assert!(path.ends_with("/IN-1_1/cat.png"), "{path}");
     assert_eq!(std::fs::read(&path).unwrap(), MockEngine::ATTACHMENT_PAYLOAD);
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     let again: String = p.call("DownloadAttachment", &(att_id,)).await.unwrap();
     assert_eq!(again, path);
@@ -479,6 +481,7 @@ async fn chat_backgrounds() {
     let path = b["payload"].as_str().unwrap().to_string();
     assert!(b["path"].is_null(), "the mock payload holds no picture");
     assert!(path.starts_with(h.dir.path().join("backgrounds").to_str().unwrap()) && path.ends_with("/BG-1"), "{path}");
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     let got: String = p.call("GetChat", &(chat.0.as_str(),)).await.unwrap();
     assert_eq!(json(&got)["background"]["payload"].as_str(), Some(path.as_str()));

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use imessage_common::model::{Chat, Handle, Message, MessageId, ReactionKind, Service};
+use imessage_common::platform::desktop::{self, open_with_default};
 use imsg_client::{MessagePage, SentMessage, Status, Target};
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
@@ -1528,8 +1529,7 @@ fn complete_path(input: &str) -> Option<String> {
 }
 
 fn downloads_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("Downloads")
+    imessage_common::paths::home_dir().unwrap_or_default().join("Downloads")
 }
 
 /// `name`, or `name (2)`, … so an existing download is never overwritten.
@@ -1545,24 +1545,13 @@ fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
     (2..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).unwrap()
 }
 
-fn open_with_default(target: &str) {
-    let _ = std::process::Command::new("xdg-open").arg(target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
-}
-
-/// Wayland first, then X11 tools, else the terminal itself (OSC 52, which
+/// The system clipboard (Wayland first, then X11 tools; Windows' own,
+/// [`desktop::copy_to_clipboard`]), else the terminal itself (OSC 52, which
 /// also works over ssh and in tmux when it allows it). Returns what was used.
 fn copy_to_clipboard(s: &str) -> std::result::Result<&'static str, String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let tools: [(&str, &[&str]); 3] = [("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])];
-    for (tool, args) in tools {
-        let Ok(mut c) = Command::new(tool).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { continue };
-        if let Some(mut i) = c.stdin.take() {
-            let _ = i.write_all(s.as_bytes());
-        }
-        if c.wait().map(|st| st.success()).unwrap_or(false) {
-            return Ok(tool);
-        }
+    if let Some(tool) = desktop::copy_to_clipboard(s) {
+        return Ok(tool);
     }
     let mut out = std::io::stdout();
     out.write_all(format!("\x1b]52;c;{}\x07", base64(s.as_bytes())).as_bytes()).and_then(|_| out.flush()).map_err(|e| format!("clipboard: {e}"))?;

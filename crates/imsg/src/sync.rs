@@ -164,12 +164,11 @@ fn files_named(dir: &Path, keep: impl Fn(&str) -> bool) -> std::io::Result<Vec<S
 
 /// Write `data` to `path` via a temp file in the same directory (0600).
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
     let r = (|| {
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut f = imessage_common::platform::fs::private_options().write(true).create(true).truncate(true).open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -515,7 +514,7 @@ async fn run_inner(args: SyncArgs, state_dir: &Path, ctx: &Ctx, host_out: &mut O
     let contacts_dir = args.contacts_dir.clone().unwrap_or_else(imessage_common::paths::kpeople_vcard_dir);
 
     let run_id = format!("sync-{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), std::process::id());
-    let stage = import::cache_dir().join("imsg/import").join(run_id);
+    let stage = import::stage_root().join(run_id);
     import::private_dir(&stage).map_err(|e| anyhow::anyhow!("{}: {e}", stage.display()))?;
     let what: Vec<&str> = [(want_contacts, "contacts"), (want_pins, "pins"), (want_backgrounds, "backgrounds")].iter().filter(|w| w.0).map(|w| w.1).collect();
     if !ctx.quiet && !ctx.json {
@@ -530,7 +529,7 @@ async fn run_inner(args: SyncArgs, state_dir: &Path, ctx: &Ctx, host_out: &mut O
     if want_backgrounds {
         script_args.extend(["--max-file-mb".into(), backgrounds::MAX_FILE_MB.to_string()]);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = imessage_common::paths::home_dir();
     let argv = import::ssh_python_argv(&host, home.as_deref(), &script_args);
     let fetched = tokio::task::block_in_place(|| {
         import::fetch_tar(&argv, remote_script(want_backgrounds), &host, args.max_total_mb, &stage).and_then(|_| read_meta(&stage))
@@ -896,6 +895,7 @@ mod tests {
         assert!(pins_state_for(Some(b"junk"), "mac.local").is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn pins_file_must_be_a_plain_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -913,6 +913,7 @@ mod tests {
         assert!(read_pins_file(&stage, "../outside.plist").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn contacts_replace_only_mac_files() {
         let tmp = tempfile::tempdir().unwrap();

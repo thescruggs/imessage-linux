@@ -315,6 +315,7 @@ async fn invalid_batches_store_nothing() {
 
 /// S4: a source that is a symlink (or FIFO) is not followed / opened; the
 /// attachment is stored without a file.
+#[cfg(unix)]
 #[tokio::test]
 async fn import_skips_symlinked_and_fifo_sources() {
     let dir = tempfile::tempdir().unwrap();

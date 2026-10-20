@@ -15,6 +15,7 @@ use std::process::{Command as Process, Stdio};
 
 use imessage_common::import::{ImportAttachment, ImportBatch, ImportLink, ImportMessage, ImportReaction, ImportResult};
 use imessage_common::model::{AttachmentId, Chat, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind, Service};
+use imessage_common::paths;
 use serde::{Deserialize, Serialize};
 
 use crate::Ctx;
@@ -691,21 +692,18 @@ pub fn ssh_python_argv(host: &str, home: Option<&Path>, script_args: &[String]) 
     v
 }
 
-pub(crate) fn cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join(".cache"))
+/// Where Mac exports are staged: `<imsg cache>/import/<run>`.
+pub(crate) fn stage_root() -> PathBuf {
+    paths::imsg_cache_dir().join("import")
 }
 
 pub(crate) fn private_dir(p: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p)
+    imessage_common::platform::fs::create_private_dir_all(p)
 }
 
 /// Run the exporter on the Mac and unpack its tar into `stage`.
 fn fetch(args: &ImportArgs, since: i64, stage: &Path) -> anyhow::Result<()> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = paths::home_dir();
     let argv = ssh_argv(&args.host, since, args.max_attachment_mb, home.as_deref());
     fetch_tar(&argv, EXPORT_SCRIPT.to_string(), &args.host, args.max_total_mb, stage)
 }
@@ -853,7 +851,7 @@ pub async fn run(args: ImportArgs, ctx: &Ctx) -> anyhow::Result<u8> {
     }
 
     let run_id = format!("{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), std::process::id());
-    let stage = cache_dir().join("imsg/import").join(run_id);
+    let stage = stage_root().join(run_id);
     private_dir(&stage).map_err(|e| anyhow::anyhow!("{}: {e}", stage.display()))?;
     if !ctx.quiet && !ctx.json {
         eprintln!("exporting from {} (since {}) into {} ...", args.host, chrono::DateTime::from_timestamp(since, 0).map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default(), stage.display());
@@ -1169,6 +1167,7 @@ mod tests {
 
     /// S4: `path` comes from the Mac; only regular files under
     /// `attachments/` inside the stage are used.
+    #[cfg(unix)]
     #[test]
     fn staged_file_validation() {
         use std::os::unix::fs::symlink;

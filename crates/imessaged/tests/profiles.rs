@@ -2,6 +2,7 @@
 //! mock engine: share -> fetch -> photo file -> signals, refresh on GetChat,
 //! stop sharing, group photo download.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,6 +110,7 @@ async fn shared_profile_is_fetched_stored_and_cleared() {
     assert!(photo.starts_with(&running.hub().profiles_dir().to_string_lossy().into_owned()), "{photo}");
     assert!(photo.ends_with("/R1.jpg"), "{photo}");
     assert_eq!(std::fs::read(&photo).unwrap(), JPEG);
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&photo).unwrap().permissions().mode() & 0o777, 0o600);
     // the chat is announced again with the profile in its participants
     let s = next_matching(&mut sig, |s| matches!(s, DaemonSignal::ChatUpdated(c) if c.participants[0].profile.is_some())).await;

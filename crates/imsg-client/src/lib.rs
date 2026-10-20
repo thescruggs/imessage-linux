@@ -19,6 +19,13 @@ use zbus::proxy;
 pub const BUS_NAME: &str = "org.imessage.Daemon1";
 const ERROR_PREFIX: &str = "org.imessage.Daemon1.Error.";
 
+/// Hint for a daemon that is not on the bus.
+#[cfg(not(windows))]
+const NOT_RUNNING: &str = "imessaged is not running (start it with `systemctl --user start imessaged` or run `imessaged`)";
+/// No service manager integration on Windows yet (Task Scheduler: phase W3).
+#[cfg(windows)]
+const NOT_RUNNING: &str = "imessaged is not running (start it by running `imessaged`)";
+
 /// Process exit codes (documented in docs/CLI.md).
 pub mod exit {
     pub const OK: u8 = 0;
@@ -96,10 +103,7 @@ pub fn map_error_name(name: &str, msg: Option<&str>) -> CliError {
         return e;
     }
     match name {
-        "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner" => with(
-            exit::NO_DAEMON,
-            "imessaged is not running (start it with `systemctl --user start imessaged` or run `imessaged`)",
-        ),
+        "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner" => with(exit::NO_DAEMON, NOT_RUNNING),
         "org.freedesktop.DBus.Error.Spawn.ChildExited"
         | "org.freedesktop.DBus.Error.Spawn.Failed"
         | "org.freedesktop.DBus.Error.Spawn.ExecFailed"

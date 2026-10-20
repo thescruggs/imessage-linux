@@ -363,6 +363,7 @@ pub struct Ctx {
 fn main() -> ExitCode {
     // Die quietly on a closed pipe (`imsg watch | head`) like other CLIs.
     // SAFETY: called before any other thread exists.
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }

@@ -11,6 +11,22 @@ serde.workspace = true
 plist.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# O_NONBLOCK / mkfifo (platform::fs).
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# platform: DPAPI, ShellExecuteW (same version rustpush's deps already link).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# platform::desktop clipboard (CF_UNICODETEXT).
+clipboard-win = "5.4"
+
 [dev-dependencies]
 serde_json.workspace = true
 # Drift guard: the fixture must also parse as open-absinthe's HardwareConfig.

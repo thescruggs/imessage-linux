@@ -323,6 +323,7 @@ fn event_name(ev: &EngineEvent) -> &'static str {
 }
 
 /// Resolves on SIGTERM or SIGINT.
+#[cfg(unix)]
 pub async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
@@ -330,6 +331,27 @@ pub async fn shutdown_signal() {
     tokio::select! {
         _ = term.recv() => log::info!("SIGTERM"),
         _ = int.recv() => log::info!("SIGINT"),
+    }
+}
+
+/// Resolves on Ctrl+C / Ctrl+Break, the console window closing, or the
+/// user logging off / the system shutting down. Windows gives a console
+/// process only a few seconds after the last three before killing it.
+/// (A D-Bus `Shutdown` method for the Task Scheduler stop is phase W3.)
+#[cfg(windows)]
+pub async fn shutdown_signal() {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+    let mut c = ctrl_c().expect("install Ctrl+C handler");
+    let mut brk = ctrl_break().expect("install Ctrl+Break handler");
+    let mut close = ctrl_close().expect("install console close handler");
+    let mut logoff = ctrl_logoff().expect("install logoff handler");
+    let mut shutdown = ctrl_shutdown().expect("install shutdown handler");
+    tokio::select! {
+        _ = c.recv() => log::info!("Ctrl+C"),
+        _ = brk.recv() => log::info!("Ctrl+Break"),
+        _ = close.recv() => log::info!("console closed"),
+        _ = logoff.recv() => log::info!("logoff"),
+        _ = shutdown.recv() => log::info!("system shutdown"),
     }
 }
 

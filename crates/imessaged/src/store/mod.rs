@@ -21,14 +21,14 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use imessage_common::model::{
     Attachment, AttachmentId, Chat, ChatBackground, ChatId, DeliveryState, Handle, Message, MessageId, MessagePart, Reaction, ReactionKind, Service,
 };
+use imessage_common::platform::fs as pfs;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -264,14 +264,14 @@ fn clamp_limit(limit: u32) -> u32 {
 }
 
 /// Create `path` 0600 if missing, and tighten it to 0600 if it exists.
+/// (Windows: just create it; see [`pfs`].)
 fn private_file(path: &Path) -> StoreResult<()> {
     let io = |source| StoreError::Io { path: path.to_path_buf(), source };
     if !path.exists() {
-        OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(path).map_err(io)?;
+        pfs::private_options().write(true).create(true).truncate(false).open(path).map_err(io)?;
     }
-    let mode = fs::metadata(path).map_err(io)?.permissions().mode();
-    if mode & 0o777 != 0o600 {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io)?;
+    if pfs::mode(&fs::metadata(path).map_err(io)?).is_some_and(|mode| mode != 0o600) {
+        pfs::set_mode(path, 0o600).map_err(io)?;
     }
     Ok(())
 }

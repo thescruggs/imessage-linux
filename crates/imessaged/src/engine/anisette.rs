@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
+use imessage_common::platform::process::{SHELL, shell_command};
 use imessage_common::redact;
 use omnisette::remote_anisette_v3::RemoteAnisetteProviderV3;
 use omnisette::{AnisetteError, AnisetteProvider};
@@ -78,20 +79,19 @@ impl CommandAnisetteProvider {
     }
 }
 
-/// Run `sh -c command` with stdin closed, capturing stdout. stderr goes to
-/// the log, redacted ([`redact::redact_line`]). Errors read
+/// Run `sh -c command` (Windows: `cmd.exe /c`; [`shell_command`]) with stdin
+/// closed, capturing stdout. stderr goes to the log, redacted
+/// ([`redact::redact_line`]). Errors read
 /// `anisette command failed: <reason>` (the command itself is only logged)
 /// and never include stdout (headers are credentials).
 pub async fn run_command(command: &str) -> Result<Vec<u8>, AnisetteError> {
-    let child = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let child = tokio::process::Command::from(shell_command(command))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| fail(command, format!("cannot start sh: {e}")))?;
+        .map_err(|e| fail(command, format!("cannot start {SHELL}: {e}")))?;
     let out = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| fail(command, format!("no answer within {} s", COMMAND_TIMEOUT.as_secs())))?

@@ -40,9 +40,10 @@ fn missing_or_wrong_binary_gives_specific_errors() {
     let dir = std::env::temp_dir().join(format!("open-absinthe-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    // $XDG_DATA_HOME fallback when the override is empty.
+    // $XDG_DATA_HOME (Windows: %LOCALAPPDATA%) fallback when the override
+    // is empty.
     set_env("OPEN_ABSINTHE_BINARY", "".as_ref());
-    set_env("XDG_DATA_HOME", dir.as_os_str());
+    set_env(if cfg!(windows) { "LOCALAPPDATA" } else { "XDG_DATA_HOME" }, dir.as_os_str());
     assert_eq!(nac::binary_path(), dir.join("imessage-linux/IMDAppleServices"));
 
     let fake: PathBuf = dir.join("IMDAppleServices");

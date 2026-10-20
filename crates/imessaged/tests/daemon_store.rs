@@ -224,6 +224,7 @@ async fn stranger_edit_unsend_and_read_are_ignored() {
 /// after the user deletes the original.
 #[tokio::test]
 async fn sent_attachment_survives_deleting_the_original() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -242,8 +243,11 @@ async fn sent_attachment_survives_deleting_the_original() {
     assert!(p.starts_with(hub.attachments_dir()), "{path}");
     assert_eq!(p.file_name().unwrap(), "linux-test.png");
     assert_eq!(std::fs::read(p).unwrap(), b"\x89PNG not really");
-    assert_eq!(std::fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::metadata(p.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    #[cfg(unix)]
+    {
+        assert_eq!(std::fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(p.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    }
     // no temp files left behind
     assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
     running.shutdown().await.unwrap();

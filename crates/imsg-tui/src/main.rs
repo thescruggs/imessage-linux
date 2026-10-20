@@ -19,7 +19,7 @@ struct Args {
     /// D-Bus address to use instead of the session bus (tests, containers).
     #[arg(long, env = "IMSG_BUS_ADDRESS", value_name = "ADDR")]
     bus_address: Option<String>,
-    /// Folder(s) of vCards for contact names, `:`-separated
+    /// Folder(s) of vCards for contact names, `:`-separated (`;` on Windows)
     /// (default: ~/.local/share/kpeoplevcard, where `imsg sync-mac` writes).
     #[arg(long, env = "IMSG_CONTACTS_DIR", value_name = "DIR")]
     contacts_dir: Option<String>,
@@ -43,7 +43,7 @@ async fn main() -> ExitCode {
         }
     };
     let dirs: Vec<PathBuf> = match &args.contacts_dir {
-        Some(d) => d.split(':').filter(|s| !s.is_empty()).map(contacts::expand_tilde).collect(),
+        Some(d) => contacts::split_dirs(d),
         None => contacts::default_dirs(),
     };
     let contacts = contacts::Contacts::load(&dirs);

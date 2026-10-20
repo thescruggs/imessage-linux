@@ -20,14 +20,14 @@
 //! The key comes from a [`crate::keyring::KeyProvider`].
 
 use std::fmt;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use imessage_common::model::{RegistrationState, SmsForwarding};
+use imessage_common::platform::fs as pfs;
 use rand::RngCore;
 use rustpush::{APSState, IDSNGMIdentity, IDSUser};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -182,14 +182,15 @@ pub fn open<T: DeserializeOwned>(key: &StateKey, data: &[u8]) -> Result<T, State
 }
 
 /// `mkdir -p` with mode 0700 for anything created; tighten `dir` itself to
-/// 0700 if it is group/world accessible.
+/// 0700 if it is group/world accessible. (Windows: plain `mkdir -p`, see
+/// [`imessage_common::platform::fs`].)
 pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     if !dir.exists() {
-        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        pfs::create_private_dir_all(dir)?;
     }
     let meta = fs::metadata(dir)?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    if !pfs::is_private(&meta) {
+        pfs::set_mode(dir, 0o700)?;
     }
     Ok(())
 }
@@ -213,7 +214,7 @@ pub fn atomic_write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "state".into());
     let tmp = dir.join(format!(".{name}.tmp-{}-{:08x}", std::process::id(), rand::random::<u32>()));
     let result = (|| {
-        let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut f = pfs::private_options().write(true).create_new(true).open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
@@ -331,8 +332,8 @@ mod tests {
         s.registration.registered_at = Some(10);
         store.save(&s).unwrap();
 
-        let meta = fs::metadata(store.path()).unwrap();
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(pfs::mode(&fs::metadata(store.path()).unwrap()), Some(0o600));
         let back: SavedState = store.load().unwrap().unwrap();
         assert_eq!(back.push.token, Some([7u8; 32]));
         assert_eq!(back.registration, s.registration);

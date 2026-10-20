@@ -50,13 +50,17 @@ pub fn b64(s: &str) -> Vec<u8> {
 }
 
 /// `${XDG_DATA_HOME:-~/.local/share}/imessage-linux` (where tools/bootstrap.sh
-/// puts IMDAppleServices and cert-1.0.plist).
+/// puts IMDAppleServices and cert-1.0.plist); Windows:
+/// `%LOCALAPPDATA%\imessage-linux` (as `nac::binary_path`).
 pub fn data_dir() -> std::path::PathBuf {
+    #[cfg(not(windows))]
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
+    #[cfg(windows)]
+    let base = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default());
     base.join("imessage-linux")
 }
 

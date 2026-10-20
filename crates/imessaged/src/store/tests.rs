@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use imessage_common::model::{DeliveryReceipt, ReadReceipt, TypingEvent};
@@ -85,6 +86,8 @@ fn refuses_newer_schema() {
     assert!(matches!(Store::open(dir.path(), key()), Err(StoreError::TooNew { found: 999, .. })));
 }
 
+/// Unix mode bits (Windows relies on the %LOCALAPPDATA% ACL).
+#[cfg(unix)]
 #[test]
 fn files_are_private() {
     let dir = tempfile::tempdir().unwrap();

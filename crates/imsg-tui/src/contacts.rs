@@ -1,6 +1,6 @@
 //! The address book: vCards from the folder kmessages (KPeople) reads,
 //! `~/.local/share/kpeoplevcard` (`imsg sync-mac` and KDE Connect write
-//! there), or the directories in `IMSG_CONTACTS_DIR` (`:`-separated).
+//! there), or the directories in `IMSG_CONTACTS_DIR` (`:`-separated; `;` on Windows).
 //! Parsed once at start-up; `Ctrl+R` re-reads them.
 
 use std::collections::HashMap;
@@ -27,15 +27,20 @@ pub struct Contacts {
 /// `IMSG_CONTACTS_DIR` if set, else the KPeople vCard folder.
 pub fn default_dirs() -> Vec<PathBuf> {
     match std::env::var("IMSG_CONTACTS_DIR") {
-        Ok(v) if !v.trim().is_empty() => v.split(':').filter(|s| !s.is_empty()).map(expand_tilde).collect(),
+        Ok(v) if !v.trim().is_empty() => split_dirs(&v),
         _ => vec![imessage_common::paths::kpeople_vcard_dir()],
     }
 }
 
+/// A `PATH`-style list (`:`-separated; `;` on Windows, where `:` follows
+/// the drive letter), empty entries dropped, `~/` expanded.
+pub fn split_dirs(list: &str) -> Vec<PathBuf> {
+    std::env::split_paths(list).filter(|p| !p.as_os_str().is_empty()).map(|p| expand_tilde(&p.to_string_lossy())).collect()
+}
+
 pub fn expand_tilde(p: &str) -> PathBuf {
     if let Some(r) = p.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        return PathBuf::from(home).join(r);
+        return imessage_common::paths::home_dir().unwrap_or_default().join(r);
     }
     PathBuf::from(p)
 }

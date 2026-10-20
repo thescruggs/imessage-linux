@@ -16,6 +16,7 @@ use imessage_common::model::{
     Attachment, AttachmentId, Chat, ChatId, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessageId, MessagePart,
     ProfilesStatus, Reaction, ReactionKind, RegistrationState, Service, SmsForwarding,
 };
+use imessage_common::platform::fs as pfs;
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
@@ -166,19 +167,16 @@ fn safe_component(s: &str, fallback: &str) -> String {
 
 /// Copy `src` to `dest` atomically (temp file in `dest`'s directory, mode
 /// 0600, `fsync`, rename). `src` must be a regular file: it is opened
-/// non-blocking and checked, so a FIFO or device cannot stall the caller.
+/// non-blocking and checked, so a FIFO or device cannot stall the caller
+/// ([`pfs::open_regular_file`]).
 fn copy_private(src: &Path, dest: &Path) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
     let tmp = dir.join(format!(".{name}.tmp-{}-{:08x}", std::process::id(), rand::random::<u32>()));
     let result = (|| {
-        let mut input = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(src)?;
-        if !input.metadata()?.is_file() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
-        }
-        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut input = pfs::open_regular_file(src)?;
+        let mut out = pfs::private_options().write(true).create_new(true).open(&tmp)?;
         std::io::copy(&mut input, &mut out)?;
         out.flush()?;
         out.sync_all()?;
@@ -195,12 +193,11 @@ fn copy_private(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// 0600, `fsync`, rename).
 fn write_private(dest: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
     let tmp = dir.join(format!(".{name}.tmp-{}-{:08x}", std::process::id(), rand::random::<u32>()));
     let result = (|| {
-        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut out = pfs::private_options().write(true).create_new(true).open(&tmp)?;
         out.write_all(data)?;
         out.sync_all()?;
         drop(out);
@@ -1315,6 +1312,7 @@ mod tests {
     }
 
     /// S4: copying never blocks on (or copies) a FIFO.
+    #[cfg(unix)]
     #[test]
     fn copy_private_refuses_non_regular_files() {
         let dir = tempfile::tempdir().unwrap();

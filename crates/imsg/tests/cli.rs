@@ -464,8 +464,11 @@ impl FakeMac {
              cmd=\"$*\"; HOME=\"$FAKE_MAC_HOME\" exec sh -c \"${cmd#/usr/bin/}\"\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         Some(FakeMac { data: t.path().join("data"), state: t.path().join("state"), mac, path, t })
     }

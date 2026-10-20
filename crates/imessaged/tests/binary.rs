@@ -2,6 +2,8 @@
 //! provider) on a private bus: the name is registered, GetStatus answers,
 //! SIGTERM shuts it down cleanly and the store files are private.
 //! Prints `SKIP:` and passes when `dbus-daemon` is not installed.
+//! Unix only (SIGTERM, mode bits; the Windows daemon is phase W3).
+#![cfg(unix)]
 
 mod common;
 

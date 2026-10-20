@@ -50,7 +50,8 @@ pub const BOOTSTRAP_HINT: &str = "tools/bootstrap.sh (installed package: /usr/sh
 /// Location of Apple's `IMDAppleServices` (downloaded and sha1-verified by
 /// `tools/bootstrap.sh`, never redistributed; this library never downloads
 /// it): `$OPEN_ABSINTHE_BINARY` if set, else
-/// `${XDG_DATA_HOME:-~/.local/share}/imessage-linux/IMDAppleServices`.
+/// `${XDG_DATA_HOME:-~/.local/share}/imessage-linux/IMDAppleServices`
+/// (Windows: `%LOCALAPPDATA%\imessage-linux\IMDAppleServices`).
 pub fn binary_path() -> PathBuf {
     if let Some(p) = std::env::var_os("OPEN_ABSINTHE_BINARY").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
@@ -58,6 +59,7 @@ pub fn binary_path() -> PathBuf {
     data_dir().join("IMDAppleServices")
 }
 
+#[cfg(not(windows))]
 fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
@@ -68,6 +70,26 @@ fn data_dir() -> PathBuf {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".local/share")
+        });
+    base.join("imessage-linux")
+}
+
+/// Windows: `%LOCALAPPDATA%\imessage-linux`, fallback
+/// `%USERPROFILE%\AppData\Local`. Same rule as
+/// `imessage_common::paths::data_dir` (this crate cannot depend on it).
+#[cfg(windows)]
+fn data_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("AppData")
+                .join("Local")
         });
     base.join("imessage-linux")
 }

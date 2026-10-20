@@ -3,14 +3,17 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use imessage_common::hwconfig::{self, Level, Report};
 use imessage_common::model::ConnectionState;
 use imessage_common::paths;
+use imessage_common::platform::fs as pfs;
+use imessage_common::platform::process::shell_command;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
@@ -50,7 +53,7 @@ pub fn hwconfig_import(file: &Path, state_dir: &Path, force: bool) -> anyhow::Re
     if let Ok(existing) = fs::read(&dest) {
         if existing == bytes {
             println!("already imported: {}", dest.display());
-            fs::set_permissions(&dest, fs::Permissions::from_mode(0o600))?;
+            pfs::set_mode(&dest, 0o600)?;
             return Ok(exit::OK);
         }
         if !force {
@@ -72,14 +75,10 @@ pub fn hwconfig_import(file: &Path, state_dir: &Path, force: bool) -> anyhow::Re
 
 /// Atomically write `bytes` to `dest` with mode 0600 (dir 0700).
 fn install_private(bytes: &[u8], dir: &Path, dest: &Path) -> anyhow::Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    pfs::create_private_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let tmp = dir.join(format!(".{}.tmp.{}", paths::HWCONFIG_FILE, std::process::id()));
     let write = || -> anyhow::Result<()> {
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut f = pfs::private_options().write(true).create_new(true).open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, dest)?;
@@ -134,7 +133,7 @@ pub fn local_checks(state_dir: &Path) -> Vec<DoctorLine> {
                 let worst = r.worst();
                 let bad: Vec<String> =
                     r.checks.iter().filter(|c| c.level != Level::Ok).map(|c| format!("{} ({})", c.field, c.level)).collect();
-                let mode = fs::metadata(&hw).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+                let mode = fs::metadata(&hw).ok().and_then(|m| pfs::mode(&m)).unwrap_or(0);
                 let mut d = format!("{}", hw.display());
                 if let Some(c) = &r.config {
                     d.push_str(&format!(": {} macOS {}", c.inner.product_name, c.version));
@@ -180,6 +179,7 @@ pub fn local_checks(state_dir: &Path) -> Vec<DoctorLine> {
 
 /// Directories searched for the D-Bus activation file, most specific first
 /// (`$XDG_DATA_HOME`, then `$XDG_DATA_DIRS`, each + `dbus-1/services`).
+#[cfg(not(windows))]
 pub fn activation_dirs(xdg_data_home: Option<&str>, home: Option<&str>, xdg_data_dirs: Option<&str>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     match xdg_data_home.filter(|v| v.starts_with('/')) {
@@ -195,6 +195,7 @@ pub fn activation_dirs(xdg_data_home: Option<&str>, home: Option<&str>, xdg_data
     dirs.into_iter().map(|d| d.join("dbus-1/services")).collect()
 }
 
+#[cfg(not(windows))]
 fn activation_check() -> DoctorLine {
     let env = |k: &str| std::env::var(k).ok();
     let dirs = activation_dirs(env("XDG_DATA_HOME").as_deref(), env("HOME").as_deref(), env("XDG_DATA_DIRS").as_deref());
@@ -275,15 +276,8 @@ async fn anisette_check(state_dir: &Path) -> Vec<DoctorLine> {
             .map(|c| c.inner.product_name);
         let mut lines = vec![anisette_command_check(&cmd, hw_model.as_deref()).await];
         if command_uses_ssh(&cmd) {
-            let env = std::process::Command::new("systemctl")
-                .args(["--user", "show-environment"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-            let ssh_config = std::env::var_os("HOME")
-                .map(|h| Path::new(&h).join(".ssh/config"))
-                .and_then(|p| std::fs::read_to_string(p).ok());
+            let env = systemd_environment();
+            let ssh_config = paths::home_dir().map(|h| h.join(".ssh/config")).and_then(|p| std::fs::read_to_string(p).ok());
             lines.extend(ssh_lines(&cmd, env.as_deref(), ssh_config.as_deref()));
         }
         return lines;
@@ -299,6 +293,24 @@ async fn anisette_check(state_dir: &Path) -> Vec<DoctorLine> {
         Ok(Err(e)) => line("anisette", Level::Warn, format!("{url}: {e}{hint}")),
         Err(_) => line("anisette", Level::Warn, format!("{url}: no TCP connection within 5 s{hint}")),
     }]
+}
+
+/// `systemctl --user show-environment` (the daemon unit's environment),
+/// `None` without a systemd user manager (always on Windows).
+fn systemd_environment() -> Option<String> {
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("systemctl")
+            .args(["--user", "show-environment"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
 }
 
 /// Does the command run ssh (a word `ssh` or `.../ssh`)?
@@ -345,9 +357,7 @@ pub fn ssh_lines(cmd: &str, systemd_env: Option<&str>, ssh_config: Option<&str>)
 /// `hw_model`: hwconfig.plist's product name, compared with the model the
 /// command's Mac reports.
 async fn anisette_command_check(cmd: &str, hw_model: Option<&str>) -> DoctorLine {
-    let run = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+    let run = tokio::process::Command::from(shell_command(cmd))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -401,6 +411,7 @@ pub fn anisette_headers_summary(stdout: &[u8]) -> Result<(String, Option<String>
     Ok((format!("{} headers, Mac model {}", obj.len(), model.as_deref().unwrap_or("unknown")), model))
 }
 
+#[cfg(not(windows))]
 fn systemd_check() -> Option<DoctorLine> {
     let out = std::process::Command::new("systemctl").args(["--user", "is-active", "imessaged"]).output().ok()?;
     let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -415,6 +426,25 @@ fn systemd_check() -> Option<DoctorLine> {
             format!("imessaged.service {other}; `systemctl --user enable --now imessaged` to start it at login"),
         ),
     })
+}
+
+/// How the daemon gets started: D-Bus activation and the systemd user unit.
+#[cfg(not(windows))]
+fn service_checks() -> Vec<DoctorLine> {
+    let mut lines = vec![activation_check()];
+    lines.extend(systemd_check());
+    lines
+}
+
+/// Windows has neither D-Bus activation nor systemd; the logon task that
+/// will start the daemon comes with phase W3 (docs/WINDOWS-PLAN.md).
+#[cfg(windows)]
+fn service_checks() -> Vec<DoctorLine> {
+    vec![line(
+        "autostart",
+        Level::Warn,
+        "not set up yet on Windows (Task Scheduler logon task: phase W3); start `imessaged` yourself",
+    )]
 }
 
 /// Checks against the running daemon.
@@ -504,10 +534,7 @@ async fn daemon_checks(bus: &Bus, state_dir: &Path) -> Vec<DoctorLine> {
 pub async fn doctor(state_dir: &Path, bus: &Bus, json: bool, st: Style) -> anyhow::Result<u8> {
     let mut lines = local_checks(state_dir);
     lines.extend(anisette_check(state_dir).await);
-    lines.push(activation_check());
-    if let Some(l) = systemd_check() {
-        lines.push(l);
-    }
+    lines.extend(service_checks());
     lines.extend(daemon_checks(bus, state_dir).await);
 
     let worst = lines.iter().map(|l| l.level).max().unwrap_or(Level::Ok);
@@ -614,6 +641,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn activation_search_path() {
         let d = activation_dirs(None, Some("/home/u"), None);

@@ -368,12 +368,12 @@ pub async fn run(args: BackgroundArgs, ctx: &Ctx) -> anyhow::Result<u8> {
     }
 
     let run_id = format!("{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), std::process::id());
-    let stage = import::cache_dir().join("imsg/import").join(run_id);
+    let stage = import::stage_root().join(run_id);
     import::private_dir(&stage).map_err(|e| anyhow::anyhow!("{}: {e}", stage.display()))?;
     if !ctx.quiet && !ctx.json {
         eprintln!("exporting transcript backgrounds from {} into {} ...", args.host, stage.join("backgrounds").display());
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = imessage_common::paths::home_dir();
     let argv = import::ssh_python_argv(&args.host, home.as_deref(), &["--max-file-mb".into(), MAX_FILE_MB.to_string()]);
     let fetched = tokio::task::block_in_place(|| import::fetch_tar(&argv, EXPORT_SCRIPT.to_string(), &args.host, args.max_total_mb, &stage).and_then(|_| read_records(&stage)));
     let recs = match fetched {
@@ -551,6 +551,7 @@ mod tests {
         d
     }
 
+    #[cfg(unix)]
     #[test]
     fn records_must_be_a_plain_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -621,6 +622,7 @@ mod tests {
         assert!(rows.windows(2).all(|w| w[0].chat.id.0 <= w[1].chat.id.0));
     }
 
+    #[cfg(unix)]
     #[test]
     fn files_ids_and_duplicates() {
         let st = stage_with(&["A", "B", "C-watchBackground", "D"]);
