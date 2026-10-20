@@ -49,12 +49,15 @@ thiserror.workspace = true
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
-secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 # Message store (SQLite bundled: no system libsqlite3 needed).
 rusqlite = { version = "0.37", features = ["bundled"] }
 # D-Bus API. zbus 5 (not 4): secret-service already links zbus 5, so this
 # adds no second D-Bus stack.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Secret Service (keyring.rs); Windows uses a DPAPI-wrapped key file instead.
+[target.'cfg(not(windows))'.dependencies]
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

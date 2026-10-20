@@ -9,6 +9,12 @@
 //!   only against copying `state.enc` alone (backups, sync); anyone who can
 //!   read your home directory can read both files.
 //!
+//! * **File, Windows**: `state_dir/state.key.dpapi`, the 32 bytes wrapped
+//!   with DPAPI for the current Windows user (`CryptProtectData`), so the
+//!   file alone is useless to another account or machine. There is no
+//!   Secret Service on Windows: `auto` *is* this provider there and
+//!   `secret-service` always fails.
+//!
 //! `auto` tries Secret Service first and falls back to the file with a
 //! one-time warning. Once a key exists in one place, `auto` keeps using it:
 //! if `state.key` exists it is used (so a session without a keyring, e.g. a
@@ -17,23 +23,31 @@
 //! `state.enc` exists without a `state.key`, its key is in the Secret
 //! Service, and minting a new file key would shadow it forever.
 
+#[cfg(not(windows))]
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use imessage_common::platform::fs as pfs;
 use rand::RngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::config::KeyProviderKind;
 
+#[cfg(not(windows))]
 pub const KEY_FILE: &str = "state.key";
+/// A different name, not just different contents: a plain Linux
+/// `state.key` copied over is never mistaken for a DPAPI blob.
+#[cfg(windows)]
+pub const KEY_FILE: &str = "state.key.dpapi";
 pub const KEY_LEN: usize = 32;
+#[cfg(not(windows))]
 const SS_LABEL: &str = "imessaged state encryption key";
+#[cfg(not(windows))]
 const SS_ATTRS: [(&str, &str); 2] = [("app", "imessaged"), ("purpose", "state-key")];
 /// Unlock prompts may wait for a human; don't hang startup forever.
 const SS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -54,9 +68,11 @@ impl StateKey {
     pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
         &self.0
     }
+    #[cfg_attr(windows, allow(dead_code))]
     fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
+    #[cfg_attr(windows, allow(dead_code))]
     fn from_hex(s: &str) -> Option<StateKey> {
         let s = s.trim();
         if s.len() != KEY_LEN * 2 || !s.is_ascii() {
@@ -100,6 +116,30 @@ pub trait KeyProvider: Send + Sync {
 // File provider
 // ---------------------------------------------------------------------------
 
+/// Key bytes -> key file contents: as is (unix), DPAPI-wrapped (Windows).
+fn seal(key: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(not(windows))]
+    {
+        Ok(key.to_vec())
+    }
+    #[cfg(windows)]
+    {
+        imessage_common::platform::dpapi::protect(key, "imessaged state key")
+    }
+}
+
+/// Key file contents -> key bytes (see [`seal`]). The result is secret.
+fn unseal(contents: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(not(windows))]
+    {
+        Ok(contents.to_vec())
+    }
+    #[cfg(windows)]
+    {
+        imessage_common::platform::dpapi::unprotect(contents)
+    }
+}
+
 pub struct FileKeyProvider {
     pub path: PathBuf,
 }
@@ -115,7 +155,10 @@ impl FileKeyProvider {
 
     fn read(&self) -> Result<Option<StateKey>, KeyError> {
         match std::fs::read(&self.path) {
-            Ok(mut bytes) => {
+            Ok(mut contents) => {
+                let unsealed = unseal(&contents);
+                contents.zeroize();
+                let mut bytes = unsealed.map_err(|e| self.io(e))?;
                 let r = if bytes.len() == KEY_LEN {
                     let mut b = [0u8; KEY_LEN];
                     b.copy_from_slice(&bytes);
@@ -126,10 +169,11 @@ impl FileKeyProvider {
                 bytes.zeroize();
                 // Tighten permissions if someone loosened them.
                 if let Ok(meta) = std::fs::metadata(&self.path)
-                    && meta.permissions().mode() & 0o077 != 0
+                    && let Some(mode) = pfs::mode(&meta)
+                    && mode & 0o077 != 0
                 {
-                    log::warn!("{} had mode {:o}; resetting to 0600", self.path.display(), meta.permissions().mode() & 0o777);
-                    let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+                    log::warn!("{} had mode {:o}; resetting to 0600", self.path.display(), mode);
+                    let _ = pfs::set_mode(&self.path, 0o600);
                 }
                 r
             }
@@ -143,14 +187,12 @@ impl FileKeyProvider {
             crate::state::ensure_private_dir(dir).map_err(|e| self.io(e))?;
         }
         let key = StateKey::random();
+        let mut contents = seal(key.as_bytes()).map_err(|e| self.io(e))?;
         // create_new: never clobber a key that appeared concurrently.
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&self.path)
-            .map_err(|e| self.io(e))?;
-        f.write_all(key.as_bytes()).map_err(|e| self.io(e))?;
+        let mut f = pfs::private_options().write(true).create_new(true).open(&self.path).map_err(|e| self.io(e))?;
+        let written = f.write_all(&contents);
+        contents.zeroize();
+        written.map_err(|e| self.io(e))?;
         f.sync_all().map_err(|e| self.io(e))?;
         Ok(key)
     }
@@ -184,8 +226,10 @@ impl KeyProvider for FileKeyProvider {
 // Secret Service provider
 // ---------------------------------------------------------------------------
 
+/// On Windows every call fails (no Secret Service; never touches D-Bus).
 pub struct SecretServiceKeyProvider;
 
+#[cfg(not(windows))]
 fn ss_err(e: secret_service::Error) -> KeyError {
     match e {
         secret_service::Error::Unavailable => KeyError::SecretServiceUnavailable("no provider on the session bus".into()),
@@ -196,6 +240,7 @@ fn ss_err(e: secret_service::Error) -> KeyError {
 
 impl SecretServiceKeyProvider {
     /// Cheap probe: is there a session bus with a Secret Service on it?
+    #[cfg(not(windows))]
     pub async fn available() -> bool {
         matches!(
             tokio::time::timeout(Duration::from_secs(5), secret_service::SecretService::connect(secret_service::EncryptionType::Dh)).await,
@@ -203,6 +248,19 @@ impl SecretServiceKeyProvider {
         )
     }
 
+    #[cfg(windows)]
+    pub async fn available() -> bool {
+        false
+    }
+
+    #[cfg(windows)]
+    async fn inner(&self) -> Result<StateKey, KeyError> {
+        Err(KeyError::SecretServiceUnavailable(
+            "there is no Secret Service on Windows; use key_provider = \"auto\" (DPAPI-protected key file)".into(),
+        ))
+    }
+
+    #[cfg(not(windows))]
     async fn inner(&self) -> Result<StateKey, KeyError> {
         use secret_service::{EncryptionType, SecretService};
         let ss = SecretService::connect(EncryptionType::Dh).await.map_err(ss_err)?;
@@ -303,7 +361,11 @@ pub fn provider_for(kind: KeyProviderKind, state_dir: &Path) -> Box<dyn KeyProvi
     match kind {
         KeyProviderKind::File => Box::new(FileKeyProvider::new(state_dir.join(KEY_FILE))),
         KeyProviderKind::SecretService => Box::new(SecretServiceKeyProvider),
+        #[cfg(not(windows))]
         KeyProviderKind::Auto => Box::new(AutoKeyProvider::new(state_dir)),
+        // No Secret Service to try: the DPAPI file is the keyring.
+        #[cfg(windows)]
+        KeyProviderKind::Auto => Box::new(FileKeyProvider::new(state_dir.join(KEY_FILE))),
     }
 }
 
@@ -317,10 +379,16 @@ mod tests {
         let p = FileKeyProvider::new(dir.path().join("sub").join(KEY_FILE));
         let k1 = p.get_or_create().await.unwrap();
         let meta = std::fs::metadata(&p.path).unwrap();
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            assert_eq!(pfs::mode(&meta), Some(0o600));
+            let dmeta = std::fs::metadata(p.path.parent().unwrap()).unwrap();
+            assert_eq!(pfs::mode(&dmeta).unwrap() & 0o077, 0, "state dir must be private");
+        }
+        #[cfg(not(windows))]
         assert_eq!(meta.len(), KEY_LEN as u64);
-        let dmeta = std::fs::metadata(p.path.parent().unwrap()).unwrap();
-        assert_eq!(dmeta.permissions().mode() & 0o077, 0, "state dir must be private");
+        #[cfg(windows)]
+        assert!(meta.len() > KEY_LEN as u64, "DPAPI blob, not the bare key");
         let k2 = p.get_or_create().await.unwrap();
         assert_eq!(k1, k2);
         // Fresh provider instance, same file.
@@ -332,19 +400,20 @@ mod tests {
     async fn file_provider_rejects_corrupt_and_fixes_mode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_FILE);
-        std::fs::write(&path, b"short").unwrap();
+        std::fs::write(&path, seal(b"short").unwrap()).unwrap();
         assert!(matches!(FileKeyProvider::new(&path).get_or_create().await, Err(KeyError::Corrupt(_))));
-        std::fs::write(&path, [7u8; KEY_LEN]).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&path, seal(&[7u8; KEY_LEN]).unwrap()).unwrap();
+        pfs::set_mode(&path, 0o644).unwrap();
         let k = FileKeyProvider::new(&path).get_or_create().await.unwrap();
         assert_eq!(k.as_bytes(), &[7u8; KEY_LEN]);
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(pfs::mode(&std::fs::metadata(&path).unwrap()), Some(0o600));
     }
 
     #[tokio::test]
     async fn auto_prefers_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(KEY_FILE), [9u8; KEY_LEN]).unwrap();
+        std::fs::write(dir.path().join(KEY_FILE), seal(&[9u8; KEY_LEN]).unwrap()).unwrap();
         let k = provider_for(KeyProviderKind::Auto, dir.path()).get_or_create().await.unwrap();
         assert_eq!(k.as_bytes(), &[9u8; KEY_LEN]);
     }
@@ -385,6 +454,23 @@ mod tests {
         // ...and keeps using it afterwards, even once state.enc exists.
         std::fs::write(dir.path().join(crate::state::STATE_FILE), b"x").unwrap();
         assert_eq!(auto_without_ss(dir.path()).get_or_create().await.unwrap(), k);
+    }
+
+    /// Windows: the key file is DPAPI-wrapped, a bare key is not accepted,
+    /// and nothing ever reaches for a Secret Service.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_dpapi_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = provider_for(KeyProviderKind::Auto, dir.path()).get_or_create().await.unwrap();
+        let on_disk = std::fs::read(dir.path().join(KEY_FILE)).unwrap();
+        assert!(!on_disk.windows(KEY_LEN).any(|w| w == k.as_bytes()), "key must not be stored in the clear");
+        assert_eq!(unseal(&on_disk).unwrap(), k.as_bytes());
+        assert_eq!(provider_for(KeyProviderKind::File, dir.path()).get_or_create().await.unwrap(), k);
+        std::fs::write(dir.path().join(KEY_FILE), [7u8; KEY_LEN]).unwrap();
+        assert!(matches!(FileKeyProvider::new(dir.path().join(KEY_FILE)).get_or_create().await, Err(KeyError::Io { .. })));
+        assert!(!SecretServiceKeyProvider::available().await);
+        assert!(matches!(SecretServiceKeyProvider.get_or_create().await, Err(KeyError::SecretServiceUnavailable(_))));
     }
 
     #[test]

@@ -68,11 +68,13 @@ pub const CONFIG_FILE: &str = "config.toml";
 #[serde(rename_all = "kebab-case")]
 pub enum KeyProviderKind {
     /// Secret Service (KWallet / GNOME Keyring), falling back to the file.
+    /// Windows: the (DPAPI) file.
     #[default]
     Auto,
-    /// Secret Service only; fail if unavailable.
+    /// Secret Service only; fail if unavailable (always, on Windows).
     SecretService,
-    /// `state_dir/state.key` (mode 0600) only.
+    /// `state_dir/state.key` (mode 0600) only; Windows:
+    /// `state_dir/state.key.dpapi`, DPAPI-wrapped.
     File,
 }
 
