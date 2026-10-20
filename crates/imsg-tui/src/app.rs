@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use imessage_common::model::{Chat, Handle, Message, MessageId, ReactionKind, Service};
-use imessage_common::platform::desktop::{self, open_with_default};
+use imessage_common::platform::desktop::{self, Opened, open_with_default};
 use imsg_client::{MessagePage, SentMessage, Status, Target};
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
@@ -537,10 +537,10 @@ impl App {
         });
         if atts.is_empty() {
             match url {
-                Some(u) => {
-                    open_with_default(&u);
-                    self.set_status(format!("opened {u}"));
-                }
+                Some(u) => match open_with_default(&u) {
+                    Ok(_) => self.set_status(format!("opened {u}")),
+                    Err(e) => self.set_status(format!("cannot open {u}: {e}")),
+                },
                 None => self.set_status("nothing to open on this message"),
             }
             return;
@@ -552,8 +552,12 @@ impl App {
             for (id, _, name, _) in atts {
                 match b.download(&id.0).await {
                     Ok(p) => {
-                        open_with_default(&p.to_string_lossy());
-                        let _ = tx.send(AppEvent::Notice(format!("opened {name}")));
+                        let notice = match open_with_default(&p.to_string_lossy()) {
+                            Ok(Opened::Target) => format!("opened {name}"),
+                            Ok(Opened::Folder) => format!("{name}: not a known document type, opened its folder"),
+                            Err(e) => format!("{name}: cannot open: {e}"),
+                        };
+                        let _ = tx.send(AppEvent::Notice(notice));
                     }
                     Err(e) => {
                         let _ = tx.send(AppEvent::Notice(format!("{name}: {e}")));

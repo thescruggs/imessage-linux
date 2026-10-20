@@ -150,7 +150,9 @@ const MAX_COMPONENT_BYTES: usize = 200;
 
 /// A single path component safe to create under our attachments dir:
 /// no separators, no leading dots, no control characters, at most
-/// [`MAX_COMPONENT_BYTES`] bytes (cut on a char boundary).
+/// [`MAX_COMPONENT_BYTES`] bytes (cut on a char boundary). On Windows also
+/// no trailing dots / spaces and no device name
+/// ([`pfs::platform_safe_component`]).
 fn safe_component(s: &str, fallback: &str) -> String {
     let base = s.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base.chars().map(|c| if c.is_control() || c == ':' { '_' } else { c }).collect();
@@ -162,7 +164,8 @@ fn safe_component(s: &str, fallback: &str) -> String {
         }
         cleaned = cleaned[..end].trim_end();
     }
-    if cleaned.is_empty() { fallback.to_string() } else { cleaned.to_string() }
+    let cleaned = pfs::platform_safe_component(cleaned);
+    if cleaned.is_empty() { fallback.to_string() } else { cleaned }
 }
 
 /// Copy `src` to `dest` atomically (temp file in `dest`'s directory, mode
@@ -1290,6 +1293,15 @@ mod tests {
         assert!(c.len() <= MAX_COMPONENT_BYTES, "{} bytes", c.len());
         assert!(c.chars().all(|ch| ch == 'é'));
         assert_eq!(safe_component(&"a".repeat(1000), "x").len(), MAX_COMPONENT_BYTES);
+        #[cfg(windows)]
+        {
+            assert_eq!(safe_component("evil.exe. .", "x"), "evil.exe");
+            assert_eq!(safe_component("nul.png", "x"), "_nul.png");
+            assert_eq!(safe_component("CON", "x"), "_CON");
+            assert_eq!(safe_component(".. .", "x"), "x");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(safe_component("CON.", "x"), "CON.");
     }
 
     /// B1: a panicking background fetch does not leave its chat claimed.

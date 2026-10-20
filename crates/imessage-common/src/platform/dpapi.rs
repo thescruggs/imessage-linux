@@ -13,7 +13,7 @@ fn blob(data: &[u8]) -> io::Result<CRYPT_INTEGER_BLOB> {
     Ok(CRYPT_INTEGER_BLOB { cbData: len, pbData: data.as_ptr().cast_mut() })
 }
 
-/// Copy out and free a blob DPAPI allocated.
+/// Copy out, wipe and free a blob DPAPI allocated.
 ///
 /// SAFETY: `out` must come from a successful CryptProtectData /
 /// CryptUnprotectData call (LocalAlloc'd, `cbData` bytes).
@@ -21,6 +21,8 @@ unsafe fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
     // SAFETY: per the caller's contract.
     unsafe {
         let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        // The unprotected side is secret: don't leave it in freed memory.
+        std::ptr::write_bytes(out.pbData, 0, out.cbData as usize);
         LocalFree(out.pbData.cast());
         v
     }

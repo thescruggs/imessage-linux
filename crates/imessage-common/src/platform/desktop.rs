@@ -1,29 +1,43 @@
 //! Handing a file or URL to the desktop's default application, and the
 //! system clipboard (`imsg-tui`).
 
+/// What [`open_with_default`] handed to the desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// The file or URL itself.
+    Target,
+    /// The folder holding the file (Windows: a type that is not known to be
+    /// a document could run as a program, see [`viewable`]).
+    Folder,
+}
+
 /// Open `target` (a path or a URL; callers vet URLs) with the default
-/// application, fire and forget. Unix: `xdg-open`. Windows: `ShellExecuteW`
-/// "open" on a helper thread (which is what `start` does, without cmd.exe's
-/// parsing of `&` and `^` in URLs). "Opening" a program there runs it, so a
-/// file that would run ([`runs_as_program`]) gets its folder opened instead.
-pub fn open_with_default(target: &str) {
+/// application. Unix: spawns `xdg-open` and does not wait. Windows:
+/// `ShellExecuteW` "open" (what `start` does, without cmd.exe's parsing of
+/// `&` and `^` in URLs) on a helper thread that initialises COM, waited
+/// for. "Opening" a program there runs it, so only files of a known
+/// viewable type are opened; for anything else the folder is.
+pub fn open_with_default(target: &str) -> Result<Opened, String> {
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("xdg-open")
+        std::process::Command::new("xdg-open")
             .arg(target)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+            .map(|_| Opened::Target)
+            .map_err(|e| format!("xdg-open: {e}"))
     }
     #[cfg(windows)]
     {
         let path = std::path::Path::new(target);
-        let target = match path.parent() {
-            Some(dir) if !is_web_url(target) && runs_as_program(path) => dir.as_os_str(),
-            _ => std::ffi::OsStr::new(target),
+        let (what, opened) = match path.parent() {
+            Some(dir) if !is_web_url(target) && !viewable(path) && !dir.as_os_str().is_empty() => (dir.as_os_str(), Opened::Folder),
+            _ => (std::ffi::OsStr::new(target), Opened::Target),
         };
-        let target: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(target).chain(std::iter::once(0)).collect();
-        std::thread::spawn(move || shell_open(&target));
+        let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(what).chain(std::iter::once(0)).collect();
+        std::thread::spawn(move || shell_open(&wide)).join().map_err(|_| "ShellExecute panicked".to_string())??;
+        Ok(opened)
     }
 }
 
@@ -33,31 +47,47 @@ fn is_web_url(s: &str) -> bool {
     l.starts_with("https://") || l.starts_with("http://")
 }
 
-/// Would ShellExecute "open" run this file rather than show it? Its
-/// extension is in `%PATHEXT%` or a known script / installer / shortcut type.
-#[cfg(windows)]
-fn runs_as_program(path: &std::path::Path) -> bool {
-    const RUNNABLE: &[&str] = &[
-        "exe", "com", "bat", "cmd", "scr", "pif", "cpl", "msi", "msp", "msc", "hta", "js", "jse", "vbs", "vbe", "wsf", "wsh", "ps1",
-        "psm1", "lnk", "url", "reg", "jar", "appref-ms", "application", "appx", "msix", "inf", "scf", "settingcontent-ms",
+/// Is `path` a picture, video, sound or plain document that "open" shows
+/// rather than runs? An allow-list: everything else (programs, scripts,
+/// shortcuts, installers, Office files with macros, unknown types) is
+/// shown in its folder instead. The name is read as Win32 does, without
+/// trailing dots and spaces (`x.exe.` is `x.exe`).
+pub fn viewable(path: &std::path::Path) -> bool {
+    const VIEWABLE: &[&str] = &[
+        // pictures
+        "jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "bmp", "tif", "tiff", "avif", // video
+        "mp4", "m4v", "mov", "avi", "mkv", "webm", "3gp", // audio
+        "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "amr", "caf", // documents
+        "pdf", "txt", "vcf",
     ];
-    let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) else { return false };
-    let pathext = std::env::var("PATHEXT").unwrap_or_default().to_ascii_lowercase();
-    RUNNABLE.contains(&ext.as_str()) || pathext.split(';').any(|p| p.strip_prefix('.') == Some(ext.as_str()))
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy()) else { return false };
+    let name = name.trim_end_matches(['.', ' ']);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => VIEWABLE.iter().any(|v| v.eq_ignore_ascii_case(ext)),
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
-fn shell_open(target: &[u16]) {
-    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
+fn shell_open(target: &[u16]) -> Result<(), String> {
+    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let open: Vec<u16> = "open\0".encode_utf16().collect();
     // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call;
     // null HWND / parameters / directory are allowed. ShellExecute wants COM
-    // initialised on the calling thread (this short-lived one).
+    // initialised on the calling thread (this short-lived one), balanced by
+    // CoUninitialize.
     unsafe {
-        CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
-        ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), target.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        let hr = CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+        if hr < 0 {
+            return Err(format!("CoInitializeEx failed (0x{hr:08x})"));
+        }
+        let r = ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), target.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        CoUninitialize();
+        // Success is a value greater than 32; below that, an error code.
+        let code = r as isize;
+        if code > 32 { Ok(()) } else { Err(format!("ShellExecute failed (error {code})")) }
     }
 }
 
@@ -89,19 +119,24 @@ pub fn copy_to_clipboard(s: &str) -> Option<&'static str> {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
     #[test]
-    fn programs_are_not_opened() {
-        for p in [r"C:\d\x.exe", r"C:\d\Invoice.PDF.Exe", r"C:\d\a.lnk", r"C:\d\s.ps1", r"C:\d\i.msi"] {
-            assert!(runs_as_program(Path::new(p)), "{p}");
+    fn only_documents_are_opened() {
+        for p in ["/d/photo.JPG", "/d/IMG_1.heic", "/d/a.b.pdf", "/d/clip.mov", "/d/memo.m4a", "/d/card.vcf", "/d/x.webp"] {
+            assert!(viewable(Path::new(p)), "{p}");
         }
-        for p in [r"C:\d\photo.jpg", r"C:\d\doc.pdf", r"C:\d\noext", r"C:\d\movie.mov"] {
-            assert!(!runs_as_program(Path::new(p)), "{p}");
+        for p in ["/d/x.exe", "/d/Invoice.PDF.Exe", "/d/evil.exe.", "/d/evil.exe . ", "/d/a.lnk", "/d/s.ps1", "/d/i.msi", "/d/m.docm", "/d/noext", "/d/.pdf", "/d/x.svg"] {
+            assert!(!viewable(Path::new(p)), "{p}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn web_urls() {
         assert!(is_web_url("HTTPS://example.com/a.exe") && !is_web_url("file:///c:/x.exe"));
     }
 }
