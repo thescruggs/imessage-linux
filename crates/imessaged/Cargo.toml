@@ -29,7 +29,6 @@ keystore = { path = "../../third_party/rustpush/keystore" }
 icloud_auth = { path = "../../third_party/rustpush/third_party/apple-private-apis/icloud-auth", default-features = false, features = ["remote-anisette-v3"] }
 omnisette = { path = "../../third_party/rustpush/third_party/apple-private-apis/omnisette", features = ["remote-anisette-v3"] }
 async-trait = "0.1"
-libc = "0.2"
 # Validating peer-supplied background references before rustpush sees them
 # (same versions rustpush already links).
 base64 = "0.21"
@@ -65,3 +64,6 @@ tempfile = "3"
 futures-util = { version = "0.3", default-features = false }
 serde_json.workspace = true
 
+# mkfifo in the FIFO tests.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

@@ -58,7 +58,7 @@ Builds that need attention on MSVC:
 ## Phases (each ends with the usual independent review, loop until clean)
 
 **W0: CI and compile gate.** *Done 2026-10-20, except the first CI run.*
-`.github/workflows/windows.yml` builds the workspace on `windows-latest` and
+`.github/workflows/ci.yml` builds the workspace on `windows-latest` and
 tests imessage-common, imsg-client and open-absinthe (the imessaged / imsg /
 imsg-tui tests run there too, `continue-on-error` until they are known to be
 Windows-clean); a Linux job runs the usual build, clippy and tests. openssl

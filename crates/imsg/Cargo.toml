@@ -24,11 +24,14 @@ rpassword = "7"
 # Wipes the Apple ID password from memory after use.
 zeroize = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-libc = "0.2"
 # Reads the daemon's config.toml (anisette_url) for `doctor`.
 toml = "0.8"
 # The Mac's pinned-conversations plist (`sync-mac`).
 plist.workspace = true
+
+# SIGPIPE reset (main.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Integration tests run imessaged in-process with MockEngine on a private
