@@ -32,7 +32,13 @@ pub fn open_with_default(target: &str) -> Result<Opened, String> {
     {
         let path = std::path::Path::new(target);
         let (what, opened) = match path.parent() {
-            Some(dir) if !is_web_url(target) && !viewable(path) && !dir.as_os_str().is_empty() => (dir.as_os_str(), Opened::Folder),
+            Some(dir) if !is_web_url(target) && !viewable(path) => {
+                // A bare name has no folder to show; "opening" it could run it.
+                if dir.as_os_str().is_empty() {
+                    return Err(format!("{target}: not a known document type"));
+                }
+                (dir.as_os_str(), Opened::Folder)
+            }
             _ => (std::ffi::OsStr::new(target), Opened::Target),
         };
         let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(what).chain(std::iter::once(0)).collect();
