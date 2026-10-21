@@ -55,6 +55,14 @@ pub fn open(state_dir: &Path) -> io::Result<LogWriter> {
     Ok(LogWriter { file, tee: io::stderr().is_terminal() })
 }
 
+/// Append a fatal startup error (it may come before the logger exists).
+pub fn append_fatal(state_dir: &Path, message: &str) {
+    if let Ok(mut w) = open(state_dir) {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let _ = writeln!(w, "[{now} ERROR imessaged] fatal: {message}");
+    }
+}
+
 /// Move `path` to `path.1` (replacing it) if it is larger than `max`.
 fn rotate(path: &Path, max: u64) -> io::Result<()> {
     match std::fs::metadata(path) {
@@ -88,6 +96,9 @@ mod tests {
         rotate(&p, 4).unwrap(); // nothing there: fine
         let mut w = open(dir.path()).unwrap();
         w.write_all(b"three\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "three\n");
+        drop(w);
+        append_fatal(dir.path(), "no config");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("three\n[") && text.ends_with(" ERROR imessaged] fatal: no config\n"), "{text:?}");
     }
 }

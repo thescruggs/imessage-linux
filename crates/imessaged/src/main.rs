@@ -96,8 +96,18 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    let state_dir = args.state_dir.unwrap_or_else(config::default_state_dir);
+    let mut args = Args::parse();
+    let state_dir = args.state_dir.take().unwrap_or_else(config::default_state_dir);
+    let result = run(args, state_dir.clone()).await;
+    // Windows has no console to print the error on: put it in the log.
+    #[cfg(windows)]
+    if let Err(e) = &result {
+        imessaged::logfile::append_fatal(&state_dir, &format!("{e:#}"));
+    }
+    result
+}
+
+async fn run(args: Args, state_dir: PathBuf) -> anyhow::Result<()> {
     let cfg = DaemonConfig::load(
         state_dir,
         Overrides {
