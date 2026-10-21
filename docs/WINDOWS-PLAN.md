@@ -1,7 +1,9 @@
 # Windows port — plan
 
-Status: **W0 and W1 done** (2026-10-20): the workspace compiles for
-`x86_64-pc-windows-msvc` and the platform layer is in; the IPC transport (W2)
+Status: **W0, W1 and W2 done, W3 in code** (2026-10-20): the workspace
+compiles for Windows, the platform layer is in, clients reach the daemon
+peer-to-peer over `nonce-tcp`, and `imsg setup` / `imsg service` /
+file logging cover a first real run; W3's exit test (a live Windows run)
 is next. Drafted 2026-10-18 from the 0.1.13 tree.
 Goal: the same three clients (`imsg`, `imsg-tui`, kmessages) talking to the same
 `imessaged` engine, running natively on Windows 10/11 (x86_64 first, ARM64
@@ -107,14 +109,74 @@ Original plan (`imessage-common::platform`):
 (systemd | Task Scheduler), `open_url`/`clipboard`. Linux behaviour must not
 change, and the existing tests have to stay green on Linux.
 
-**W2: IPC transport.** Daemon listens peer-to-peer on `nonce-tcp:` (Windows),
+**W2: IPC transport.** *Done 2026-10-20.* `imessaged --transport p2p`
+(`IMESSAGED_TRANSPORT`; the Windows default, `session` stays the Linux
+default and the Linux path is unchanged) serves `org.imessage.Daemon1` to
+each client on its own D-Bus connection over TCP on 127.0.0.1 (ephemeral
+port): 16 random bytes in `<state dir>\bus-nonce` (owner-only) that the
+client must send first (constant-time compare, else the socket is closed),
+then SASL ANONYMOUS (zbus' EXTERNAL over TCP on Windows looks up the peer's
+process token, which fails for an elevated client; the nonce is the
+authentication), and the address
+`nonce-tcp:host=127.0.0.1,port=N,noncefile=...,guid=...` in
+`<state dir>\bus-address`, both replaced atomically at start and removed
+at shutdown. Signals go out on every live connection (`dbus/peer.rs`
+`Peers::emit`; a client that does not take one within 5 s is
+disconnected). `imessaged.lock` in the state directory keeps a second
+daemon off it, checked before the engine starts. `imsg-client`'s
+`Bus::Peer` re-reads `bus-address` at every connect (clear "not running"
+errors pointing at `imsg service start`); `imsg` / `imsg-tui` use it by
+default on Windows; the TUI notices the connection closing and reconnects
+after a daemon restart. Tests run the transport on Linux (no dbus-daemon
+needed): `crates/imessaged/tests/p2p.rs` (two clients + fan-out, wrong and
+missing nonce, single instance, restart), the TUI reconnect, and the `imsg`
+CLI through `IMESSAGED_TRANSPORT=p2p`. Contract: docs/DBUS.md, "Peer-to-peer
+transport". kmessages (QtDBus) can use the same address later (W4).
+
+Original plan: Daemon listens peer-to-peer on `nonce-tcp:` (Windows),
 keeping the session bus on Linux; `imsg-client` reads the address from
 `%LOCALAPPDATA%\imessaged\bus-address`. Multiple clients at once (kmessages
 + imsg + TUI) means one p2p connection per client; check signal fan-out
 (the daemon's hub already broadcasts). Security: listen on 127.0.0.1 only,
 nonce file user-only, no anonymous auth.
 
-**W3: daemon on Windows.** `imsg hwconfig import`, `imsg login` (2FA),
+**W3: daemon on Windows.** *In code 2026-10-20; the live run is open.*
+What a first real run needs:
+* Apple files: `imsg setup` downloads and verifies `IMDAppleServices` and
+  `cert-1.0.plist` into `%LOCALAPPDATA%\imessage-linux` (same URLs and
+  hashes as bootstrap.sh, a test keeps them in sync); `imsg setup --from
+  <dir>` copies them from a folder (e.g. the Linux box's
+  `~/.local/share/imessage-linux`). The doctor's hints name it on Windows.
+* Autostart: `imsg service install [--exe <imessaged.exe>]` creates the
+  per-user Task Scheduler task `imessaged` (XML via `schtasks /Create /XML`:
+  logon trigger repeating every 5 minutes with `IgnoreNew`, which restarts
+  a crashed daemon, since Task Scheduler's restart-on-failure ignores exit
+  codes; no time limit; interactive token, least privilege) and starts it;
+  `start` / `stop` (= disable + end, so the repetition does not bring it
+  back) / `status` / `uninstall`. On Linux the same subcommands are
+  `systemctl --user` on the packaged unit. `imsg doctor` on Windows reports
+  the task, whether the daemon listens, and the log path.
+* No console: release `imessaged.exe` is `windows_subsystem = "windows"`
+  (a console program started by the task would keep a console window or
+  Windows Terminal tab open), logs to `%LOCALAPPDATA%\imessaged\logs\
+  imessaged.log` (rotated at 10 MB at start; panics included), and
+  `shell_command` spawns cmd.exe with `CREATE_NO_WINDOW` so anisette runs
+  do not flash a console. Without a console there is no Ctrl+C / logoff
+  event: the task's End or the session ending kills it (SQLite WAL, atomic
+  state saves). A debug build keeps its console.
+* Anisette over Windows OpenSSH: cmd.exe does not expand `~`, so
+  `shell_command` expands a word-initial `~/` to `%USERPROFILE%` (quoted
+  if it has spaces): the Linux `ssh -F ~/.ssh/config ...` line works
+  unchanged. The doctor drops the sandbox / SSH_AUTH_SOCK advice on
+  Windows, checks for `ssh.exe` and `BatchMode=yes`, and explains failures
+  (OpenSSH Authentication Agent + `ssh-add`, or 1Password's agent; host
+  key; name resolution). Child output parsing tolerates CRLF (`lines()`,
+  serde_json).
+* Not done: a same-identity warning (the doctor cannot see the other
+  install, so it would be noise); a D-Bus `Shutdown` method for a
+  graceful `imsg service stop`.
+
+Original plan: `imsg hwconfig import`, `imsg login` (2FA),
 register, APNs receive loop, send/receive/attachments, Text Message
 Forwarding, link previews. Task Scheduler autostart + restart. Logs to
 `%LOCALAPPDATA%\imessaged\logs` with the existing redaction. **Exit:**
@@ -143,6 +205,8 @@ Prism), and long-path/Unicode filenames for attachments.
    active install per hwconfig (the doctor checks and warns), a second Mac's
    hwconfig for Windows, or treat Windows as a dual-boot of the same install
    (copy state and keystore). Decide before W3; test with a throwaway Apple ID first.
+   *2026-10-20:* the user accepts the risk and runs the same hwconfig and
+   Apple ID on Linux and Windows; watch for registration flip-flops.
 2. **Defender / SmartScreen.** Running a Mach-O image under unicorn and
    talking to Apple private endpoints can look like malware heuristics. Mitigate
    with signed binaries, a stable publisher and a submission to Microsoft.

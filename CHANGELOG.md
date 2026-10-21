@@ -40,6 +40,25 @@
   Ctrl+C, console close, logoff and shutdown. The NAC emulator produces
   the same 338-byte request on Windows (checked under wine). No change on
   Linux.
+* **Windows: clients reach the daemon, and a first real run is set up**
+  ([docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md), W2 and W3). Windows has no
+  session bus, so there `imessaged` serves the same API peer-to-peer: each
+  client gets its own D-Bus connection on 127.0.0.1, authenticated by a
+  random nonce in the user's state directory (`bus-nonce`; the address is
+  in `bus-address`), every signal goes to every client, and a second
+  daemon on the same state directory refuses to start. `imsg` and
+  `imsg-tui` find it on their own and reconnect after a daemon restart
+  (`IMESSAGED_TRANSPORT=p2p` / `imessaged --transport p2p` selects this on
+  Linux too; the tests use it). New **`imsg setup`** downloads and
+  verifies Apple's `IMDAppleServices` and `cert-1.0.plist` like
+  `tools/bootstrap.sh` (or `--from <dir>` copies them), and **`imsg
+  service install|uninstall|status|start|stop`** manages a per-user logon
+  task on Windows (`systemctl --user` on Linux). On Windows the release
+  daemon has no console window and logs to
+  `%LOCALAPPDATA%\imessaged\logs\imessaged.log`, `~/` in
+  `anisette_command` is expanded for cmd.exe (the Linux `ssh -F
+  ~/.ssh/config ...` line works unchanged), and `imsg doctor` checks the
+  logon task and gives Windows ssh / agent hints. No change on Linux.
 * **Refactor: `imsg-client` crate.** The D-Bus proxy and typed client
   that `imsg` had in `client.rs` are now a small library crate shared by
   `imsg` and `imsg-tui` (no behaviour change for `imsg`).
