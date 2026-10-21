@@ -58,7 +58,11 @@ Linux too; `session` selects the bus on Windows):
   `bus-address` again (it changes at every start). Method calls may carry
   the destination `org.imessage.Daemon1`; it is ignored;
 * a second daemon on the same state directory fails at start
-  (`imessaged.lock` there is held while one runs).
+  (`imessaged.lock` there is held, with `LockFileEx` / `flock`, from before
+  the engine starts until the process has shut down: `imsg service stop`
+  calls `Shutdown` and waits for the lock to be released); a
+  `bus-address` left by a crashed daemon is removed before the new nonce
+  is written.
 
 ## Activation
 
@@ -119,6 +123,7 @@ fails during an interactive `Login`, the call fails at once with
 | `ImportMessages` | `batch_json s` | `s` | One-time history import ([ImportBatch](#importbatch) in, [ImportResult](#importresult) out); used by `imsg import-mac`. Insert-only and idempotent by message id: a message the store already has is skipped and left unchanged. Every chat id and handle must be valid (see below), else `InvalidInput` naming the first bad value and nothing is stored. Slow (copies files): call with a 120 s timeout. |
 | `PurgeInvalidChats` | `dry_run b` | `s` | Maintenance (`imsg store purge-invalid-chats`): deletes every chat whose id is not a valid chat id (a `mailto:` / `tel:` URI, `group:<GUID>` or `group-p:<URIs>`; e.g. raw Mac SMS handles like `46339(smsft)` left by an old import) with its messages, reactions, attachment rows and the copied files under `$STATE_DIR/attachments/` (and background files), plus handle rows with an invalid URI no remaining chat lists. `dry_run = true` deletes nothing and reports what would go. Returns a [PurgeSummary](#purgesummary). No signals (only logged): clients should reload their chat list afterwards. |
 | `Version` | — | `s` | daemon version, e.g. `"0.1.0"` |
+| `Shutdown` | — | — | stop the daemon as SIGTERM does (engine closes APNs / IDS and saves its state, the store is closed); replies first, the process exits a few seconds later. For Windows, where nothing else stops it gracefully (`imsg service stop` / `uninstall`). On Linux harmless: the systemd unit has `Restart=on-failure`, so a clean exit stays stopped until `systemctl --user start` or D-Bus activation |
 
 ## Properties
 

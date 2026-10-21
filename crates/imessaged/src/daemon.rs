@@ -24,6 +24,7 @@ pub struct Daemon {
     engine: Arc<dyn Engine>,
     store: Option<StoreHandle>,
     bus: Option<BusChoice>,
+    peer_lock: Option<Arc<crate::dbus::peer::DirLock>>,
     typing_timeout: Duration,
 }
 
@@ -58,12 +59,12 @@ impl Daemon {
             ),
             other => anyhow::anyhow!("cannot load {}: {other}", cfg.state_path().display()),
         })?;
-        Ok(Daemon { cfg, engine: Arc::new(engine), store: Some(StoreHandle::new(store)), bus: None, typing_timeout: DEFAULT_TYPING_TIMEOUT })
+        Ok(Daemon { cfg, engine: Arc::new(engine), store: Some(StoreHandle::new(store)), bus: None, peer_lock: None, typing_timeout: DEFAULT_TYPING_TIMEOUT })
     }
 
     /// Any engine, no store, no D-Bus (events are only logged).
     pub fn with_engine(cfg: DaemonConfig, engine: Arc<dyn Engine>) -> Daemon {
-        Daemon { cfg, engine, store: None, bus: None, typing_timeout: DEFAULT_TYPING_TIMEOUT }
+        Daemon { cfg, engine, store: None, bus: None, peer_lock: None, typing_timeout: DEFAULT_TYPING_TIMEOUT }
     }
 
     pub fn with_store(mut self, store: StoreHandle) -> Daemon {
@@ -74,6 +75,13 @@ impl Daemon {
     /// Serve the D-Bus API (requires a store).
     pub fn with_dbus(mut self, bus: BusChoice) -> Daemon {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Peer-to-peer: the state directory's lock, already taken (main
+    /// takes it before the engine starts and holds it until exit).
+    pub fn with_peer_lock(mut self, lock: Arc<crate::dbus::peer::DirLock>) -> Daemon {
+        self.peer_lock = Some(lock);
         self
     }
 
@@ -104,7 +112,7 @@ impl Daemon {
         hub.delete_empty_groups().await;
         hub.seed_engine_chats().await;
         let conn = match &self.bus {
-            Some(bus) => match crate::dbus::serve(hub.clone(), bus).await {
+            Some(bus) => match crate::dbus::serve(hub.clone(), bus, self.peer_lock.clone()).await {
                 Ok(c) => Some(c),
                 Err(e) => {
                     // Leave everything persisted before failing startup.
@@ -122,10 +130,15 @@ impl Daemon {
         Ok(RunningDaemon { hub, engine: self.engine, store: self.store, conn, pump, stop: stop_tx })
     }
 
-    /// Run until `shutdown` resolves, then shut down in order.
+    /// Run until `shutdown` resolves or a client calls `Shutdown`, then
+    /// shut down in order.
     pub async fn run_until(self, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
         let running = self.start().await?;
-        shutdown.await;
+        let hub = running.hub();
+        tokio::select! {
+            _ = shutdown => {}
+            _ = hub.shutdown_requested() => log::info!("shutdown requested over D-Bus"),
+        }
         running.shutdown().await
     }
 }
@@ -349,9 +362,10 @@ pub async fn shutdown_signal() {
 /// Resolves on Ctrl+C / Ctrl+Break, the console window closing, or the
 /// user logging off / the system shutting down. Windows gives a console
 /// process only a few seconds after the last three before killing it. A
-/// release build has no console (main.rs): none of these arrive, and the
-/// daemon ends when the logon task is stopped or the session ends (the
-/// store is SQLite with a WAL and state saves are atomic, so that is safe).
+/// release build has no console (main.rs): none of these arrive; it stops
+/// gracefully on D-Bus `Shutdown` (`imsg service stop`), and is killed when
+/// the session ends (the store is SQLite with a WAL and state saves are
+/// atomic, so that is safe).
 /// A handler that cannot be installed is skipped.
 #[cfg(windows)]
 pub async fn shutdown_signal() {

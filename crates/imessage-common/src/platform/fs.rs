@@ -93,13 +93,14 @@ pub fn open_regular_file(path: &Path) -> io::Result<File> {
 
 /// Take an exclusive lock on `path` (created owner-only if missing) for as
 /// long as the returned file stays open; `Ok(None)` if another process
-/// holds it. Unix: `flock(LOCK_EX | LOCK_NB)`. Windows: the file opened
-/// with no sharing, so a second open fails with a sharing violation.
+/// holds it. Unix: `flock(LOCK_EX | LOCK_NB)`. Windows: `LockFileEx`
+/// (exclusive, fail immediately) on a normally shared handle, so a virus
+/// scanner or indexer opening the file is not mistaken for a holder.
 pub fn lock_exclusive(path: &Path) -> io::Result<Option<File>> {
+    let f = private_options().read(true).write(true).create(true).truncate(false).open(path)?;
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let f = private_options().read(true).write(true).create(true).truncate(false).open(path)?;
         // SAFETY: `f` owns a valid descriptor for the duration of the call.
         if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(Some(f));
@@ -109,13 +110,20 @@ pub fn lock_exclusive(path: &Path) -> io::Result<Option<File>> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        const ERROR_SHARING_VIOLATION: i32 = 32;
-        match private_options().read(true).write(true).create(true).truncate(false).share_mode(0).open(path) {
-            Ok(f) => Ok(Some(f)),
-            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Ok(None),
-            Err(e) => Err(e),
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx};
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        // SAFETY: zeroed OVERLAPPED = lock from offset 0; `f` owns a valid
+        // handle for the duration of the call. The lock goes with the handle.
+        let ok = unsafe {
+            let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+            LockFileEx(f.as_raw_handle(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut ov)
+        };
+        if ok != 0 {
+            return Ok(Some(f));
         }
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) { Ok(None) } else { Err(e) }
     }
 }
 

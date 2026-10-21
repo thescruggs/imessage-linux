@@ -180,15 +180,19 @@ async fn run(args: Args, state_dir: PathBuf) -> anyhow::Result<()> {
         Transport::SessionBus => BusChoice::Session,
         Transport::PeerToPeer => BusChoice::Peer(cfg.state_dir.clone()),
     };
-    // Peer-to-peer has no bus name to claim: refuse a second daemon before
-    // it starts a second engine on the same state (serving takes the lock
-    // for good).
-    if let (BusChoice::Peer(dir), false) = (&bus, args.no_dbus) {
-        imessaged::dbus::peer::check_not_running(dir)?;
-    }
+    // Peer-to-peer has no bus name to claim: take the state directory's
+    // lock before a second engine could start on the same state, and hold
+    // it until everything is shut down (its release = the daemon is gone).
+    let peer_lock = match (&bus, args.no_dbus) {
+        (BusChoice::Peer(dir), false) => Some(imessaged::dbus::peer::lock_dir(dir)?),
+        _ => None,
+    };
     let mut daemon = Daemon::new(cfg).await?;
     if !args.no_dbus {
         daemon = daemon.with_dbus(bus);
+    }
+    if let Some(lock) = &peer_lock {
+        daemon = daemon.with_peer_lock(lock.clone());
     }
     daemon.run_until(shutdown_signal()).await
 }

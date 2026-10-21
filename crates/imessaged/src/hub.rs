@@ -258,6 +258,9 @@ pub struct Hub {
     typing: Typing,
     typing_timeout: Duration,
     stop: watch::Sender<bool>,
+    /// Set by the D-Bus `Shutdown` method; the daemon then stops as on
+    /// SIGTERM (`Daemon::run_until`).
+    quit: watch::Sender<bool>,
     /// IDS reachability answers (handle -> (on iMessage, when asked)) for
     /// choosing between iMessage and SMS.
     reachability: Mutex<HashMap<String, (bool, Instant)>>,
@@ -282,6 +285,7 @@ impl Hub {
             typing: Typing::default(),
             typing_timeout,
             stop: watch::channel(false).0,
+            quit: watch::channel(false).0,
             reachability: Mutex::new(HashMap::new()),
             mac_host: Mutex::new(None),
             link_previews: Mutex::new(None),
@@ -346,6 +350,17 @@ impl Hub {
 
     pub(crate) fn set_bus(&self, e: Option<crate::dbus::Emitter>) {
         *self.bus.lock().unwrap_or_else(|p| p.into_inner()) = e;
+    }
+
+    /// Ask the daemon to shut down (D-Bus `Shutdown`).
+    pub fn request_shutdown(&self) {
+        self.quit.send_replace(true);
+    }
+
+    /// Resolves once [`Hub::request_shutdown`] was called.
+    pub async fn shutdown_requested(&self) {
+        let mut rx = self.quit.subscribe();
+        let _ = rx.wait_for(|q| *q).await;
     }
 
     pub(crate) fn stop(&self) {

@@ -282,6 +282,14 @@ impl Daemon1 {
         Ok(to_json(&self.hub.purge_invalid_chats(dry_run).await?))
     }
 
+    /// Stop the daemon the way SIGTERM does (engine state saved, store
+    /// closed); replies first. For Windows, where nothing else can stop it
+    /// gracefully (`imsg service stop`). A supervisor may start it again.
+    async fn shutdown(&self) {
+        log::info!("Shutdown called");
+        self.hub.request_shutdown();
+    }
+
     fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
@@ -374,13 +382,14 @@ async fn emit_on(iface: &InterfaceRef<Daemon1>, sig: &DaemonSignal) -> zbus::Res
 /// Connect, export the object, claim the well-known name (fails if another
 /// imessaged owns it) and attach the emitter to `hub`. Peer-to-peer: start
 /// listening (fails if another imessaged uses the directory).
-pub async fn serve(hub: Arc<Hub>, bus: &BusChoice) -> anyhow::Result<Server> {
+/// `peer_lock`: the state directory's lock if the caller already holds it.
+pub async fn serve(hub: Arc<Hub>, bus: &BusChoice, peer_lock: Option<Arc<peer::DirLock>>) -> anyhow::Result<Server> {
     let which = if *bus == BusChoice::Session { "session bus" } else { "bus" };
     let builder = match bus {
         BusChoice::Session => connection::Builder::session(),
         BusChoice::Address(a) => connection::Builder::address(a.as_str()),
         BusChoice::Peer(dir) => {
-            let (server, peers) = peer::serve(hub.clone(), dir).await?;
+            let (server, peers) = peer::serve(hub.clone(), dir, peer_lock).await?;
             hub.set_bus(Some(Emitter::Peers(peers)));
             return Ok(Server::Peer(server));
         }

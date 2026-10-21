@@ -88,24 +88,27 @@ impl Peers {
         self.lock().len()
     }
 
-    /// Send `sig` on every connection, one after the other, each bounded
-    /// by [`SIGNAL_TIMEOUT`]. A closed connection is skipped (its task
+    /// Send `sig` on every connection at once, each bounded by
+    /// [`SIGNAL_TIMEOUT`], and return when all are done (so per client the
+    /// signals stay in order). A closed connection is skipped (its task
     /// removes it); a stuck one is closed.
     pub(crate) async fn emit(&self, sig: &DaemonSignal) {
-        let peers: Vec<(u64, Arc<Peer>)> = self.lock().iter().map(|(id, p)| (*id, p.clone())).collect();
+        let peers: Vec<(u64, Arc<Peer>)> = self.lock().iter().filter(|(_, p)| !p.conn.is_closed()).map(|(id, p)| (*id, p.clone())).collect();
+        let mut sends = tokio::task::JoinSet::new();
         for (id, p) in peers {
-            if p.conn.is_closed() {
-                continue;
-            }
-            match tokio::time::timeout(SIGNAL_TIMEOUT, super::emit_on(&p.iface, sig)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => log::debug!("p2p: signal not sent to client {id}: {e}"),
-                Err(_) => {
-                    log::warn!("p2p: client {id} took no signal within {} s; disconnecting it", SIGNAL_TIMEOUT.as_secs());
-                    let _ = p.conn.clone().close().await;
+            let sig = sig.clone();
+            sends.spawn(async move {
+                match tokio::time::timeout(SIGNAL_TIMEOUT, super::emit_on(&p.iface, &sig)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::debug!("p2p: signal not sent to client {id}: {e}"),
+                    Err(_) => {
+                        log::warn!("p2p: client {id} took no signal within {} s; disconnecting it", SIGNAL_TIMEOUT.as_secs());
+                        let _ = p.conn.clone().close().await;
+                    }
                 }
-            }
+            });
         }
+        while sends.join_next().await.is_some() {}
     }
 }
 
@@ -116,7 +119,7 @@ pub struct PeerServer {
     nonce_file: PathBuf,
     peers: Arc<Peers>,
     accept: JoinHandle<()>,
-    _lock: File,
+    _lock: Arc<DirLock>,
 }
 
 /// The read half of an accepted TCP stream, offering ANONYMOUS and no peer
@@ -141,17 +144,27 @@ impl ReadHalf for NonceTcpRead {
     }
 }
 
-/// Take the state directory's lock (created owner-only).
-fn lock_dir(dir: &Path) -> anyhow::Result<File> {
+/// The state directory's lock (`imessaged.lock`), held while a
+/// peer-to-peer daemon runs. `imessaged` takes it before starting the
+/// engine and keeps it until the process has shut down, so a released lock
+/// means the daemon is gone (what `imsg service stop` waits for).
+pub struct DirLock {
+    _file: File,
+}
+
+/// Take the state directory's lock (created owner-only); fails if another
+/// daemon holds it.
+pub fn lock_dir(dir: &Path) -> anyhow::Result<Arc<DirLock>> {
     crate::state::ensure_private_dir(dir).map_err(|e| anyhow::anyhow!("cannot create {}: {e}", dir.display()))?;
     let lock_path = dir.join(LOCK_FILE);
-    pfs::lock_exclusive(&lock_path).map_err(|e| anyhow::anyhow!("cannot lock {}: {e}", lock_path.display()))?.ok_or_else(|| {
+    let file = pfs::lock_exclusive(&lock_path).map_err(|e| anyhow::anyhow!("cannot lock {}: {e}", lock_path.display()))?.ok_or_else(|| {
         anyhow::anyhow!(
             "another imessaged is already running for {} (it holds {}); stop it first (`imsg service stop`)",
             dir.display(),
             lock_path.display()
         )
-    })
+    })?;
+    Ok(Arc::new(DirLock { _file: file }))
 }
 
 /// Fail if another daemon serves from `dir` (the lock is released again).
@@ -159,10 +172,22 @@ pub fn check_not_running(dir: &Path) -> anyhow::Result<()> {
     lock_dir(dir).map(drop)
 }
 
-/// Lock the state directory, write the nonce and address files and start
-/// accepting clients.
-pub(crate) async fn serve(hub: Arc<Hub>, dir: &Path) -> anyhow::Result<(PeerServer, Arc<Peers>)> {
-    let lock = lock_dir(dir)?;
+/// Lock the state directory (unless `lock` is already held for it), write
+/// the nonce and address files and start accepting clients.
+pub(crate) async fn serve(hub: Arc<Hub>, dir: &Path, lock: Option<Arc<DirLock>>) -> anyhow::Result<(PeerServer, Arc<Peers>)> {
+    let lock = match lock {
+        Some(l) => l,
+        None => lock_dir(dir)?,
+    };
+    // An address left by a daemon that crashed points at a port someone
+    // else may own by now: remove it before the new nonce exists, so no
+    // client can send that nonce there.
+    let address_file = dir.join(BUS_ADDRESS_FILE);
+    match std::fs::remove_file(&address_file) {
+        Ok(()) => log::info!("removed a stale {}", address_file.display()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => anyhow::bail!("cannot remove the stale {}: {e}", address_file.display()),
+    }
 
     let mut nonce = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -173,7 +198,6 @@ pub(crate) async fn serve(hub: Arc<Hub>, dir: &Path) -> anyhow::Result<(PeerServ
     let port = listener.local_addr()?.port();
     let guid = zbus::Guid::generate();
     let address = ipc::nonce_tcp_address(port, &nonce_file, guid.as_str());
-    let address_file = dir.join(BUS_ADDRESS_FILE);
     crate::state::atomic_write(&address_file, format!("{address}\n").as_bytes())
         .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", address_file.display()))?;
 
@@ -258,7 +282,8 @@ impl PeerServer {
     }
 
     /// Stop accepting, disconnect every client and remove the address and
-    /// nonce files (the lock goes with `self`).
+    /// nonce files (the lock goes with `self`, unless `imessaged` holds it
+    /// too).
     pub(crate) async fn stop(self) {
         self.accept.abort();
         self.peers.stopped.store(true, Ordering::SeqCst);
