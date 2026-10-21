@@ -190,18 +190,35 @@ mod tests {
         assert_eq!(h["X-Apple-I-TimeZone"], "UTC");
     }
 
+    /// The same three commands for `sh -c` and (Windows) `cmd.exe /c`,
+    /// whose output also ends in CRLF.
+    #[cfg(not(windows))]
+    const SHELL_CASES: [&str; 3] = [
+        r#"printf '{"X-Apple-I-MD":"otp","X-Apple-I-MD-M":"mid"}'"#,
+        "echo nope >&2; exit 3",
+        "echo 'X-Apple-I-MD: c2VjcmV0c2VjcmV0c2VjcmV0MTIz' >&2; exit 1",
+    ];
+    #[cfg(windows)]
+    const SHELL_CASES: [&str; 3] = [
+        r#"echo {"X-Apple-I-MD":"otp","X-Apple-I-MD-M":"mid"}"#,
+        "echo nope 1>&2 & exit 3",
+        "echo X-Apple-I-MD: c2VjcmV0c2VjcmV0c2VjcmV0MTIz 1>&2 & exit 1",
+    ];
+
     #[tokio::test]
     async fn command_provider_runs_shell() {
-        let p = CommandAnisetteProvider::new(r#"printf '{"X-Apple-I-MD":"otp","X-Apple-I-MD-M":"mid"}'"#.into());
+        let [ok, fails, leaks] = SHELL_CASES;
+        let p = CommandAnisetteProvider::new(ok.into());
         let h = p.fetch().await.unwrap();
         assert_eq!(h["X-Apple-I-MD-M"], "mid");
         assert!(h.contains_key("X-Apple-I-Client-Time"));
 
-        let bad = CommandAnisetteProvider::new("echo nope >&2; exit 3".into());
+        let bad = CommandAnisetteProvider::new(fails.into());
         let e = bad.fetch().await.unwrap_err().to_string();
-        assert_eq!(e, "anisette command failed: exit status: 3: nope");
+        // Unix: "exit status: 3", Windows: "exit code: 3".
+        assert!(e.starts_with("anisette command failed: exit ") && e.ends_with(" 3: nope"), "{e}");
 
-        let leaky = CommandAnisetteProvider::new("echo 'X-Apple-I-MD: c2VjcmV0c2VjcmV0c2VjcmV0MTIz' >&2; exit 1".into());
+        let leaky = CommandAnisetteProvider::new(leaks.into());
         let e = leaky.fetch().await.unwrap_err().to_string();
         assert!(!e.contains("c2VjcmV0") && e.contains(redact::REDACTED), "{e}");
     }

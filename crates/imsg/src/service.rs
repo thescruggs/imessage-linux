@@ -305,10 +305,12 @@ mod imp {
         lines.push(match query_xml() {
             None => line("autostart", Level::Warn, format!("no logon task {NAME}; run `imsg service install` (the installer does this)")),
             Some(xml) => {
-                let cmd = xml.split("<Command>").nth(1).and_then(|r| r.split("</Command>").next()).unwrap_or("?").trim().to_string();
-                match settings_enabled(&xml) {
-                    Some(false) => line("autostart", Level::Warn, format!("logon task {NAME} is disabled (`imsg service stop`); `imsg service start` turns it on")),
-                    _ => line("autostart", Level::Ok, format!("logon task {NAME} runs {cmd}")),
+                let cmd = xml.split("<Command>").nth(1).and_then(|r| r.split("</Command>").next()).map(str::trim);
+                match (settings_enabled(&xml), cmd) {
+                    (Some(false), _) => line("autostart", Level::Warn, format!("logon task {NAME} is disabled (`imsg service stop`); `imsg service start` turns it on")),
+                    (Some(true), Some(cmd)) => line("autostart", Level::Ok, format!("logon task {NAME} runs {cmd}")),
+                    // Anything we cannot read is not a confirmed setup.
+                    _ => line("autostart", Level::Warn, format!("logon task {NAME}: state unknown (unexpected `schtasks /Query` output); check Task Scheduler or re-run `imsg service install`")),
                 }
             }
         });
