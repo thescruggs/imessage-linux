@@ -39,4 +39,4 @@ libc = "0.2"
 imessaged = { path = "../imessaged" }
 tempfile = "3"
 # The integration tests open their own bus connection.
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }

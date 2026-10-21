@@ -134,7 +134,7 @@ pub struct RunningDaemon {
     hub: Arc<Hub>,
     engine: Arc<dyn Engine>,
     store: Option<StoreHandle>,
-    conn: Option<zbus::Connection>,
+    conn: Option<crate::dbus::Server>,
     pump: JoinHandle<()>,
     stop: watch::Sender<bool>,
 }
@@ -152,15 +152,27 @@ impl RunningDaemon {
         self.store.clone()
     }
 
-    /// The bus connection (tests: its unique name / address).
+    /// The bus connection (tests: its unique name / address); `None` when
+    /// serving peer-to-peer.
     pub fn dbus(&self) -> Option<&zbus::Connection> {
-        self.conn.as_ref()
+        match &self.conn {
+            Some(crate::dbus::Server::Bus(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The peer-to-peer address clients use (`BusChoice::Peer`).
+    pub fn peer_address(&self) -> Option<&str> {
+        match &self.conn {
+            Some(crate::dbus::Server::Peer(p)) => Some(p.address()),
+            _ => None,
+        }
     }
 
     /// Shutdown order: engine (persists its state; may emit final events) ->
     /// drain and stop the event pump (so those events still reach the store
-    /// and signals) -> release the D-Bus name -> checkpoint and close the
-    /// store.
+    /// and signals) -> release the D-Bus name (peer-to-peer: disconnect the
+    /// clients) -> checkpoint and close the store.
     pub async fn shutdown(self) -> anyhow::Result<()> {
         log::info!("shutting down");
         self.engine.shutdown().await;

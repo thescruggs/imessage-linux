@@ -1,7 +1,8 @@
 //! The OS-specific glue `imessaged`, `imsg` and `imsg-tui` share, so call
 //! sites stay free of `cfg`s: owner-only files ([`fs`]), the shell that runs
 //! user-configured commands ([`process`]), opening things and the clipboard
-//! ([`desktop`]) and, on Windows, DPAPI ([`dpapi`]).
+//! ([`desktop`]), how clients reach the daemon ([`ipc`]) and, on Windows,
+//! DPAPI ([`dpapi`]).
 //!
 //! Unix behaviour is what the call sites did before this module existed;
 //! Windows branches are the port (docs/WINDOWS-PLAN.md, phase W1).
@@ -11,4 +12,5 @@ pub mod desktop;
 #[cfg(windows)]
 pub mod dpapi;
 pub mod fs;
+pub mod ipc;
 pub mod process;

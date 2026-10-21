@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Bus | session |
+| Bus | session (Windows: none, peer-to-peer, see [Peer-to-peer transport](#peer-to-peer-transport-windows)) |
 | Well-known name | `org.imessage.Daemon1` (claimed with `DoNotQueue`: a second daemon fails to start) |
 | Object | `/org/imessage/Daemon1` |
 | Interface | `org.imessage.Daemon1` |
@@ -33,6 +33,32 @@ bus as trusted only to the extent that everything running as you is.
 What does *not* cross the bus: attachment download locators (which hold
 the per-file key) never leave the daemon, and the daemon never logs
 passwords, 2FA codes or message bodies.
+
+## Peer-to-peer transport (Windows)
+
+Windows has no session bus, so there `imessaged` serves the same object
+peer-to-peer (`--transport p2p` / `IMESSAGED_TRANSPORT=p2p` selects this on
+Linux too; `session` selects the bus on Windows):
+
+* it listens on an ephemeral port on **127.0.0.1 only** and writes
+  `nonce-tcp:host=127.0.0.1,port=N,noncefile=<state dir>\bus-nonce,guid=...`
+  to `<state dir>\bus-address` (`%LOCALAPPDATA%\imessaged\bus-address`),
+  replacing it atomically at every start and removing it at shutdown;
+* `bus-nonce` holds 16 random bytes, owner-only (the per-user
+  `%LOCALAPPDATA%` ACL on Windows, mode 0600 on Unix). A client must send
+  them first; a connection that does not is closed before any D-Bus
+  traffic (constant-time compare). The SASL step after that is `ANONYMOUS`:
+  the nonce is the authentication (reading it requires being the user).
+  libdbus / QtDBus and zbus clients do this for any `nonce-tcp:` address;
+* every client has its own connection with the object at
+  `/org/imessage/Daemon1`; every signal is sent on every live connection
+  (a client that does not read for 5 s is disconnected). There is no bus
+  name, `NameOwnerChanged` or activation: a client learns that the daemon
+  went away when its connection closes, and reconnects by reading
+  `bus-address` again (it changes at every start). Method calls may carry
+  the destination `org.imessage.Daemon1`; it is ignored;
+* a second daemon on the same state directory fails at start
+  (`imessaged.lock` there is held while one runs).
 
 ## Activation
 

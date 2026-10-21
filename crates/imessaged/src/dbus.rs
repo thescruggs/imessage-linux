@@ -1,5 +1,6 @@
 //! D-Bus API: `org.imessage.Daemon1` at `/org/imessage/Daemon1` on the
-//! session bus (see docs/DBUS.md for the full contract).
+//! session bus (see docs/DBUS.md for the full contract), or the same object
+//! served peer-to-peer to each client on Windows ([`peer`]).
 //!
 //! Thin layer: every method forwards to a [`Hub`] operation, payloads are
 //! JSON strings of `imessage_common::model` types, errors are
@@ -7,6 +8,7 @@
 //! passed through to the engine; nothing here logs arguments (zbus itself
 //! logs message headers and body *signatures* only, at trace level).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -15,6 +17,8 @@ use zbus::{connection, interface};
 
 use crate::engine::{EngineError, LoginOutcome};
 use crate::hub::{DaemonSignal, Hub, OpError, connection_state_name};
+
+pub mod peer;
 
 pub const BUS_NAME: &str = "org.imessage.Daemon1";
 pub const OBJECT_PATH: &str = "/org/imessage/Daemon1";
@@ -27,6 +31,16 @@ pub enum BusChoice {
     Session,
     /// An explicit bus address (tests: a private `dbus-daemon`).
     Address(String),
+    /// No bus: serve each client peer-to-peer over `nonce-tcp` on
+    /// 127.0.0.1, with the address and nonce files in this directory (the
+    /// state directory; Windows default, see [`peer`]).
+    Peer(PathBuf),
+}
+
+/// What [`serve`] runs: a bus connection, or the peer-to-peer listener.
+pub enum Server {
+    Bus(zbus::Connection),
+    Peer(peer::PeerServer),
 }
 
 /// D-Bus error names: `org.imessage.Daemon1.Error.<Variant>`.
@@ -316,44 +330,60 @@ impl Daemon1 {
     async fn sms_forwarding_changed(emitter: &SignalEmitter<'_>, state_json: &str) -> zbus::Result<()>;
 }
 
-/// Emits [`DaemonSignal`]s on the bus.
+/// Emits [`DaemonSignal`]s on the bus, or on every peer-to-peer client.
 #[derive(Clone)]
-pub(crate) struct Emitter {
-    iface: InterfaceRef<Daemon1>,
+pub(crate) enum Emitter {
+    Bus(InterfaceRef<Daemon1>),
+    Peers(Arc<peer::Peers>),
 }
 
 impl Emitter {
     pub(crate) async fn emit(&self, sig: &DaemonSignal) {
-        let e = self.iface.signal_emitter();
-        let r = match sig {
-            DaemonSignal::MessageReceived { chat_id, message } => Daemon1::message_received(e, chat_id.as_str(), &to_json(message)).await,
-            DaemonSignal::MessageUpdated { chat_id, message } => Daemon1::message_updated(e, chat_id.as_str(), &to_json(message)).await,
-            DaemonSignal::ChatUpdated(c) => Daemon1::chat_updated(e, &to_json(c)).await,
-            DaemonSignal::Typing { chat_id, handle, typing } => Daemon1::typing(e, chat_id.as_str(), &handle.uri, *typing).await,
-            DaemonSignal::ConnectionStateChanged(s) => {
-                let r = Daemon1::connection_state_signal(e, connection_state_name(s)).await;
-                let _ = self.iface.get().await.connection_state_changed(e).await;
-                r
+        match self {
+            Emitter::Bus(iface) => {
+                if let Err(err) = emit_on(iface, sig).await {
+                    log::debug!("D-Bus signal not sent: {err}");
+                }
             }
-            DaemonSignal::RegisteredChanged(_) => self.iface.get().await.registered_changed(e).await,
-            DaemonSignal::TwoFactorRequired => Daemon1::two_factor_required(e).await,
-            DaemonSignal::BackgroundError(m) => Daemon1::background_error(e, m).await,
-            DaemonSignal::HandleProfileUpdated { handle, profile } => Daemon1::handle_profile_updated(e, handle, &to_json(profile)).await,
-            DaemonSignal::SmsForwardingChanged(s) => Daemon1::sms_forwarding_changed(e, &to_json(s)).await,
-        };
-        if let Err(err) = r {
-            log::debug!("D-Bus signal not sent: {err}");
+            Emitter::Peers(peers) => peers.emit(sig).await,
         }
     }
 }
 
+/// Emit `sig` from the object `iface` (on its connection).
+async fn emit_on(iface: &InterfaceRef<Daemon1>, sig: &DaemonSignal) -> zbus::Result<()> {
+    let e = iface.signal_emitter();
+    match sig {
+        DaemonSignal::MessageReceived { chat_id, message } => Daemon1::message_received(e, chat_id.as_str(), &to_json(message)).await,
+        DaemonSignal::MessageUpdated { chat_id, message } => Daemon1::message_updated(e, chat_id.as_str(), &to_json(message)).await,
+        DaemonSignal::ChatUpdated(c) => Daemon1::chat_updated(e, &to_json(c)).await,
+        DaemonSignal::Typing { chat_id, handle, typing } => Daemon1::typing(e, chat_id.as_str(), &handle.uri, *typing).await,
+        DaemonSignal::ConnectionStateChanged(s) => {
+            let r = Daemon1::connection_state_signal(e, connection_state_name(s)).await;
+            let _ = iface.get().await.connection_state_changed(e).await;
+            r
+        }
+        DaemonSignal::RegisteredChanged(_) => iface.get().await.registered_changed(e).await,
+        DaemonSignal::TwoFactorRequired => Daemon1::two_factor_required(e).await,
+        DaemonSignal::BackgroundError(m) => Daemon1::background_error(e, m).await,
+        DaemonSignal::HandleProfileUpdated { handle, profile } => Daemon1::handle_profile_updated(e, handle, &to_json(profile)).await,
+        DaemonSignal::SmsForwardingChanged(s) => Daemon1::sms_forwarding_changed(e, &to_json(s)).await,
+    }
+}
+
 /// Connect, export the object, claim the well-known name (fails if another
-/// imessaged owns it) and attach the emitter to `hub`.
-pub async fn serve(hub: Arc<Hub>, bus: &BusChoice) -> anyhow::Result<zbus::Connection> {
+/// imessaged owns it) and attach the emitter to `hub`. Peer-to-peer: start
+/// listening (fails if another imessaged uses the directory).
+pub async fn serve(hub: Arc<Hub>, bus: &BusChoice) -> anyhow::Result<Server> {
     let which = if *bus == BusChoice::Session { "session bus" } else { "bus" };
     let builder = match bus {
         BusChoice::Session => connection::Builder::session(),
         BusChoice::Address(a) => connection::Builder::address(a.as_str()),
+        BusChoice::Peer(dir) => {
+            let (server, peers) = peer::serve(hub.clone(), dir).await?;
+            hub.set_bus(Some(Emitter::Peers(peers)));
+            return Ok(Server::Peer(server));
+        }
     }
     .map_err(|e| anyhow::anyhow!("cannot connect to the D-Bus {which} (use --no-dbus to run without it): {e}"))?;
     let conn = builder
@@ -369,9 +399,9 @@ pub async fn serve(hub: Arc<Hub>, bus: &BusChoice) -> anyhow::Result<zbus::Conne
         Err(e) => anyhow::bail!("cannot claim {BUS_NAME} on the {which}: {e}"),
     }
     let iface = conn.object_server().interface::<_, Daemon1>(OBJECT_PATH).await?;
-    hub.set_bus(Some(Emitter { iface }));
+    hub.set_bus(Some(Emitter::Bus(iface)));
     log::info!("D-Bus: {BUS_NAME} at {OBJECT_PATH}");
-    Ok(conn)
+    Ok(Server::Bus(conn))
 }
 
 /// How long shutdown waits to unexport the object. `remove` waits for the
@@ -379,8 +409,13 @@ pub async fn serve(hub: Arc<Hub>, bus: &BusChoice) -> anyhow::Result<zbus::Conne
 /// can hold for a long time.
 const UNEXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Release the name and close the connection.
-pub async fn stop(conn: zbus::Connection) {
+/// Release the name and close the connection (peer-to-peer: disconnect
+/// every client and remove the address file).
+pub async fn stop(server: Server) {
+    let conn = match server {
+        Server::Bus(c) => c,
+        Server::Peer(p) => return p.stop().await,
+    };
     let _ = conn.release_name(BUS_NAME).await;
     match tokio::time::timeout(UNEXPORT_TIMEOUT, conn.object_server().remove::<Daemon1, _>(OBJECT_PATH)).await {
         Ok(_) => {}

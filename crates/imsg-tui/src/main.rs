@@ -17,8 +17,15 @@ use tokio::sync::mpsc;
 #[command(name = "imsg-tui", version, about = "iMessage in your terminal (talks to imessaged)")]
 struct Args {
     /// D-Bus address to use instead of the session bus (tests, containers).
+    /// Windows (and IMESSAGED_TRANSPORT=p2p): default is the daemon's
+    /// peer-to-peer address in <state dir>/bus-address.
     #[arg(long, env = "IMSG_BUS_ADDRESS", value_name = "ADDR")]
     bus_address: Option<String>,
+    /// The daemon's state directory, where a peer-to-peer daemon writes its
+    /// address. Default: $XDG_STATE_HOME/imessaged (Windows:
+    /// %LOCALAPPDATA%\imessaged).
+    #[arg(long, env = "IMESSAGED_STATE_DIR", value_name = "DIR")]
+    state_dir: Option<PathBuf>,
     /// Folder(s) of vCards for contact names, `:`-separated (`;` on Windows)
     /// (default: ~/.local/share/kpeoplevcard, where `imsg sync-mac` writes).
     #[arg(long, env = "IMSG_CONTACTS_DIR", value_name = "DIR")]
@@ -33,7 +40,16 @@ async fn main() -> ExitCode {
     let args = Args::parse();
     let bus = match &args.bus_address {
         Some(a) => Bus::Address(a.clone()),
-        None => Bus::Session,
+        None => {
+            let state_dir = args.state_dir.clone().unwrap_or_else(imessage_common::paths::default_state_dir);
+            match Bus::for_state_dir(&state_dir) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("imsg-tui: {e}");
+                    return ExitCode::from(e.code);
+                }
+            }
+        }
     };
     let backend = match backend::Backend::connect(bus).await {
         Ok(b) => b,

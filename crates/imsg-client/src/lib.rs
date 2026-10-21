@@ -1,5 +1,7 @@
 //! D-Bus client for `org.imessage.Daemon1` (see docs/DBUS.md), shared by
-//! the `imsg` command-line client and `imsg-tui`.
+//! the `imsg` command-line client and `imsg-tui`. On the session bus, or
+//! (Windows) peer-to-peer to the daemon at the address it writes to
+//! `<state dir>/bus-address` ([`Bus::Peer`]).
 //!
 //! [`Daemon1Proxy`] mirrors the interface 1:1 (methods, properties and
 //! signals of docs/DBUS.md). [`Client`] wraps it: every call returns both the raw JSON
@@ -8,6 +10,7 @@
 //! code (see [`exit`]).
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use imessage_common::model::{Chat, ConnectionState, Message, RegistrationState};
@@ -22,9 +25,9 @@ const ERROR_PREFIX: &str = "org.imessage.Daemon1.Error.";
 /// Hint for a daemon that is not on the bus.
 #[cfg(not(windows))]
 const NOT_RUNNING: &str = "imessaged is not running (start it with `systemctl --user start imessaged` or run `imessaged`)";
-/// No service manager integration on Windows yet (Task Scheduler: phase W3).
+/// Windows: the logon task (`imsg service install` / the installer).
 #[cfg(windows)]
-const NOT_RUNNING: &str = "imessaged is not running (start it by running `imessaged`)";
+const NOT_RUNNING: &str = "imessaged is not running (start it with `imsg service start`, or run imessaged.exe)";
 
 /// Process exit codes (documented in docs/CLI.md).
 pub mod exit {
@@ -302,11 +305,46 @@ pub fn parse<T: DeserializeOwned>(what: &str, raw: String) -> Result<Json<T>> {
 pub enum Bus {
     Session,
     Address(String),
+    /// No bus: connect peer-to-peer to the daemon at the address in this
+    /// file (`<state dir>/bus-address`), read again at every connect so a
+    /// restarted daemon (new port, new nonce) is found.
+    Peer(PathBuf),
+}
+
+impl Bus {
+    /// The bus `imsg` / `imsg-tui` use without `--bus-address`: the session
+    /// bus, or peer-to-peer to the daemon of `state_dir` (Windows, or
+    /// `IMESSAGED_TRANSPORT=p2p`).
+    pub fn for_state_dir(state_dir: &Path) -> Result<Bus> {
+        use imessage_common::platform::ipc::{BUS_ADDRESS_FILE, Transport};
+        match Transport::from_env().map_err(CliError::usage)? {
+            Transport::SessionBus => Ok(Bus::Session),
+            Transport::PeerToPeer => Ok(Bus::Peer(state_dir.join(BUS_ADDRESS_FILE))),
+        }
+    }
 }
 
 pub struct Client {
     pub conn: zbus::Connection,
     pub proxy: Daemon1Proxy<'static>,
+    /// Connected peer-to-peer ([`Bus::Peer`]).
+    peer: bool,
+}
+
+/// The address in a `bus-address` file (first non-empty line).
+fn read_peer_address(file: &Path) -> Result<String> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CliError::new(exit::NO_DAEMON, format!("{NOT_RUNNING}: {} does not exist", file.display())));
+        }
+        Err(e) => return Err(CliError::new(exit::NO_DAEMON, format!("cannot read {}: {e}", file.display()))),
+    };
+    match text.lines().map(str::trim).find(|l| !l.is_empty()) {
+        Some(a) if a.starts_with("nonce-tcp:") => Ok(a.to_string()),
+        Some(a) => Err(CliError::new(exit::NO_DAEMON, format!("{}: unexpected address {a:?} (expected nonce-tcp:...)", file.display()))),
+        None => Err(CliError::new(exit::NO_DAEMON, format!("{NOT_RUNNING}: {} is empty", file.display()))),
+    }
 }
 
 /// Timeout for connecting to the bus itself.
@@ -336,10 +374,11 @@ impl Client {
         let builder = match bus {
             Bus::Session => zbus::connection::Builder::session(),
             Bus::Address(a) => zbus::connection::Builder::address(a.as_str()),
+            Bus::Peer(file) => return Client::connect_peer(file).await,
         }
         .map_err(|e| match bus {
-            Bus::Session => CliError::new(exit::NO_DAEMON, format!("no D-Bus session bus ({e}); is DBUS_SESSION_BUS_ADDRESS set?")),
             Bus::Address(a) => CliError::new(exit::NO_DAEMON, format!("bad bus address {a:?}: {e}")),
+            _ => CliError::new(exit::NO_DAEMON, format!("no D-Bus session bus ({e}); is DBUS_SESSION_BUS_ADDRESS set?")),
         })?;
         let conn = match tokio::time::timeout(CONNECT_TIMEOUT, builder.build()).await {
             Ok(r) => r.map_err(|e| {
@@ -350,16 +389,55 @@ impl Client {
             })?,
             Err(_) => return Err(CliError::new(exit::NO_DAEMON, "timed out connecting to the D-Bus bus")),
         };
+        Client::with_connection(conn, false).await
+    }
+
+    /// Peer-to-peer: the daemon itself is the other end. zbus' `nonce-tcp:`
+    /// client sends the nonce file first; then ANONYMOUS (the daemon's
+    /// choice, see imessaged `dbus/peer.rs`) and no `Hello`.
+    async fn connect_peer(file: &Path) -> Result<Client> {
+        let address = read_peer_address(file)?;
+        let builder = zbus::connection::Builder::address(address.as_str())
+            .map_err(|e| CliError::new(exit::NO_DAEMON, format!("{}: bad address: {e}", file.display())))?
+            .p2p()
+            .auth_mechanism(zbus::connection::AuthMechanism::Anonymous);
+        let conn = match tokio::time::timeout(CONNECT_TIMEOUT, builder.build()).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                let refused = matches!(&e, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::ConnectionRefused)
+                    || e.to_string().to_lowercase().contains("refused");
+                let message = if refused {
+                    format!("{NOT_RUNNING} ({} is left over from an earlier run)", file.display())
+                } else {
+                    format!("cannot connect to imessaged at {}: {}", file.display(), map_zbus(e).message)
+                };
+                return Err(CliError::new(exit::NO_DAEMON, message));
+            }
+            Err(_) => return Err(CliError::new(exit::NO_DAEMON, format!("timed out connecting to imessaged ({})", file.display()))),
+        };
+        Client::with_connection(conn, true).await
+    }
+
+    async fn with_connection(conn: zbus::Connection, peer: bool) -> Result<Client> {
         let proxy = Daemon1Proxy::builder(&conn)
             .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .await
             .map_err(map_zbus)?;
-        Ok(Client { conn, proxy })
+        Ok(Client { conn, proxy, peer })
+    }
+
+    /// Connected peer-to-peer (no bus, no bus names, no activation).
+    pub fn is_peer(&self) -> bool {
+        self.peer
     }
 
     /// Does anyone own `org.imessage.Daemon1` right now (no activation)?
+    /// Peer-to-peer: is the connection to the daemon still open?
     pub async fn daemon_present(&self) -> bool {
+        if self.peer {
+            return !self.conn.is_closed();
+        }
         let Ok(dbus) = zbus::fdo::DBusProxy::new(&self.conn).await else { return false };
         let Ok(name) = zbus::names::BusName::try_from(BUS_NAME) else { return false };
         dbus.name_has_owner(name).await.unwrap_or(false)

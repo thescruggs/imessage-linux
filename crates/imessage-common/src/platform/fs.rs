@@ -91,6 +91,34 @@ pub fn open_regular_file(path: &Path) -> io::Result<File> {
     Ok(f)
 }
 
+/// Take an exclusive lock on `path` (created owner-only if missing) for as
+/// long as the returned file stays open; `Ok(None)` if another process
+/// holds it. Unix: `flock(LOCK_EX | LOCK_NB)`. Windows: the file opened
+/// with no sharing, so a second open fails with a sharing violation.
+pub fn lock_exclusive(path: &Path) -> io::Result<Option<File>> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let f = private_options().read(true).write(true).create(true).truncate(false).open(path)?;
+        // SAFETY: `f` owns a valid descriptor for the duration of the call.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(f));
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::WouldBlock { Ok(None) } else { Err(e) }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        match private_options().read(true).write(true).create(true).truncate(false).share_mode(0).open(path) {
+            Ok(f) => Ok(Some(f)),
+            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Device names Win32 reserves in every directory, with any extension.
 const WINDOWS_RESERVED: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
@@ -157,6 +185,17 @@ mod tests {
         assert!(open_regular_file(&dir).is_err());
         assert!(open_regular_file(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn exclusive_lock() {
+        let t = std::env::temp_dir().join(format!("imessage-common-lock-{}", std::process::id()));
+        let _ = std::fs::remove_file(&t);
+        let held = lock_exclusive(&t).unwrap().expect("first lock");
+        assert!(lock_exclusive(&t).unwrap().is_none(), "second lock while held");
+        drop(held);
+        assert!(lock_exclusive(&t).unwrap().is_some(), "lock again after release");
+        std::fs::remove_file(&t).unwrap();
     }
 
     #[test]

@@ -24,7 +24,8 @@ pub enum DaemonEvent {
     /// `ConnectionStateChanged`.
     ConnectionState(String),
     BackgroundError(String),
-    /// The signal streams ended (the bus went away); the loop reconnects.
+    /// The signal streams ended (the bus, or peer-to-peer the daemon, went
+    /// away); the loop reconnects.
     Lost(String),
     /// Subscribed to the daemon's signals (at start, and again after
     /// `Lost`): anything that happened in between must be reloaded.
@@ -60,7 +61,9 @@ impl Backend {
 
     async fn client(&self) -> Result<Arc<Client>> {
         let mut guard = self.inner.client.lock().await;
-        if let Some(c) = guard.as_ref() {
+        // A closed connection (peer-to-peer: the daemon restarted) is
+        // replaced rather than reused.
+        if let Some(c) = guard.as_ref().filter(|c| !c.conn.is_closed()) {
             return Ok(c.clone());
         }
         let c = Arc::new(Client::connect(&self.inner.bus).await?);

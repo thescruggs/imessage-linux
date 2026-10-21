@@ -629,3 +629,40 @@ async fn mac_contacts_export_wrapper() {
     assert_eq!(va.len(), 6);
     assert!(va == vb, "both branches write the same vCards");
 }
+
+/// `IMESSAGED_TRANSPORT=p2p` (Windows' default): no `--bus-address`, imsg
+/// finds the daemon through `<state dir>/bus-address`; without a daemon it
+/// says so with exit code 5.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_to_peer_through_bus_address_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let imsg = |args: &[&str]| {
+        let mut c = imsg_command("", dir.path(), args);
+        // imsg_command passes --bus-address first; an empty one means "default".
+        c.env("IMESSAGED_TRANSPORT", "p2p");
+        c
+    };
+    let o = run(imsg(&["status"]), None).await;
+    assert_eq!(o.code, 5, "{}", o.stderr);
+    assert!(o.stderr.contains("not running") && o.stderr.contains("bus-address"), "{}", o.stderr);
+
+    let mock = Arc::new(MockEngine::new());
+    let store = StoreHandle::new(Store::open(dir.path(), StateKey::from_bytes([7; 32])).unwrap());
+    let running = Daemon::with_engine(DaemonConfig::new(dir.path().into()), mock.clone())
+        .with_store(store)
+        .with_dbus(BusChoice::Peer(dir.path().into()))
+        .start()
+        .await
+        .unwrap();
+    mock.login("me@example.com", "pw").await.unwrap();
+    let o = run(imsg(&["status", "--json"]), None).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_eq!(o.json()["registered"], true);
+    let o = run(imsg(&["send", BOB, "hi over p2p"]), None).await;
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(mock.calls().iter().any(|c| matches!(c, MockCall::SendText { text, .. } if text == "hi over p2p")));
+    running.shutdown().await.unwrap();
+
+    let o = run(imsg(&["status"]), None).await;
+    assert_eq!(o.code, 5, "{}", o.stderr);
+}

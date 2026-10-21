@@ -4,6 +4,7 @@ use clap::Parser;
 use imessaged::config::{self, DaemonConfig, KeyProviderKind, Overrides};
 use imessaged::daemon::{Daemon, shutdown_signal};
 use imessaged::dbus::BusChoice;
+use imessage_common::platform::ipc::Transport;
 
 #[derive(Parser, Debug)]
 #[command(name = "imessaged", version, about = "iMessage daemon for Linux")]
@@ -77,6 +78,12 @@ struct Args {
     /// received and stored.
     #[arg(long)]
     no_dbus: bool,
+
+    /// How clients reach the API: `session` (the D-Bus session bus; Linux
+    /// default) or `p2p` (one connection per client over nonce-tcp on
+    /// 127.0.0.1, address in <state dir>/bus-address; Windows default).
+    #[arg(long, env = "IMESSAGED_TRANSPORT", value_name = "session|p2p")]
+    transport: Option<Transport>,
 }
 
 #[tokio::main]
@@ -128,9 +135,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let bus = match args.transport.unwrap_or_else(Transport::platform_default) {
+        Transport::SessionBus => BusChoice::Session,
+        Transport::PeerToPeer => BusChoice::Peer(cfg.state_dir.clone()),
+    };
+    // Peer-to-peer has no bus name to claim: refuse a second daemon before
+    // it starts a second engine on the same state (serving takes the lock
+    // for good).
+    if let (BusChoice::Peer(dir), false) = (&bus, args.no_dbus) {
+        imessaged::dbus::peer::check_not_running(dir)?;
+    }
     let mut daemon = Daemon::new(cfg).await?;
     if !args.no_dbus {
-        daemon = daemon.with_dbus(BusChoice::Session);
+        daemon = daemon.with_dbus(bus);
     }
     daemon.run_until(shutdown_signal()).await
 }

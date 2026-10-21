@@ -32,6 +32,8 @@ pub struct Cli {
     pub state_dir: Option<PathBuf>,
 
     /// D-Bus address to use instead of the session bus (tests, containers).
+    /// Windows (and IMESSAGED_TRANSPORT=p2p): default is the daemon's
+    /// peer-to-peer address in <state dir>/bus-address.
     #[arg(long, global = true, env = "IMSG_BUS_ADDRESS", value_name = "ADDR")]
     pub bus_address: Option<String>,
 
@@ -377,7 +379,13 @@ fn main() -> ExitCode {
         err_style: Style::detect_stderr(),
         bus: match cli.bus_address.clone().filter(|a| !a.is_empty()) {
             Some(a) => Bus::Address(a),
-            None => Bus::Session,
+            None => match Bus::for_state_dir(&state_dir) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("imsg: error: {e}");
+                    return ExitCode::from(e.code);
+                }
+            },
         },
     };
 

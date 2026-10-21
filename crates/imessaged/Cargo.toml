@@ -52,7 +52,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 # D-Bus API. zbus 5 (not 4): secret-service already links zbus 5, so this
 # adds no second D-Bus stack.
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 
 # Secret Service (keyring.rs); Windows uses a DPAPI-wrapped key file instead.
 [target.'cfg(not(windows))'.dependencies]

@@ -33,6 +33,6 @@ unicode-width = "0.2"
 # Integration tests run imessaged in-process with MockEngine on a private
 # bus (as crates/imsg/tests does).
 imessaged = { path = "../imessaged" }
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 tempfile = "3"
 crossterm = { version = "0.28" }

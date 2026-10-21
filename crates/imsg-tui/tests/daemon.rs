@@ -252,3 +252,48 @@ async fn app_loads_chats_previews_and_live_messages() {
     loop_task.abort();
     h.shutdown().await;
 }
+
+/// Peer-to-peer (the Windows transport): the backend finds the daemon
+/// through `bus-address`, and after the daemon restarts (new port, new
+/// nonce) it reconnects on its own and resubscribes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_to_peer_backend_reconnects_after_daemon_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let start = |mock: Arc<MockEngine>| {
+        let path = dir.path().to_path_buf();
+        async move {
+            let store = StoreHandle::new(Store::open(&path, StateKey::from_bytes([7; 32])).unwrap());
+            Daemon::with_engine(DaemonConfig::new(path.clone()), mock).with_store(store).with_dbus(BusChoice::Peer(path)).start().await.unwrap()
+        }
+    };
+    let mock = Arc::new(MockEngine::new());
+    mock.login("me@example.com", "pw").await.unwrap();
+    let running = start(mock.clone()).await;
+    let b = Backend::connect(Bus::Peer(dir.path().join(imessage_common::platform::ipc::BUS_ADDRESS_FILE))).await.unwrap();
+    assert!(b.status().await.unwrap().registered);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let b2 = b.clone();
+    let loop_task = tokio::spawn(async move { b2.signal_loop(tx).await });
+    wait_for(&mut rx, "Subscribed", |e| matches!(e, DaemonEvent::Subscribed)).await;
+    mock.inject(incoming("M1", 1_000, "before"));
+    wait_for(&mut rx, "MessageReceived", |e| matches!(e, DaemonEvent::MessageReceived(m) if m.id.0 == "M1")).await;
+
+    running.shutdown().await.unwrap();
+    wait_for(&mut rx, "Lost", |e| matches!(e, DaemonEvent::Lost(_))).await;
+    let err = b.status().await.unwrap_err();
+    assert_eq!(err.code, imsg_client::exit::NO_DAEMON, "{err}");
+    assert!(err.message.contains("not running"), "{err}");
+
+    let mock = Arc::new(MockEngine::new());
+    mock.login("me@example.com", "pw").await.unwrap();
+    let running = start(mock.clone()).await;
+    wait_for(&mut rx, "Subscribed again", |e| matches!(e, DaemonEvent::Subscribed)).await;
+    mock.inject(incoming("M2", 2_000, "after"));
+    wait_for(&mut rx, "MessageReceived after restart", |e| matches!(e, DaemonEvent::MessageReceived(m) if m.id.0 == "M2")).await;
+    assert_eq!(b.chats().await.unwrap().len(), 1);
+
+    drop(rx);
+    loop_task.abort();
+    running.shutdown().await.unwrap();
+}
