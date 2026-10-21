@@ -44,8 +44,11 @@ pub const E_POISONED: i32 = -104;
 pub const BINARY_SHA1: &str = "e1181ccad82e6629d52c6a006645ad87ee59bd13";
 
 /// What to run to download it: the checkout's script, or the copy an
-/// installed package ships (which only downloads).
+/// installed package ships (which only downloads). Windows: `imsg setup`.
+#[cfg(not(windows))]
 pub const BOOTSTRAP_HINT: &str = "tools/bootstrap.sh (installed package: /usr/share/imessage-linux/tools/bootstrap.sh)";
+#[cfg(windows)]
+pub const BOOTSTRAP_HINT: &str = "`imsg setup` (or `imsg setup --from <folder>` with a copy of ~/.local/share/imessage-linux from a Linux install)";
 
 /// Location of Apple's `IMDAppleServices` (downloaded and sha1-verified by
 /// `tools/bootstrap.sh`, never redistributed; this library never downloads

@@ -10,6 +10,8 @@ mod format;
 mod import;
 mod local;
 mod resolve;
+mod service;
+mod setup;
 mod sync;
 
 use std::path::PathBuf;
@@ -236,6 +238,24 @@ pub enum Command {
     },
     /// Check the local setup and the daemon.
     Doctor,
+    /// Install Apple's files the daemon needs (IMDAppleServices,
+    /// cert-1.0.plist) into the data directory: downloaded and verified as
+    /// tools/bootstrap.sh does, or copied from a folder.
+    Setup {
+        /// Copy them from this folder (e.g. ~/.local/share/imessage-linux
+        /// taken from a Linux install) instead of downloading.
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Replace files that are already in place and verified.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Start imessaged at login and control it (Windows: the logon task;
+    /// Linux: systemctl --user on the packaged unit).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// One-time import of recent history from a Mac's Messages database (over ssh).
     ImportMac {
         /// ssh destination of the Mac (`mymac.local`, `user@mac`, a Host alias).
@@ -326,6 +346,28 @@ pub enum SmsCommand {
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
+pub enum ServiceCommand {
+    /// Start imessaged at every login, and now (Windows: creates the
+    /// per-user Task Scheduler task `imessaged`; Linux: enable --now).
+    Install {
+        /// imessaged.exe to run (default: next to imsg.exe). Windows only.
+        #[arg(long, value_name = "PATH")]
+        exe: Option<PathBuf>,
+        /// Only set up autostart; do not start it now.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Stop it and remove the autostart.
+    Uninstall,
+    /// Show whether autostart is set up and the daemon runs.
+    Status,
+    /// Start it now (Windows: also re-enables a stopped task).
+    Start,
+    /// Stop it (Windows: until `imsg service start`, also across logins).
+    Stop,
+}
+
+#[derive(Subcommand, Debug, PartialEq)]
 pub enum StoreCommand {
     /// Remove chats whose id is not a valid mailto:/tel:/group: id (left by
     /// a bad import) with their messages, reactions and attachment files.
@@ -391,12 +433,14 @@ fn main() -> ExitCode {
 
     let result: anyhow::Result<u8> = match cli.command {
         Command::Hwconfig { command: HwconfigCommand::Import { file, force } } => local::hwconfig_import(&file, &state_dir, force),
+        Command::Service { command } => service::run(&command, &state_dir),
         command => {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
             match rt {
                 Ok(rt) => rt.block_on(async {
                     match command {
                         Command::Doctor => local::doctor(&state_dir, &ctx.bus, ctx.json, ctx.style).await,
+                        Command::Setup { from, force } => setup::run(from.as_deref(), force).await,
                         Command::ImportMac { host, backgrounds: true, chats, create, max_total_mb, dry_run, .. } => {
                             backgrounds::run(backgrounds::BackgroundArgs { host, chats, create, max_total_mb, dry_run }, &ctx).await
                         }
@@ -498,6 +542,10 @@ mod tests {
         assert!(parse(&["lookup"]).is_err());
         let c = parse(&["watch", "--chat", "group:X", "--json"]).unwrap();
         assert!(c.json && c.command == Command::Watch { chat: Some("group:X".into()) });
+        assert_eq!(parse(&["setup", "--from", "d"]).unwrap().command, Command::Setup { from: Some("d".into()), force: false });
+        assert_eq!(parse(&["service", "install", "--exe", "x.exe"]).unwrap().command, Command::Service { command: ServiceCommand::Install { exe: Some("x.exe".into()), no_start: false } });
+        assert_eq!(parse(&["service", "stop"]).unwrap().command, Command::Service { command: ServiceCommand::Stop });
+        assert!(parse(&["service"]).is_err());
         let c = parse(&["hwconfig", "import", "f.plist", "--force"]).unwrap();
         assert_eq!(c.command, Command::Hwconfig { command: HwconfigCommand::Import { file: "f.plist".into(), force: true } });
         assert!(parse(&["send-file", "bob@x.com", "/tmp/a.png", "--mime", "image/png"]).is_ok());

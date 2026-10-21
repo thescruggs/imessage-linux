@@ -8,6 +8,14 @@ pub fn valid_host(h: &str) -> bool {
     !h.is_empty() && !h.starts_with('-') && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':' | '[' | ']' | '%'))
 }
 
+/// Whether a command-line word runs ssh: `ssh`, `.../ssh`, or Windows'
+/// `ssh.exe` / `...\\ssh.exe` (any case).
+pub fn is_ssh_word(w: &str) -> bool {
+    let w = w.trim_matches('"');
+    let l = w.to_ascii_lowercase();
+    w == "ssh" || w.ends_with("/ssh") || l == "ssh.exe" || l.ends_with("\\ssh.exe") || l.ends_with("/ssh.exe")
+}
+
 /// ssh options that take an argument (`ssh -F file`, `-oKey=v`, ...).
 const WITH_ARG: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 
@@ -17,7 +25,7 @@ const WITH_ARG: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 /// the command runs no ssh or the destination is not a plain host.
 /// Whitespace-separated words; quoting is not interpreted.
 pub fn host_of_command(cmd: &str) -> Option<String> {
-    let mut words = cmd.split_whitespace().skip_while(|w| *w != "ssh" && !w.ends_with("/ssh")).skip(1);
+    let mut words = cmd.split_whitespace().skip_while(|w| !is_ssh_word(w)).skip(1);
     let mut user: Option<String> = None;
     while let Some(w) = words.next() {
         if w == "--" {
@@ -69,6 +77,8 @@ mod tests {
         assert_eq!(h("ssh -- mac x").as_deref(), Some("mac"));
         assert_eq!(h("ssh ssh://mac.local x").as_deref(), Some("mac.local"));
         assert_eq!(h("env A=b ssh mac"), Some("mac".into()));
+        assert_eq!(h(r"C:\Windows\System32\OpenSSH\ssh.exe -o BatchMode=yes bebop x").as_deref(), Some("bebop"));
+        assert_eq!(h("SSH.EXE mac x").as_deref(), Some("mac"));
         assert_eq!(h("printf '{}'"), None);
         assert_eq!(h("ssh -F cfg"), None);
         assert_eq!(h("ssh 'quoted host' x"), None);

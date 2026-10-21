@@ -204,7 +204,7 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             }
             Ok(exit::OK)
         }
-        Command::Doctor | Command::Hwconfig { .. } | Command::ImportMac { .. } | Command::SyncMac { .. } => unreachable!("handled in main"),
+        Command::Doctor | Command::Setup { .. } | Command::Service { .. } | Command::Hwconfig { .. } | Command::ImportMac { .. } | Command::SyncMac { .. } => unreachable!("handled in main"),
     }
 }
 

@@ -2315,6 +2315,7 @@ dependencies = [
  "log",
  "open-absinthe",
  "plist",
+ "reqwest",
  "rpassword",
  "serde",
  "serde_json",

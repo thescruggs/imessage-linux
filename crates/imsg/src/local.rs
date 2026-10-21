@@ -101,7 +101,7 @@ pub struct DoctorLine {
     pub detail: String,
 }
 
-fn line(check: &'static str, level: Level, detail: impl Into<String>) -> DoctorLine {
+pub(crate) fn line(check: &'static str, level: Level, detail: impl Into<String>) -> DoctorLine {
     DoctorLine { check, level, detail: detail.into() }
 }
 
@@ -276,9 +276,14 @@ async fn anisette_check(state_dir: &Path) -> Vec<DoctorLine> {
             .map(|c| c.inner.product_name);
         let mut lines = vec![anisette_command_check(&cmd, hw_model.as_deref()).await];
         if command_uses_ssh(&cmd) {
-            let env = systemd_environment();
-            let ssh_config = paths::home_dir().map(|h| h.join(".ssh/config")).and_then(|p| std::fs::read_to_string(p).ok());
-            lines.extend(ssh_lines(&cmd, env.as_deref(), ssh_config.as_deref()));
+            #[cfg(not(windows))]
+            {
+                let env = systemd_environment();
+                let ssh_config = paths::home_dir().map(|h| h.join(".ssh/config")).and_then(|p| std::fs::read_to_string(p).ok());
+                lines.extend(ssh_lines(&cmd, env.as_deref(), ssh_config.as_deref()));
+            }
+            #[cfg(windows)]
+            lines.extend(windows_ssh_lines(&cmd, windows_ssh_found(&cmd)));
         }
         return lines;
     }
@@ -296,32 +301,88 @@ async fn anisette_check(state_dir: &Path) -> Vec<DoctorLine> {
 }
 
 /// `systemctl --user show-environment` (the daemon unit's environment),
-/// `None` without a systemd user manager (always on Windows).
+/// `None` without a systemd user manager.
+#[cfg(not(windows))]
 fn systemd_environment() -> Option<String> {
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("systemctl")
-            .args(["--user", "show-environment"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    std::process::Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Windows' OpenSSH client: `%SystemRoot%\System32\OpenSSH\ssh.exe` (an
+/// optional feature, on by default since Windows 10 1809), or an ssh the
+/// command names by path.
+#[cfg(windows)]
+fn windows_ssh_found(cmd: &str) -> bool {
+    let root = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
+    if root.join(r"System32\OpenSSH\ssh.exe").is_file() {
+        return true;
     }
-    #[cfg(windows)]
-    {
+    let named = cmd.split_whitespace().find(|w| { let l = w.to_ascii_lowercase(); l.ends_with("\\ssh.exe") || l.ends_with("/ssh.exe") || l.ends_with("/ssh") });
+    if let Some(p) = named {
+        return Path::new(p.trim_matches('"')).is_file();
+    }
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("ssh.exe").is_file()))
+}
+
+/// Warnings for an ssh anisette command on Windows (pure; unit tested).
+/// There is no sandbox there, so `-F` is not needed (a `~` in it is
+/// expanded for cmd.exe; see `platform::process`), and no SSH_AUTH_SOCK:
+/// Windows ssh asks the OpenSSH Authentication Agent service or 1Password's
+/// agent over the `openssh-ssh-agent` pipe, or uses a key file.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_ssh_lines(cmd: &str, ssh_found: bool) -> Vec<DoctorLine> {
+    let mut lines = Vec::new();
+    if !ssh_found {
+        lines.push(line(
+            "anisette ssh",
+            Level::Fail,
+            "ssh.exe not found: add the OpenSSH Client (Settings > System > Optional features), or name ssh.exe by its full path in anisette_command",
+        ));
+    }
+    if !cmd.split_whitespace().any(|w| w.eq_ignore_ascii_case("BatchMode=yes") || w.eq_ignore_ascii_case("-oBatchMode=yes")) {
+        lines.push(line(
+            "anisette ssh",
+            Level::Warn,
+            "command runs ssh without -o BatchMode=yes: the daemon has no console, so a password or host-key prompt would hang until the 30 s timeout",
+        ));
+    }
+    lines
+}
+
+/// What to do about a failed ssh anisette command on Windows, from the
+/// last line ssh printed (pure; unit tested).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_ssh_hint(last_line: &str) -> Option<&'static str> {
+    let l = last_line.to_ascii_lowercase();
+    if l.contains("permission denied") || l.contains("publickey") {
+        Some(
+            "ssh found no usable key: start the agent with a key loaded (PowerShell as admin: `Set-Service ssh-agent -StartupType Automatic; \
+             Start-Service ssh-agent`, then `ssh-add`), or turn on 1Password's SSH agent (Settings > Developer), or name an IdentityFile in \
+             %USERPROFILE%\\.ssh\\config",
+        )
+    } else if l.contains("host key verification failed") {
+        Some("the Mac's host key is not known yet: run the ssh command once in a terminal and accept it")
+    } else if l.contains("could not resolve hostname") {
+        Some("the Mac's name does not resolve from Windows: use its .local name or IP address, or a Host entry in %USERPROFILE%\\.ssh\\config")
+    } else {
         None
     }
 }
 
-/// Does the command run ssh (a word `ssh` or `.../ssh`)?
+/// Does the command run ssh (a word `ssh` or `.../ssh`, Windows `ssh.exe`)?
 pub fn command_uses_ssh(cmd: &str) -> bool {
-    cmd.split_whitespace().any(|w| w == "ssh" || w.ends_with("/ssh"))
+    cmd.split_whitespace().any(imessage_common::ssh::is_ssh_word)
 }
 
 /// Warnings for an ssh anisette command (pure; unit tested). `systemd_env`:
 /// `systemctl --user show-environment` output, `None` if unavailable.
 /// `ssh_config`: the user's `~/.ssh/config`; when it names an
 /// `IdentityAgent` or `IdentityFile`, ssh needs no SSH_AUTH_SOCK.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn ssh_lines(cmd: &str, systemd_env: Option<&str>, ssh_config: Option<&str>) -> Vec<DoctorLine> {
     let mut lines = Vec::new();
     if !cmd.split_whitespace().any(|w| w.starts_with("-F")) {
@@ -371,6 +432,10 @@ async fn anisette_command_check(cmd: &str, hw_model: Option<&str>) -> DoctorLine
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let last = imessage_common::redact::last_line(&err).unwrap_or_default();
+        #[cfg(windows)]
+        if let Some(hint) = windows_ssh_hint(&last) {
+            return line("anisette", Level::Fail, format!("command {cmd:?} failed ({}): {last}; {hint}", out.status));
+        }
         return line("anisette", Level::Fail, format!("command {cmd:?} failed ({}): {last}", out.status));
     }
     match anisette_headers_summary(&out.stdout) {
@@ -430,21 +495,17 @@ fn systemd_check() -> Option<DoctorLine> {
 
 /// How the daemon gets started: D-Bus activation and the systemd user unit.
 #[cfg(not(windows))]
-fn service_checks() -> Vec<DoctorLine> {
+fn service_checks(_state_dir: &Path) -> Vec<DoctorLine> {
     let mut lines = vec![activation_check()];
     lines.extend(systemd_check());
     lines
 }
 
-/// Windows has neither D-Bus activation nor systemd; the logon task that
-/// will start the daemon comes with phase W3 (docs/WINDOWS-PLAN.md).
+/// Windows has neither D-Bus activation nor systemd: the logon task
+/// (`imsg service`), whether the daemon listens, and where it logs.
 #[cfg(windows)]
-fn service_checks() -> Vec<DoctorLine> {
-    vec![line(
-        "autostart",
-        Level::Warn,
-        "not set up yet on Windows (Task Scheduler logon task: phase W3); start `imessaged` yourself",
-    )]
+fn service_checks(state_dir: &Path) -> Vec<DoctorLine> {
+    crate::service::doctor_lines(state_dir)
 }
 
 /// Checks against the running daemon.
@@ -479,6 +540,7 @@ async fn daemon_checks(bus: &Bus, state_dir: &Path) -> Vec<DoctorLine> {
     // Version may trigger D-Bus activation; give it the bus's own timeout.
     let version = tokio::time::timeout(Duration::from_secs(30), client.version()).await;
     match version {
+        Ok(Ok(v)) if client.is_peer() => lines.push(line("daemon", Level::Ok, format!("imessaged {v} (peer-to-peer)"))),
         Ok(Ok(v)) => lines.push(line("daemon", Level::Ok, format!("imessaged {v} owns {BUS_NAME}{}", if was_running { "" } else { " (just started by D-Bus activation)" }))),
         Ok(Err(e)) => {
             lines.push(line("daemon", Level::Fail, e.message));
@@ -534,7 +596,7 @@ async fn daemon_checks(bus: &Bus, state_dir: &Path) -> Vec<DoctorLine> {
 pub async fn doctor(state_dir: &Path, bus: &Bus, json: bool, st: Style) -> anyhow::Result<u8> {
     let mut lines = local_checks(state_dir);
     lines.extend(anisette_check(state_dir).await);
-    lines.extend(service_checks());
+    lines.extend(service_checks(state_dir));
     lines.extend(daemon_checks(bus, state_dir).await);
 
     let worst = lines.iter().map(|l| l.level).max().unwrap_or(Level::Ok);
@@ -609,6 +671,20 @@ mod tests {
         assert!(ssh_lines(good, Some("HOME=/home/u\n"), Some(agent_in_config)).is_empty(), "IdentityAgent in ssh config: no warning");
         assert!(ssh_lines(good, Some("HOME=/home/u\n"), Some("Host m\n  identityfile ~/.ssh/id\n")).is_empty());
         assert_eq!(ssh_lines(good, Some("HOME=/home/u\n"), Some("# IdentityAgent commented out\n")).len(), 1);
+    }
+
+    #[test]
+    fn windows_ssh_advice() {
+        let good = "ssh -F ~/.ssh/config -o BatchMode=yes -o LogLevel=ERROR bebop.local .local/bin/imessage-anisette";
+        assert!(windows_ssh_lines(good, true).is_empty(), "-F ~ is fine on Windows (expanded)");
+        let l = windows_ssh_lines("ssh mac x", false);
+        assert_eq!(l.len(), 2);
+        assert!(l[0].level == Level::Fail && l[0].detail.contains("OpenSSH Client"));
+        assert!(l[1].detail.contains("BatchMode"));
+        assert!(windows_ssh_hint("me@bebop.local: Permission denied (publickey).").unwrap().contains("1Password"));
+        assert!(windows_ssh_hint("Host key verification failed.").unwrap().contains("host key"));
+        assert!(windows_ssh_hint("ssh: Could not resolve hostname bebop.local: No such host is known.").is_some());
+        assert_eq!(windows_ssh_hint("something else"), None);
     }
 
     #[test]

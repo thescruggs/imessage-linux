@@ -37,7 +37,8 @@ older: imsg messages mailto:bob@example.com --before 1700000000000-42
 | `--json` | | Print the daemon's JSON unchanged (see [JSON mode](#json-mode)). |
 | `-q`, `--quiet` | | No confirmations, hints or progress lines; only requested data and errors. |
 | `--bus-address ADDR` | `IMSG_BUS_ADDRESS` | Talk to this D-Bus address instead of the session bus (tests, containers). |
-| `--state-dir DIR` | `IMESSAGED_STATE_DIR` | Daemon state directory, for `hwconfig import` and `doctor`. Default `$XDG_STATE_HOME/imessaged`. |
+| `--state-dir DIR` | `IMESSAGED_STATE_DIR` | Daemon state directory, for `hwconfig import` and `doctor` (and, peer-to-peer, where the daemon's `bus-address` is). Default `$XDG_STATE_HOME/imessaged` (Windows `%LOCALAPPDATA%\imessaged`). |
+| | `IMESSAGED_TRANSPORT` | `session` (Linux default) or `p2p`: connect peer-to-peer to the daemon at the address in `<state dir>/bus-address` (Windows default; see [DBUS.md](DBUS.md#peer-to-peer-transport-windows)). Ignored with `--bus-address`. |
 
 Global options may appear anywhere (`imsg status --json` = `imsg --json status`).
 Colour is decided per stream: stdout output is coloured only when stdout is
@@ -606,16 +607,45 @@ Checks, each `ok` / `WARN` / `FAIL`:
 | `IMDAppleServices` | the Apple binary for the NAC emulator, sha1 pinned |
 | `cert-1.0.plist` | local copy of Apple's validation cert (WARN only) |
 | `anisette` | with `anisette_command` (`IMESSAGED_ANISETTE_COMMAND`, else `config.toml`): the command prints a JSON object with `X-Apple-I-MD` and `X-Apple-I-MD-M` (ok) or not (FAIL); WARN when the Mac model in its `X-Mme-Client-Info` differs from `hwconfig.plist`'s `product_name` (the command must reach the Mac the hwconfig came from). Values are never shown and the command's stderr is redacted. Otherwise the remote server (`IMESSAGED_ANISETTE_URL`, else `anisette_url`, else `https://ani.sidestore.io`) accepts a TCP connection, reported as WARN because Apple rejects remote-server anisette since 2026-10-13 |
-| `anisette ssh` | only for an ssh `anisette_command`: WARN when it lacks `-F` (the sandboxed unit cannot read the system ssh config; use `ssh -F ~/.ssh/config -o BatchMode=yes -o LogLevel=ERROR ...`), WARN when `systemctl --user show-environment` has no `SSH_AUTH_SOCK` and `~/.ssh/config` names neither an `IdentityAgent` nor an `IdentityFile` |
-| `D-Bus activation` | `org.imessage.Daemon1.service` installed in `$XDG_DATA_HOME` / `$XDG_DATA_DIRS` `dbus-1/services` |
-| `systemd unit` | `systemctl --user is-active imessaged` (skipped without `systemctl`) |
-| `daemon` | `imessaged` answers on the bus (this may D-Bus-activate it) |
+| `anisette ssh` | only for an ssh `anisette_command`: WARN when it lacks `-F` (the sandboxed unit cannot read the system ssh config; use `ssh -F ~/.ssh/config -o BatchMode=yes -o LogLevel=ERROR ...`), WARN when `systemctl --user show-environment` has no `SSH_AUTH_SOCK` and `~/.ssh/config` names neither an `IdentityAgent` nor an `IdentityFile`. Windows instead: FAIL when there is no `ssh.exe` (the OpenSSH Client optional feature), WARN without `-o BatchMode=yes` (the daemon has no console to prompt on); `-F` is not needed there, and a `~/` in the command is expanded for cmd.exe, so the Linux line works as is. A failing ssh command gets a hint on Windows (agent: the OpenSSH Authentication Agent service with `ssh-add`, or 1Password's SSH agent; unknown host key; name not resolving) |
+| `D-Bus activation` | `org.imessage.Daemon1.service` installed in `$XDG_DATA_HOME` / `$XDG_DATA_DIRS` `dbus-1/services` (Linux) |
+| `systemd unit` | `systemctl --user is-active imessaged` (skipped without `systemctl`; Linux) |
+| `autostart` | Windows: the logon task `imessaged` exists and is enabled (`imsg service`) |
+| `daemon process` | Windows: imessaged listens at the address in `bus-address` |
+| `log` | Windows: the daemon's log file, `%LOCALAPPDATA%\imessaged\logs\imessaged.log` |
+| `daemon` | `imessaged` answers on the bus (this may D-Bus-activate it), or peer-to-peer |
 | `connection` | connection state (`connected` = ok, `error` = FAIL) |
 | `registration` | registered iMessage handles and the next renewal |
 | `profiles` | shared names and photos (`GetStatus.profiles`): `ready` = ok, anything else WARN; `needs_login` says to run `imsg login` once |
 | `mac host` | the daemon's `mac_host` (ok); when it is unset and `anisette_command` is an ssh command, WARN suggesting `mac_host = "<the host it reaches>"` for `imsg sync-mac`; nothing otherwise |
 
 Exit code 1 if any check FAILs. `--json`: `{"checks":[{"check","level","detail"}…],"ok":bool}`.
+
+### `setup [--from DIR] [--force]`
+
+Installs Apple's two files the daemon needs into the data directory
+(`~/.local/share/imessage-linux`, Windows `%LOCALAPPDATA%\imessage-linux`;
+`IMDAppleServices` goes to `$OPEN_ABSINTHE_BINARY` if that is set):
+`IMDAppleServices` (sha1-pinned) and `cert-1.0.plist` (sha256-pinned),
+downloaded from the same URLs as `tools/bootstrap.sh`, or with `--from DIR`
+copied from a folder holding both (for example `~/.local/share/imessage-linux`
+copied from a Linux install). A file that is already there with the right
+hash is kept unless `--force`; a file with the wrong hash is never
+installed. The native replacement for `tools/bootstrap.sh --download-only`
+on Windows; works on Linux too. Needs no daemon.
+
+### `service install [--exe PATH] [--no-start] | uninstall | status | start | stop`
+
+Starts the daemon at login and controls it. **Linux:** `systemctl --user`
+on the packaged unit (`install` = `enable --now`, `uninstall` = `disable
+--now`, `status`, `start`, `stop`). **Windows:** a per-user Task Scheduler
+task `imessaged` (created unelevated, for the user running `imsg`) that
+starts `imessaged.exe` (default: next to `imsg.exe`; `--exe` to choose) at
+log on, without a time limit, and starts it again within 5 minutes if it is
+not running. `install` also starts it now unless `--no-start`; `stop` ends
+it and disables the task (so it stays stopped, also at the next log on)
+until `start`; `uninstall` ends and deletes the task; `status` prints the
+task and whether the daemon listens (exit code 5 if it does not).
 
 ### `hwconfig import FILE [--force]`
 
