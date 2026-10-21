@@ -104,6 +104,41 @@ package. The installed bootstrap script only downloads Apple's files
 (there is no checkout to set up); the files land in
 `~/.local/share/imessage-linux/` exactly as from a source checkout.
 
+## Install on Windows (preview)
+
+The Windows port (`docs/WINDOWS-PLAN.md`) ships as **imsg for Windows**:
+`imessaged`, `imsg` and `imsg-tui` in one per-user installer (no admin
+rights), built entirely on Linux:
+
+```sh
+tools/windows/build-release.sh --installer
+# -> dist/windows/imessage-<version>-setup.exe + dist/windows/SHA256SUMS
+```
+
+`build-release.sh` cross-compiles for `x86_64-pc-windows-gnu` with
+mingw-w64 (`x86_64-w64-mingw32-gcc`, cmake, perl, make; `rustup target add
+x86_64-pc-windows-gnu`) into `target/windows-gnu`, links the mingw runtime
+statically (the exes import only Windows system DLLs) and copies the
+stripped exes to `dist/windows/bin`. `build-installer.sh` downloads a
+pinned Inno Setup 6 once into `~/.cache/imessage-linux/innosetup` (its own
+WINEPREFIX) and runs `ISCC.exe` under wine on
+`packaging/windows/imessage.iss`. `build-release.sh cargo test -p
+open-absinthe` runs tests for the gnu target under wine.
+
+On the Windows PC, run the setup exe. It is unsigned: SmartScreen says
+"Windows protected your PC", click **More info → Run anyway**. It installs
+to `%LOCALAPPDATA%\Programs\imsg`, adds that folder to the user `PATH`,
+creates a logon task (`imessaged`, Task Scheduler) that starts the daemon,
+and adds Start-menu entries "imsg TUI" (in Windows Terminal when
+installed) and "imsg doctor". The first-run steps are shown at the end of
+setup and installed as `README-Windows.txt`
+(`packaging/windows/README-Windows.txt`): import the hwconfig, fetch
+Apple's files, make `ssh <mac>` work from Windows (Windows ssh-agent or
+1Password's agent) and set `anisette_command` in
+`%LOCALAPPDATA%\imessaged\config.toml`, then `imsg login` and `imsg-tui`.
+Uninstalling removes the programs, PATH entry and task but keeps
+`%LOCALAPPDATA%\imessaged` and `%LOCALAPPDATA%\imessage-linux`.
+
 ## Setup on Linux
 
 Requirements: Rust 1.88+, git, curl, cmake, a C compiler, pkg-config.

@@ -186,7 +186,18 @@ imsg + imsg-tui are a working Windows iMessage client.
 KPeople and with the vCard resolver; Windows toasts; drag-drop/paste of files;
 dark mode follows Windows. `Sync from Mac` keeps working through Windows ssh.
 
-**W5: installer.** Craft → MSIX (or Inno Setup) bundling imessaged, imsg,
+**W5: installer.** *First cut 2026-10-20:* `tools/windows/build-release.sh
+--installer` cross-builds imessaged / imsg / imsg-tui for
+`x86_64-pc-windows-gnu` with mingw-w64 (vendored openssl configures
+`mingw64` with a Unix perl; mingw runtime linked statically, the exes import
+only system DLLs and the UCRT) and packs them with Inno Setup 6 under wine
+(`packaging/windows/imessage.iss`) into `dist/windows/imessage-<ver>-setup.exe`:
+per-user install of "imsg for Windows" (the neutral product name) to
+`%LOCALAPPDATA%\Programs\imsg`, user PATH, Start-menu entries, logon task via
+`imsg service install`, first-run steps in `README-Windows.txt`. Unsigned;
+no kmessages, MSIX or winget yet.
+
+Original plan: Craft → MSIX (or Inno Setup) bundling imessaged, imsg,
 imsg-tui and kmessages; it creates the logon task, Start-menu shortcut and
 AppUserModelID. The `IMDAppleServices` download stays a first-run step with
 the license note, as `bootstrap.sh` does today. Code-signing certificate;
