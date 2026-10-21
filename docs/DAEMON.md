@@ -264,6 +264,7 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `link_previews` | `--link-previews BOOL` / `--no-link-previews` / `IMESSAGED_LINK_PREVIEWS` | `true`; fetch a preview of the first link in an iMessage you send and send it with the text (see [Link previews](#link-previews)). The daemon then contacts the linked site when you send; never when you receive |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
+| — | `--transport` / `IMESSAGED_TRANSPORT` | `session` on Linux, `p2p` on Windows: how clients reach the API ([DBUS.md](DBUS.md#peer-to-peer-transport-windows)) |
 
 Unknown keys are an error (typo protection).
 
@@ -305,6 +306,14 @@ when IDS demands a fresh login (6005) the state becomes `NeedsLogin` and the
 user must enter the password again.
 
 ## Logging
+
+Linux: stderr, which systemd puts in the journal (`journalctl --user -u
+imessaged`). Windows has no journal, and the release `imessaged.exe` has no
+console (the logon task would otherwise keep a console window open), so it
+logs to `%LOCALAPPDATA%\imessaged\logs\imessaged.log` (`<state
+dir>\logs`), appending; past 10 MB at start the file becomes
+`imessaged.log.1`. Same records and filter as the journal, plus panics.
+A debug build keeps its console and also logs there.
 
 Our own log lines never contain message bodies, passwords, 2FA codes, keys
 or tokens (events are logged as ids/counts only). **The protocol crates are

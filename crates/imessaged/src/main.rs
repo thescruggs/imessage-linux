@@ -1,3 +1,11 @@
+// Release builds on Windows have no console: the logon task starts the
+// daemon at sign-in and a console window would sit on the desktop (or a
+// Windows Terminal tab open) for as long as it runs. It logs to
+// %LOCALAPPDATA%\imessaged\logs instead (logfile.rs), and children it
+// spawns get CREATE_NO_WINDOW (platform::process). Debug builds keep the
+// console for development.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -106,7 +114,30 @@ async fn main() -> anyhow::Result<()> {
         },
     )?;
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&cfg.log_level)).init();
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&cfg.log_level));
+    // No journal on Windows: log to a file (and the terminal, if any).
+    #[cfg(windows)]
+    let log_file = match imessaged::logfile::open(&cfg.state_dir) {
+        Ok(w) => {
+            logger.target(env_logger::Target::Pipe(Box::new(w))).write_style(env_logger::WriteStyle::Never);
+            Ok(imessaged::logfile::log_path(&cfg.state_dir))
+        }
+        Err(e) => Err(e),
+    };
+    logger.init();
+    #[cfg(windows)]
+    {
+        match &log_file {
+            Ok(p) => eprintln!("imessaged: logging to {}", p.display()),
+            Err(e) => log::warn!("cannot open the log file under {}: {e}; logging to stderr", cfg.state_dir.display()),
+        }
+        // Without a console a panic message would go nowhere.
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log::error!("panic: {info}");
+            default_hook(info);
+        }));
+    }
     log::info!("imessaged {} starting", env!("CARGO_PKG_VERSION"));
     log::info!("state dir: {}", cfg.state_dir.display());
     match &cfg.anisette_command {

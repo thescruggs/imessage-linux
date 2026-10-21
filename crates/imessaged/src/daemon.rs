@@ -348,22 +348,36 @@ pub async fn shutdown_signal() {
 
 /// Resolves on Ctrl+C / Ctrl+Break, the console window closing, or the
 /// user logging off / the system shutting down. Windows gives a console
-/// process only a few seconds after the last three before killing it.
-/// (A D-Bus `Shutdown` method for the Task Scheduler stop is phase W3.)
+/// process only a few seconds after the last three before killing it. A
+/// release build has no console (main.rs): none of these arrive, and the
+/// daemon ends when the logon task is stopped or the session ends (the
+/// store is SQLite with a WAL and state saves are atomic, so that is safe).
+/// A handler that cannot be installed is skipped.
 #[cfg(windows)]
 pub async fn shutdown_signal() {
     use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
-    let mut c = ctrl_c().expect("install Ctrl+C handler");
-    let mut brk = ctrl_break().expect("install Ctrl+Break handler");
-    let mut close = ctrl_close().expect("install console close handler");
-    let mut logoff = ctrl_logoff().expect("install logoff handler");
-    let mut shutdown = ctrl_shutdown().expect("install shutdown handler");
+    macro_rules! on {
+        ($install:expr, $what:literal) => {
+            async {
+                match $install {
+                    Ok(mut s) => {
+                        s.recv().await;
+                        log::info!($what);
+                    }
+                    Err(e) => {
+                        log::debug!("no {} handler: {e}", $what);
+                        std::future::pending::<()>().await
+                    }
+                }
+            }
+        };
+    }
     tokio::select! {
-        _ = c.recv() => log::info!("Ctrl+C"),
-        _ = brk.recv() => log::info!("Ctrl+Break"),
-        _ = close.recv() => log::info!("console closed"),
-        _ = logoff.recv() => log::info!("logoff"),
-        _ = shutdown.recv() => log::info!("system shutdown"),
+        _ = on!(ctrl_c(), "Ctrl+C") => {}
+        _ = on!(ctrl_break(), "Ctrl+Break") => {}
+        _ = on!(ctrl_close(), "console closed") => {}
+        _ = on!(ctrl_logoff(), "logoff") => {}
+        _ = on!(ctrl_shutdown(), "system shutdown") => {}
     }
 }
 

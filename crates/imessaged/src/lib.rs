@@ -8,5 +8,6 @@ pub mod engine;
 pub mod hub;
 pub mod keyring;
 pub mod linkpreview;
+pub mod logfile;
 pub mod state;
 pub mod store;
