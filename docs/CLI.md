@@ -642,9 +642,12 @@ on the packaged unit (`install` = `enable --now`, `uninstall` = `disable
 task `imessaged` (created unelevated, for the user running `imsg`) that
 starts `imessaged.exe` (default: next to `imsg.exe`; `--exe` to choose) at
 log on, without a time limit, and starts it again within 5 minutes if it is
-not running. `install` also starts it now unless `--no-start`; `stop` ends
-it and disables the task (so it stays stopped, also at the next log on)
-until `start`; `uninstall` ends and deletes the task; `status` prints the
+not running. `install` also starts it now unless `--no-start`; `stop` disables
+the task (so it stays stopped, also at the next log on, until `start`),
+asks the daemon to shut down over D-Bus (`Shutdown`: state saved as on
+SIGTERM), waits up to 15 s for it to exit and then ends whatever is left;
+`uninstall` does the same and deletes the task (both also work when no
+task exists, e.g. before an upgrade replaces the binaries); `status` prints the
 task and whether the daemon listens (exit code 5 if it does not).
 
 ### `hwconfig import FILE [--force]`

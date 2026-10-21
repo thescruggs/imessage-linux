@@ -423,6 +423,8 @@ fn main() -> ExitCode {
             Some(a) => Bus::Address(a),
             None => match Bus::for_state_dir(&state_dir) {
                 Ok(b) => b,
+                // Only commands that talk to the daemon care.
+                Err(_) if matches!(cli.command, Command::Setup { .. } | Command::Service { .. } | Command::Hwconfig { .. }) => Bus::Session,
                 Err(e) => {
                     eprintln!("imsg: error: {e}");
                     return ExitCode::from(e.code);

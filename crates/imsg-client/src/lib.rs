@@ -188,6 +188,7 @@ pub trait Daemon1 {
     fn purge_invalid_chats(&self, dry_run: bool) -> zbus::Result<String>;
     fn get_handle_profile(&self, handle: &str) -> zbus::Result<String>;
     fn version(&self) -> zbus::Result<String>;
+    fn shutdown(&self) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn connection_state(&self) -> zbus::Result<String>;
@@ -586,6 +587,12 @@ impl Client {
     /// `PurgeInvalidChats`: the daemon's summary (see docs/DBUS.md).
     pub async fn purge_invalid_chats(&self, dry_run: bool) -> Result<Json<serde_json::Value>> {
         parse("purge summary", long_call("the purge", self.proxy.purge_invalid_chats(dry_run)).await?)
+    }
+
+    /// `Shutdown`: the daemon stops as on SIGTERM (state saved); it has
+    /// replied once this returns, and is gone a few seconds later.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.proxy.shutdown().await.map_err(map_zbus)
     }
 
     pub async fn version(&self) -> Result<String> {

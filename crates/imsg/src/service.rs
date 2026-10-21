@@ -7,7 +7,10 @@
 //! minutes if it is not running (a crash; Task Scheduler's own
 //! "restart on failure" does not fire for a program that exits with an
 //! error). `stop` also disables the task, so the daemon stays stopped
-//! until `start`.
+//! until `start`. `stop` and `uninstall` first ask the daemon to shut down
+//! over D-Bus (`Shutdown`: state saved) and wait up to 15 s for it to exit,
+//! then end the task. `imsg service stop` is also what an installer runs
+//! before replacing the binaries.
 
 // The Task Scheduler helpers are pure so their tests run everywhere; only
 // Windows calls them.
@@ -131,6 +134,53 @@ pub fn settings_enabled(xml: &str) -> Option<bool> {
     Some(v.eq_ignore_ascii_case("true"))
 }
 
+/// Text of a Windows console tool's piped output: UTF-16 LE when it says
+/// so (BOM `FF FE`) or looks like it (NUL high bytes, as `schtasks /XML`
+/// may write), else UTF-8 (lossy; an OEM code page only garbles
+/// non-ASCII, and what is parsed is ASCII).
+pub fn decode_output(bytes: &[u8]) -> String {
+    let utf16 = |b: &[u8]| String::from_utf16_lossy(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(rest);
+    }
+    let odd_nuls = bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
+    if bytes.len() >= 2 && odd_nuls * 2 >= bytes.len() / 2 {
+        return utf16(bytes);
+    }
+    String::from_utf8_lossy(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)).into_owned()
+}
+
+/// Ask a peer-to-peer daemon of `state_dir` to shut down (D-Bus
+/// `Shutdown`: state saved as on SIGTERM) and wait up to `wait` for it to
+/// release `imessaged.lock`, which it holds until the process ends.
+/// `Ok(false)`: no daemon answered. Err: it answered but did not finish.
+pub async fn stop_peer_daemon(state_dir: &Path, wait: std::time::Duration) -> anyhow::Result<bool> {
+    use imessage_common::platform::ipc::{BUS_ADDRESS_FILE, LOCK_FILE};
+    let bus = crate::client::Bus::Peer(state_dir.join(BUS_ADDRESS_FILE));
+    let asked = async {
+        let c = crate::client::Client::connect(&bus).await.ok()?;
+        c.shutdown().await.ok()
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(10), asked).await.ok().flatten().is_none() {
+        return Ok(false);
+    }
+    let lock = state_dir.join(LOCK_FILE);
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Ok(Some(_released)) = imessage_common::platform::fs::lock_exclusive(&lock) {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("imessaged was asked to stop but still runs after {} s", wait.as_secs());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// How long `stop` / `uninstall` wait for a graceful shutdown before
+/// ending the task (the engine closes APNs and IDS and saves first).
+pub const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The daemon's peer-to-peer port from a `bus-address` file's text.
 pub fn address_port(text: &str) -> Option<u16> {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -205,7 +255,7 @@ mod imp {
 
     /// stdout + stderr of a failed schtasks run, for the error message.
     fn text(o: &Output) -> String {
-        let s = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        let s = format!("{}{}", decode_output(&o.stdout), decode_output(&o.stderr));
         s.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
     }
 
@@ -216,7 +266,7 @@ mod imp {
     /// The task's XML, `None` if it does not exist.
     fn query_xml() -> Option<String> {
         let o = schtasks(&["/Query", "/TN", NAME, "/XML"]).ok()?;
-        let xml = String::from_utf8_lossy(&o.stdout).into_owned();
+        let xml = decode_output(&o.stdout);
         (o.status.success() && xml.contains("<Task")).then_some(xml)
     }
 
@@ -258,17 +308,36 @@ mod imp {
         Ok(exit::OK)
     }
 
+    /// D-Bus `Shutdown`, then wait for the process to finish saving.
+    fn graceful_stop(state_dir: &Path) {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => return eprintln!("imsg: cannot start the async runtime: {e}"),
+        };
+        match rt.block_on(stop_peer_daemon(state_dir, STOP_WAIT)) {
+            Ok(true) => println!("imessaged stopped (state saved)"),
+            Ok(false) => println!("imessaged is not running (or did not answer)"),
+            Err(e) => eprintln!("imsg: {e}; ending it"),
+        }
+    }
+
     pub fn run(cmd: &ServiceCommand, state_dir: &Path) -> anyhow::Result<u8> {
         match cmd {
             ServiceCommand::Install { exe, no_start } => install(exe.as_deref(), !no_start),
             ServiceCommand::Uninstall => {
-                if query_xml().is_none() {
+                let installed = query_xml().is_some();
+                if installed {
+                    // Disabled first, or the 5-minute repetition restarts it.
+                    let _ = schtasks(&["/Change", "/TN", NAME, "/DISABLE"]);
+                }
+                graceful_stop(state_dir);
+                if !installed {
                     println!("task {NAME} is not installed");
                     return Ok(exit::OK);
                 }
                 let _ = schtasks(&["/End", "/TN", NAME]);
                 check(schtasks(&["/Delete", "/TN", NAME, "/F"])?, "deleting the task")?;
-                println!("task {NAME} removed (imessaged stopped)");
+                println!("task {NAME} removed");
                 Ok(exit::OK)
             }
             ServiceCommand::Start => {
@@ -281,13 +350,17 @@ mod imp {
                 Ok(exit::OK)
             }
             ServiceCommand::Stop => {
-                if query_xml().is_none() {
-                    anyhow::bail!("task {NAME} is not installed");
+                let installed = query_xml().is_some();
+                if installed {
+                    // Disabled first, or the 5-minute repetition restarts it.
+                    check(schtasks(&["/Change", "/TN", NAME, "/DISABLE"])?, "disabling the task")?;
                 }
-                // Disabled first, or the 5-minute repetition starts it again.
-                check(schtasks(&["/Change", "/TN", NAME, "/DISABLE"])?, "disabling the task")?;
-                let _ = schtasks(&["/End", "/TN", NAME]);
-                println!("stopped; it stays stopped (also at log on) until `imsg service start`");
+                graceful_stop(state_dir);
+                if installed {
+                    // Whatever is left (a daemon that did not answer).
+                    let _ = schtasks(&["/End", "/TN", NAME]);
+                    println!("it stays stopped (also at log on) until `imsg service start`");
+                }
                 Ok(exit::OK)
             }
             ServiceCommand::Status => {
@@ -340,6 +413,48 @@ mod tests {
         let disabled = xml.replace("<Enabled>true</Enabled>\n    <Hidden>", "<Enabled>false</Enabled>\n    <Hidden>");
         assert_eq!(settings_enabled(&disabled), Some(false), "only Settings/Enabled counts");
         assert_eq!(settings_enabled("<Task/>"), None);
+    }
+
+    /// What `imsg service stop` does on Windows, against a peer-to-peer
+    /// daemon run the way imessaged's main runs it (lock held until exit).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_stop_waits_for_the_daemon() {
+        use imessaged::{config::DaemonConfig, daemon::Daemon, dbus::BusChoice, engine::mock::{MockCall, MockEngine}};
+        use imessaged::{keyring::StateKey, store::{Store, StoreHandle}};
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_path_buf();
+        assert!(!stop_peer_daemon(&d, STOP_WAIT).await.unwrap(), "nothing running");
+
+        let mock = std::sync::Arc::new(MockEngine::new());
+        let lock = imessaged::dbus::peer::lock_dir(&d).unwrap();
+        let store = StoreHandle::new(Store::open(&d, StateKey::from_bytes([2; 32])).unwrap());
+        let daemon = Daemon::with_engine(DaemonConfig::new(d.clone()), mock.clone()).with_store(store).with_dbus(BusChoice::Peer(d.clone())).with_peer_lock(lock.clone());
+        let main = tokio::spawn(async move {
+            daemon.run_until(std::future::pending()).await.unwrap();
+            drop(lock); // as main returns
+        });
+        while !d.join(imessage_common::platform::ipc::BUS_ADDRESS_FILE).exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(stop_peer_daemon(&d, STOP_WAIT).await.unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(5), main).await.expect("daemon task ended").unwrap();
+        assert!(mock.calls().contains(&MockCall::Shutdown), "engine shut down (state saved)");
+    }
+
+    #[test]
+    fn console_output_decoding() {
+        let xml = "<?xml?>\r\n<Task><Settings><Enabled>true</Enabled></Settings></Task>\r\n";
+        let mut bom = vec![0xFF, 0xFE];
+        bom.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(decode_output(&bom), xml);
+        let no_bom: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode_output(&no_bom), xml);
+        assert_eq!(settings_enabled(&decode_output(&no_bom)), Some(true));
+        assert_eq!(decode_output(xml.as_bytes()), xml);
+        assert_eq!(decode_output(b"\xEF\xBB\xBFok"), "ok");
+        // OEM code page bytes: lossy, ASCII intact.
+        assert_eq!(decode_output(b"ERROR: Zugriff verweigert \x84"), "ERROR: Zugriff verweigert \u{fffd}");
+        assert_eq!(decode_output(b""), "");
     }
 
     #[test]

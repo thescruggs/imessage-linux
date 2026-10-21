@@ -21,6 +21,8 @@ use crate::client::exit;
 /// Same URLs as tools/bootstrap.sh (keep in sync).
 const NAC_URL: &str = "https://github.com/JJTech0130/nacserver/raw/main/IMDAppleServices";
 const CERT_URL: &str = "http://static.ess.apple.com/identity/validation/cert-1.0.plist";
+/// No bytes for this long = the download is stuck.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Far above either file (IMDAppleServices is ~6 MB).
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -89,8 +91,10 @@ fn install(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     pfs::create_private_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dir.join(format!(".{name}.part.{}", std::process::id()));
+    // Left over from an interrupted run of this pid: ours to replace.
+    let _ = std::fs::remove_file(&tmp);
     let write = || -> std::io::Result<()> {
-        let mut f = pfs::private_options().write(true).create(true).truncate(true).open(&tmp)?;
+        let mut f = pfs::private_options().write(true).create_new(true).open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
@@ -104,9 +108,16 @@ fn install(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 async fn download(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
-    let mut resp = client.get(url).send().await.and_then(|r| r.error_for_status()).with_context(|| format!("downloading {url}"))?;
+    let stalled = || anyhow::anyhow!("downloading {url}: no data for {} s", READ_TIMEOUT.as_secs());
+    let mut resp = tokio::time::timeout(READ_TIMEOUT, client.get(url).send())
+        .await
+        .map_err(|_| stalled())?
+        .and_then(|r| r.error_for_status())
+        .with_context(|| format!("downloading {url}"))?;
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.with_context(|| format!("downloading {url}"))? {
+    // A per-read limit (reqwest 0.11 has only a total one): a slow but
+    // moving download is fine, a stalled one is not.
+    while let Some(chunk) = tokio::time::timeout(READ_TIMEOUT, resp.chunk()).await.map_err(|_| stalled())?.with_context(|| format!("downloading {url}"))? {
         body.extend_from_slice(&chunk);
         if body.len() > MAX_BYTES {
             bail!("{url}: more than {} MB, not the expected file", MAX_BYTES / (1024 * 1024));
@@ -120,7 +131,6 @@ async fn download(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>
 /// `force`.
 pub async fn run(from: Option<&Path>, force: bool) -> anyhow::Result<u8> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(20))
         .user_agent(concat!("imsg/", env!("CARGO_PKG_VERSION")))
         .build()?;
