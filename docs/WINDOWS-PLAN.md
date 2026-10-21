@@ -162,8 +162,9 @@ What a first real run needs:
   imessaged.log` (rotated at 10 MB at start; panics included), and
   `shell_command` spawns cmd.exe with `CREATE_NO_WINDOW` so anisette runs
   do not flash a console. Without a console there is no Ctrl+C / logoff
-  event: the task's End or the session ending kills it (SQLite WAL, atomic
-  state saves). A debug build keeps its console.
+  event: `imsg service stop` uses D-Bus `Shutdown` (below); a session
+  ending still kills it (SQLite WAL, atomic state saves after login and
+  registration). A debug build keeps its console.
 * Anisette over Windows OpenSSH: cmd.exe does not expand `~`, so
   `shell_command` expands a word-initial `~/` to `%USERPROFILE%` (quoted
   if it has spaces): the Linux `ssh -F ~/.ssh/config ...` line works
@@ -172,9 +173,15 @@ What a first real run needs:
   (OpenSSH Authentication Agent + `ssh-add`, or 1Password's agent; host
   key; name resolution). Child output parsing tolerates CRLF (`lines()`,
   serde_json).
+* Graceful stop: D-Bus `Shutdown` (any transport) stops the daemon as
+  SIGTERM does; `imsg service stop` / `uninstall` call it, wait up to 15 s
+  for `imessaged.lock` to be released (main holds it until the process
+  ends), then `schtasks /End`. Installers run `imsg service stop` before
+  replacing the binaries. The 5-minute repetition only begins once the
+  logon trigger has fired (a log on after install); until then only the
+  task's own start covers a crash.
 * Not done: a same-identity warning (the doctor cannot see the other
-  install, so it would be noise); a D-Bus `Shutdown` method for a
-  graceful `imsg service stop`.
+  install, so it would be noise).
 
 Original plan: `imsg hwconfig import`, `imsg login` (2FA),
 register, APNs receive loop, send/receive/attachments, Text Message

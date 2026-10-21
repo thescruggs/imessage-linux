@@ -312,7 +312,9 @@ imessaged`). Windows has no journal, and the release `imessaged.exe` has no
 console (the logon task would otherwise keep a console window open), so it
 logs to `%LOCALAPPDATA%\imessaged\logs\imessaged.log` (`<state
 dir>\logs`), appending; past 10 MB at start the file becomes
-`imessaged.log.1`. Same records and filter as the journal, plus panics.
+`imessaged.log.1`. Same records and filter as the journal, plus panics
+and fatal startup errors. To stop it gracefully there, `imsg service stop`
+calls the D-Bus `Shutdown` method.
 A debug build keeps its console and also logs there.
 
 Our own log lines never contain message bodies, passwords, 2FA codes, keys
