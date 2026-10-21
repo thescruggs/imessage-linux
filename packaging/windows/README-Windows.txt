@@ -112,3 +112,8 @@ Troubleshooting
   status` shows it, `imsg service start` starts it (`imsg service install`
   recreates the task), or run imessaged.exe by hand in a terminal to see why
   it stops.
+- If imessaged crashes, the logon task restarts it every 5 minutes, but
+  only after your next sign-in to Windows; until then a crash leaves it
+  stopped (`imsg service start`).
+- Stop the daemon with `imsg service stop`, not Task Manager: it lets
+  imessaged save its registration state first.

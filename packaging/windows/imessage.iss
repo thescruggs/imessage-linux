@@ -202,6 +202,10 @@ end;
   or removed. }
 procedure StopDaemon();
 begin
+  { Graceful first: `imsg service stop` asks the daemon to save its push/IDS
+    state and exit (waits up to 15 s). The kill below only catches leftovers. }
+  if FileExists(ExpandConstant('{app}\imsg.exe')) then
+    RunHidden(ExpandConstant('{app}\imsg.exe'), 'service stop');
   Schtasks('/End /TN "' + TaskName + '"');
   RunHidden(ExpandConstant('{sys}\taskkill.exe'), '/F /IM imessaged.exe');
 end;
