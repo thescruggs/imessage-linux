@@ -14,7 +14,7 @@ members = [
 exclude = ["third_party"]
 
 [workspace.package]
-version = "0.1.13"
+version = "0.1.14"
 edition = "2024"
 license = "SSPL-1.0"
 rust-version = "1.88"

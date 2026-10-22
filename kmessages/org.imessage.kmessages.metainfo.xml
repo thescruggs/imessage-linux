@@ -30,6 +30,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.14" date="2026-10-21">
+      <description>
+        <p>Messages in the open conversation stay unread and notify you while you are away from the keyboard, and the task manager icon shows the unread count.</p>
+      </description>
+    </release>
     <release version="0.1.13" date="2026-10-18">
       <description>
         <p>Pinned conversations at the top, a Sync from Mac button for contacts and pins, link previews, picking recipients with the keyboard, and emoji suggestions while typing.</p>

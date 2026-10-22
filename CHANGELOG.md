@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.14 (2026-10-21)
 
 * **New: `imsg-tui`, a terminal app.** The Mac-only
   [imessage-cli](https://github.com/thescruggs/imessage-cli) terminal
