@@ -64,8 +64,10 @@ int main(int argc, char **argv)
 
     km::AppOptions options;
     options.tray = !parser.isSet(noTray);
-    // A screenshot run sits beside the real instance: no duplicate notifications.
+    // A screenshot run sits beside the real instance: no duplicate notifications
+    // or a second badge on the same task manager entry.
     options.notifications = !parser.isSet(screenshot);
+    options.launcherBadge = !parser.isSet(screenshot);
     km::AppController controller(QDBusConnection::sessionBus(), options);
 
     QQmlApplicationEngine engine;

@@ -62,6 +62,18 @@
 * **Refactor: `imsg-client` crate.** The D-Bus proxy and typed client
   that `imsg` had in `client.rs` are now a small library crate shared by
   `imsg` and `imsg-tui` (no behaviour change for `imsg`).
+* **kmessages: no read receipts while you are away.** With the window
+  left open and active on a conversation, new messages there used to be
+  marked read at once, without a notification, even with nobody at the
+  computer. Now, after a minute without keyboard or mouse input (KIdleTime;
+  Settings → General → "Treat me as away after", "Never" for the old
+  behaviour), they are notified and stay unread until you are back; your
+  first input then marks the open chat read. New dependency: KF6 IdleTime
+  (`kidletime` on Arch).
+* **kmessages: unread count on the task manager.** Plasma's task manager
+  shows the number of unread messages on the Messages entry (Unity
+  LauncherEntry D-Bus API; off with Settings → General → "Unread count on
+  the task manager").
 
 ## 0.1.13 (2026-10-18)
 

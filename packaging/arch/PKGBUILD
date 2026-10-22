@@ -29,6 +29,7 @@ depends=(
   'kdbusaddons'
   'ki18n'
   'kiconthemes'
+  'kidletime'
   'kirigami'
   'kirigami-addons'
   'knotifications'

@@ -11,6 +11,7 @@ add_library(kmessages_core STATIC
     handlelookupmodel.cpp handlelookupmodel.h
     messagesearchmodel.cpp messagesearchmodel.h
     appsettings.cpp appsettings.h
+    launcherentry.cpp launcherentry.h
     contactresolver.cpp contactresolver.h
     contactsuggestionmodel.cpp contactsuggestionmodel.h
     recipientpickermodel.cpp recipientpickermodel.h
@@ -24,7 +25,7 @@ target_compile_options(kmessages_core PRIVATE -Wall -Wextra)
 target_compile_definitions(kmessages_core PUBLIC TRANSLATION_DOMAIN="kmessages")
 target_link_libraries(kmessages_core PUBLIC
     Qt6::Core Qt6::Gui Qt6::DBus Qt6::Qml Qt6::Quick Qt6::Widgets
-    KF6::I18n KF6::I18nQml KF6::ConfigCore KF6::Notifications KF6::StatusNotifierItem
+    KF6::I18n KF6::I18nQml KF6::ConfigCore KF6::Notifications KF6::StatusNotifierItem KF6::IdleTime
 )
 if(KMESSAGES_WITH_KPEOPLE)
     target_compile_definitions(kmessages_core PUBLIC KMESSAGES_WITH_KPEOPLE=1)

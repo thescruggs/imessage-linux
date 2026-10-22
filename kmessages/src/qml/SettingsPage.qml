@@ -225,6 +225,30 @@ FormCard.FormCardPage {
             onToggled: App.settings.notificationsEnabled = checked
         }
         FormCard.FormDelegateSeparator {}
+        FormCard.FormSpinBoxDelegate {
+            objectName: "awayAfterSpinBox"
+            label: i18n("Treat me as away after")
+            description: i18n("Without keyboard or mouse input for this long, the open conversation is not marked read: new messages in it are notified and stay unread until you are back. “Never” marks them read whenever the window is in front.")
+            from: 0
+            to: 3600
+            stepSize: 15
+            value: App.settings.awayAfterSeconds
+            textFromValue: (value, locale) => value === 0 ? i18nc("away after: never", "Never") : i18np("%1 second", "%1 seconds", value)
+            valueFromText: (text, locale) => {
+                const n = parseInt(text);
+                return isNaN(n) ? 0 : n;
+            }
+            onValueModified: App.settings.awayAfterSeconds = value
+        }
+        FormCard.FormDelegateSeparator {}
+        FormCard.FormSwitchDelegate {
+            objectName: "unreadBadgeSwitch"
+            text: i18n("Unread count on the task manager")
+            description: i18n("Show the number of unread messages on the Messages entry in the task manager.")
+            checked: App.settings.unreadBadge
+            onToggled: App.settings.unreadBadge = checked
+        }
+        FormCard.FormDelegateSeparator {}
         FormCard.FormSwitchDelegate {
             text: i18n("Start minimised")
             description: App.trayAvailable ? i18n("Start in the system tray without opening the window.") : i18n("Needs the system tray icon.")

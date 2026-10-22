@@ -18,7 +18,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core Gui DBus Qml Quick QuickControls2 Widgets)
 find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
-    Kirigami I18n CoreAddons Config Notifications StatusNotifierItem IconThemes DBusAddons)
+    Kirigami I18n CoreAddons Config Notifications StatusNotifierItem IconThemes DBusAddons IdleTime)
 find_package(KF6KirigamiAddons 1.0 REQUIRED)
 set_package_properties(KF6KirigamiAddons PROPERTIES TYPE RUNTIME
     DESCRIPTION "FormCard, Avatar and delegates used by the QML UI")

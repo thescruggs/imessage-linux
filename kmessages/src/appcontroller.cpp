@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: SSPL-1.0
 #include "appcontroller.h"
 
+#include <KIdleTime>
 #include <KLocalizedString>
 #include <KNotification>
 #include <KNotificationReplyAction>
@@ -48,6 +49,23 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
         m_client->setOtherOwnHandles(m_settings->otherHandleUris());
     });
 
+    // Away from the keyboard: the window may be active on the open chat, but
+    // nobody is reading it. Without an idle backend (e.g. offscreen) no
+    // timeout ever fires, so the user is never away.
+    if (m_options.idleDetection) {
+        auto *idle = KIdleTime::instance();
+        connect(idle, &KIdleTime::timeoutReached, this, [this](int id) {
+            if (id != 0 && id == m_idleTimeoutId) {
+                setUserAway(true);
+            }
+        });
+        connect(idle, &KIdleTime::resumingFromIdle, this, [this] {
+            setUserAway(false);
+        });
+    }
+    updateIdleWatch();
+    connect(m_settings, &AppSettings::changed, this, &AppController::updateIdleWatch);
+
     m_problemTimer.setSingleShot(true);
     m_problemTimer.setInterval(1500);
     connect(&m_problemTimer, &QTimer::timeout, this, &AppController::checkConnectionProblem);
@@ -73,6 +91,12 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
         }
     });
     connect(m_chatList, &ChatListModel::totalUnreadChanged, this, &AppController::updateTray);
+    if (m_options.launcherBadge) {
+        m_launcher = new LauncherEntry(bus, u"org.imessage.kmessages"_s, this);
+        connect(m_chatList, &ChatListModel::totalUnreadChanged, this, &AppController::updateLauncherBadge);
+        connect(m_settings, &AppSettings::changed, this, &AppController::updateLauncherBadge);
+        updateLauncherBadge();
+    }
     connect(m_chatList, &QAbstractItemModel::dataChanged, this, &AppController::currentChatTitleChanged);
     connect(m_chatList, &QAbstractItemModel::modelReset, this, &AppController::currentChatTitleChanged);
     // Same triggers: chat data, model reset, current chat switch.
@@ -106,7 +130,12 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
     }
 }
 
-AppController::~AppController() = default;
+AppController::~AppController()
+{
+    if (m_idleTimeoutId != 0) {
+        KIdleTime::instance()->removeIdleTimeout(m_idleTimeoutId);
+    }
+}
 
 void AppController::setWindow(QWindow *window)
 {
@@ -162,9 +191,56 @@ QString AppController::currentChatBackground() const
     return m_currentChatId.isEmpty() ? QString() : m_chatList->backgroundFor(m_currentChatId);
 }
 
+void AppController::setUserAway(bool away)
+{
+    if (away && m_settings->awayAfterSeconds() == 0) {
+        return;
+    }
+    if (away == m_userAway) {
+        return;
+    }
+    m_userAway = away;
+    if (away) {
+        m_markReadTimer.stop();
+        if (m_options.idleDetection) {
+            KIdleTime::instance()->catchNextResumeEvent();
+        }
+    }
+    Q_EMIT userAwayChanged();
+    if (!away) {
+        // Back at the keyboard with the chat in front of them: now it is read.
+        scheduleMarkRead();
+    }
+}
+
+void AppController::updateIdleWatch()
+{
+    // At most a day (and no int overflow in ms).
+    const int ms = qMin(m_settings->awayAfterSeconds(), 24 * 60 * 60) * 1000;
+    if (ms == m_idleTimeoutMs) {
+        return;
+    }
+    m_idleTimeoutMs = ms;
+    if (ms == 0) {
+        setUserAway(false);
+    }
+    if (!m_options.idleDetection) {
+        return;
+    }
+    auto *idle = KIdleTime::instance();
+    if (m_idleTimeoutId != 0) {
+        idle->removeIdleTimeout(m_idleTimeoutId);
+        m_idleTimeoutId = 0;
+    }
+    if (ms > 0) {
+        m_idleTimeoutId = idle->addIdleTimeout(ms);
+    }
+}
+
 bool AppController::chatVisible(const QString &chatId) const
 {
-    return !chatId.isEmpty() && chatId == m_currentChatId && m_conversationVisible && m_window && m_window->isVisible() && m_window->isActive();
+    return !chatId.isEmpty() && chatId == m_currentChatId && m_conversationVisible && m_window && m_window->isVisible() && m_window->isActive()
+        && !m_userAway;
 }
 
 void AppController::scheduleMarkRead()
@@ -177,6 +253,10 @@ void AppController::scheduleMarkRead()
 void AppController::markReadNow()
 {
     if (chatVisible(m_currentChatId) && m_chatList->unreadFor(m_currentChatId) > 0) {
+        // Notified while the user was away: read now.
+        if (auto n = m_notifications.take(m_currentChatId)) {
+            n->close();
+        }
         markChatRead(m_currentChatId);
     }
 }
@@ -439,6 +519,13 @@ void AppController::updateTray()
         subtitle = m_backgroundProblem;
     }
     m_tray->setToolTip(u"dialog-messages"_s, i18n("Messages"), subtitle);
+}
+
+void AppController::updateLauncherBadge()
+{
+    if (m_launcher) {
+        m_launcher->setCount(m_chatList->totalUnread(), m_settings->unreadBadge());
+    }
 }
 
 void AppController::showWindow()

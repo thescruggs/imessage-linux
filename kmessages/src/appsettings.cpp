@@ -59,6 +59,33 @@ void AppSettings::setCloseToTray(bool on)
     write("CloseToTray", on);
 }
 
+int AppSettings::awayAfterSeconds() const
+{
+    return qMax(0, m_config->group(QStringLiteral("General")).readEntry("AwayAfterSeconds", DefaultAwayAfterSeconds));
+}
+
+void AppSettings::setAwayAfterSeconds(int seconds)
+{
+    seconds = qMax(0, seconds);
+    if (seconds == awayAfterSeconds()) {
+        return;
+    }
+    auto group = m_config->group(QStringLiteral("General"));
+    group.writeEntry("AwayAfterSeconds", seconds);
+    group.sync();
+    Q_EMIT changed();
+}
+
+bool AppSettings::unreadBadge() const
+{
+    return read("UnreadBadge", true);
+}
+
+void AppSettings::setUnreadBadge(bool on)
+{
+    write("UnreadBadge", on);
+}
+
 QString AppSettings::readText(const char *key) const
 {
     return m_config->group(QStringLiteral("General")).readEntry(key, QString());

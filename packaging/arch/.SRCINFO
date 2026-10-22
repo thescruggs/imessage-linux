@@ -23,6 +23,7 @@ pkgbase = imessage-linux
 	depends = kdbusaddons
 	depends = ki18n
 	depends = kiconthemes
+	depends = kidletime
 	depends = kirigami
 	depends = kirigami-addons
 	depends = knotifications

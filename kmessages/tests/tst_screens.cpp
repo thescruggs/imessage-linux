@@ -12,6 +12,9 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDBusArgument>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDir>
 #include <functional>
 #include <QFile>
@@ -75,6 +78,17 @@ class TestScreens : public QObject
     std::unique_ptr<QQmlApplicationEngine> m_engine;
     QQuickWindow *m_window = nullptr;
     QStringList m_shots;
+    QList<QVariantMap> m_badgeUpdates; ///< LauncherEntry Update signals seen on the bus
+
+    /// The window active, as with the user in front of it; false if the
+    /// platform cannot do that.
+    bool activateWindow()
+    {
+        m_window->requestActivate();
+        return QTest::qWaitFor([&] {
+            return m_window->isActive();
+        }, 2000);
+    }
 
     void settle(int ms = 400)
     {
@@ -222,6 +236,14 @@ class TestScreens : public QObject
         }
         QVERIFY2(colours.size() > 40, qPrintable(u"%1 looks blank (%2 colours)"_s.arg(name).arg(colours.size())));
         qInfo().noquote() << "screenshot" << path << img.size() << colours.size() << "colours";
+    }
+
+public Q_SLOTS:
+    void onLauncherUpdate(const QString &appUri, const QVariantMap &properties)
+    {
+        if (appUri == u"application://org.imessage.kmessages.desktop"_s) {
+            m_badgeUpdates << properties;
+        }
     }
 
 private Q_SLOTS:
@@ -660,6 +682,127 @@ private Q_SLOTS:
         }
     }
 
+    void awayFromKeyboard()
+    {
+        // The open chat with the window in front, but nobody at the keyboard:
+        // notified and left unread, read once the user is back.
+        invoke("openChat", Bob);
+        if (!activateWindow()) {
+            QSKIP("offscreen window cannot become active");
+        }
+        QVERIFY(!m_controller->userAway()); // no idle backend offscreen: never away by itself
+        QCOMPARE(m_controller->settings()->awayAfterSeconds(), AppSettings::DefaultAwayAfterSeconds);
+        QTRY_COMPARE_WITH_TIMEOUT(m_controller->chatList()->unreadFor(Bob), 0, Timeout);
+        QSignalSpy notify(m_controller.get(), &AppController::notificationRequested);
+        QSignalSpy away(m_controller.get(), &AppController::userAwayChanged);
+        m_controller->setUserAway(true);
+        QVERIFY(m_controller->userAway());
+        QCOMPARE(away.count(), 1);
+        m_fake.control(u"ClearCalls"_s);
+        m_fake.control(u"InjectMessage"_s, {Bob, Bob, u"still there?"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(notify.count(), 1, Timeout);
+        QCOMPARE(notify.first().at(0).toString(), Bob);
+        QCOMPARE(notify.first().at(2).toString(), u"still there?"_s);
+        QTRY_COMPARE_WITH_TIMEOUT(m_controller->chatList()->unreadFor(Bob), 1, Timeout);
+        QTest::qWait(600); // past the mark-read delay
+        QVERIFY(m_fake.callsOf(u"MarkRead"_s).isEmpty());
+        QCOMPARE(m_controller->chatList()->unreadFor(Bob), 1);
+
+        // Input again: the chat in front of them is read now.
+        m_controller->setUserAway(false);
+        QCOMPARE(away.count(), 2);
+        QTRY_VERIFY_WITH_TIMEOUT(!m_fake.callsOf(u"MarkRead"_s).isEmpty(), Timeout);
+        QCOMPARE(m_fake.callsOf(u"MarkRead"_s).first().at(1).toString(), Bob);
+        QTRY_COMPARE_WITH_TIMEOUT(m_controller->chatList()->unreadFor(Bob), 0, Timeout);
+        QCOMPARE(notify.count(), 1);
+    }
+
+    void awayDisabled()
+    {
+        // Away time 0: never away, the old behaviour.
+        invoke("openChat", Bob);
+        if (!activateWindow()) {
+            QSKIP("offscreen window cannot become active");
+        }
+        auto *settings = m_controller->settings();
+        m_controller->setUserAway(true);
+        QVERIFY(m_controller->userAway());
+        settings->setAwayAfterSeconds(0);
+        QCOMPARE(settings->awayAfterSeconds(), 0);
+        QVERIFY(!m_controller->userAway()); // switching it off brings the user back
+        m_controller->setUserAway(true);
+        QVERIFY(!m_controller->userAway()); // and keeps them here
+
+        QSignalSpy notify(m_controller.get(), &AppController::notificationRequested);
+        m_fake.control(u"ClearCalls"_s);
+        m_fake.control(u"InjectMessage"_s, {Bob, Bob, u"hello again"_s});
+        QTRY_VERIFY_WITH_TIMEOUT(!m_fake.callsOf(u"MarkRead"_s).isEmpty(), Timeout);
+        QCOMPARE(m_fake.callsOf(u"MarkRead"_s).first().at(1).toString(), Bob);
+        QTRY_COMPARE_WITH_TIMEOUT(m_controller->chatList()->unreadFor(Bob), 0, Timeout);
+        QCOMPARE(notify.count(), 0);
+
+        settings->setAwayAfterSeconds(AppSettings::DefaultAwayAfterSeconds);
+        m_controller->setUserAway(true);
+        QVERIFY(m_controller->userAway());
+        m_controller->setUserAway(false);
+    }
+
+    void launcherBadge()
+    {
+        // The task manager's unread count: com.canonical.Unity.LauncherEntry.
+        auto *entry = m_controller->launcherEntry();
+        QVERIFY(entry);
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.connect(QString(), QString::fromLatin1(LauncherEntry::ObjectPath), QString::fromLatin1(LauncherEntry::Interface), u"Update"_s, this,
+                            SLOT(onLauncherUpdate(QString, QVariantMap))));
+        m_badgeUpdates.clear();
+        QSignalSpy updated(entry, &LauncherEntry::updated);
+        auto *chats = m_controller->chatList();
+        invoke("openChat", Bob);
+        settle();
+        const int before = chats->totalUnread();
+        QCOMPARE(entry->count(), before);
+
+        // A message elsewhere: one more.
+        m_fake.control(u"InjectMessage"_s, {Team, Carol, u"badge me"_s});
+        QTRY_COMPARE_WITH_TIMEOUT(chats->totalUnread(), before + 1, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(!m_badgeUpdates.isEmpty(), Timeout);
+        QCOMPARE(m_badgeUpdates.last().value(u"count"_s).toLongLong(), qint64(before + 1));
+        QCOMPARE(m_badgeUpdates.last().value(u"count"_s).metaType(), QMetaType::fromType<qlonglong>()); // int64 ("x") on the bus
+        QCOMPARE(m_badgeUpdates.last().value(u"count-visible"_s).toBool(), true);
+        QCOMPARE(updated.count(), m_badgeUpdates.size());
+
+        // Query answers with the same.
+        const auto query = QDBusMessage::createMethodCall(bus.baseService(), QString::fromLatin1(LauncherEntry::ObjectPath),
+                                                          QString::fromLatin1(LauncherEntry::Interface), u"Query"_s);
+        const QDBusMessage reply = bus.call(query);
+        QCOMPARE(reply.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(reply.arguments().size(), 2);
+        QCOMPARE(reply.arguments().at(0).toString(), u"application://org.imessage.kmessages.desktop"_s);
+        const QVariantMap queried = qdbus_cast<QVariantMap>(reply.arguments().at(1));
+        QCOMPARE(queried.value(u"count"_s).toLongLong(), qint64(before + 1));
+        QCOMPARE(queried.value(u"count-visible"_s).toBool(), true);
+
+        // Switched off in Settings: hidden, and nothing sent for unrelated settings.
+        m_controller->settings()->setUnreadBadge(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!m_badgeUpdates.last().value(u"count-visible"_s).toBool(), Timeout);
+        const auto sent = m_badgeUpdates.size();
+        m_controller->settings()->setStartMinimized(true);
+        m_controller->settings()->setStartMinimized(false);
+        settle();
+        QCOMPARE(m_badgeUpdates.size(), sent);
+        m_controller->settings()->setUnreadBadge(true);
+        QTRY_VERIFY_WITH_TIMEOUT(m_badgeUpdates.last().value(u"count-visible"_s).toBool(), Timeout);
+
+        // Read: back to the previous count; none left: no badge.
+        m_controller->daemon()->markRead(Team);
+        QTRY_COMPARE_WITH_TIMEOUT(m_badgeUpdates.last().value(u"count"_s).toLongLong(), qint64(before), Timeout);
+        QCOMPARE(m_badgeUpdates.last().value(u"count-visible"_s).toBool(), before > 0);
+        QCOMPARE(entry->count(), chats->totalUnread());
+        bus.disconnect(QString(), QString::fromLatin1(LauncherEntry::ObjectPath), QString::fromLatin1(LauncherEntry::Interface), u"Update"_s, this,
+                       SLOT(onLauncherUpdate(QString, QVariantMap)));
+    }
+
     void newMessage()
     {
         invoke("showNewMessage");
@@ -1021,6 +1164,20 @@ private Q_SLOTS:
     {
         invoke("showSettings");
         shoot(u"settings"_s);
+        // General: the away time and the task manager badge.
+        QQuickItem *away = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((away = visibleItem(u"awayAfterSpinBox"_s)), Timeout);
+        QCOMPARE(away->property("value").toInt(), AppSettings::DefaultAwayAfterSeconds);
+        QCOMPARE(away->property("displayText").toString(), u"60 seconds"_s);
+        QVERIFY(visibleItem(u"unreadBadgeSwitch"_s));
+        QVERIFY(visibleItem(u"unreadBadgeSwitch"_s)->property("checked").toBool());
+        QQuickItem *flickable = away->parentItem();
+        while (flickable && !flickable->inherits("QQuickFlickable")) {
+            flickable = flickable->parentItem();
+        }
+        QVERIFY(flickable);
+        flickable->setProperty("contentY", away->mapToItem(flickable->property("contentItem").value<QQuickItem *>(), QPointF(0, 0)).y() - 200);
+        shoot(u"settings-general"_s);
         invoke("closeOverlays");
     }
 

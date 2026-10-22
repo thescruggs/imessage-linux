@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: SSPL-1.0
 //
 // Owns the daemon client and the models, and does the app-level glue that
-// QML should not: notifications (with inline reply), the tray icon, and
-// marking the visible chat read while the window is active.
+// QML should not: notifications (with inline reply), the tray icon, the
+// task manager's unread badge, and marking the visible chat read while the
+// window is active and the user is not away.
 #pragma once
 
 #include "appsettings.h"
@@ -11,6 +12,7 @@
 #include "contactsuggestionmodel.h"
 #include "daemonclient.h"
 #include "handlelookupmodel.h"
+#include "launcherentry.h"
 #include "macsync.h"
 #include "messagelistmodel.h"
 #include "messagesearchmodel.h"
@@ -34,6 +36,8 @@ struct AppOptions {
     bool tray = true; ///< create the KStatusNotifierItem
     bool notifications = true; ///< actually send KNotifications (the logic runs regardless)
     bool kpeople = true; ///< load contacts through KPeople (if built with it)
+    bool idleDetection = true; ///< watch for keyboard/mouse idle time (KIdleTime) to notice the user is away
+    bool launcherBadge = true; ///< the unread count on the task manager entry (Unity LauncherEntry)
 };
 
 class AppController : public QObject
@@ -86,6 +90,14 @@ public:
     bool trayAvailable() const { return m_tray != nullptr; }
     bool conversationVisible() const { return m_conversationVisible; }
     void setConversationVisible(bool visible);
+    /// No keyboard or mouse input for AppSettings::awayAfterSeconds: the open
+    /// chat counts as unseen (notified, left unread) until input resumes.
+    bool userAway() const { return m_userAway; }
+    /// Set by the idle watch (and tests). Ignored while the away time is 0;
+    /// coming back marks the visible chat read.
+    void setUserAway(bool away);
+    /// Null with AppOptions::launcherBadge off.
+    LauncherEntry *launcherEntry() const { return m_launcher; }
     bool needsAttention() const;
 
     void setWindow(QWindow *window);
@@ -109,6 +121,7 @@ Q_SIGNALS:
     void currentChatTitleChanged();
     void currentChatBackgroundChanged();
     void conversationVisibleChanged();
+    void userAwayChanged();
     void openChatRequested(const QString &chatId);
     void newMessageRequested();
     /// A notification is due for an incoming message (emitted even when sending is disabled).
@@ -134,6 +147,9 @@ private:
     /// hides the own messages the daemon still counts as unread.
     void markChatRead(const QString &chatId);
     void updateTray();
+    void updateLauncherBadge();
+    /// (Re)arms the KIdleTime timeout for AppSettings::awayAfterSeconds.
+    void updateIdleWatch();
     void checkConnectionProblem();
     void onBackgroundError(const QString &message);
     /// `loginStep` ≥ 0: the Open action also opens the login dialog at that step.
@@ -159,6 +175,10 @@ private:
     QPointer<QWindow> m_window;
     QString m_currentChatId;
     bool m_conversationVisible = true;
+    bool m_userAway = false;
+    int m_idleTimeoutId = 0; ///< KIdleTime timeout, 0 = none
+    int m_idleTimeoutMs = -1; ///< what m_idleTimeoutId was added for
+    LauncherEntry *m_launcher = nullptr;
     QTimer m_markReadTimer;
     QHash<QString, QPointer<KNotification>> m_notifications;
     QTimer m_problemTimer; ///< lets a state settle (and its error detail arrive) before notifying
