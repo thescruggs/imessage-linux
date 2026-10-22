@@ -139,7 +139,7 @@ pub fn settings_enabled(xml: &str) -> Option<bool> {
 /// may write), else UTF-8 (lossy; an OEM code page only garbles
 /// non-ASCII, and what is parsed is ASCII).
 pub fn decode_output(bytes: &[u8]) -> String {
-    let utf16 = |b: &[u8]| String::from_utf16_lossy(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+    let utf16 = |b: &[u8]| String::from_utf16_lossy(&b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>());
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         return utf16(rest);
     }
