@@ -15,6 +15,7 @@ pkgbase = imessage-linux
 	makedepends = git
 	makedepends = ninja
 	makedepends = pkgconf
+	makedepends = protobuf
 	depends = curl
 	depends = dbus
 	depends = glibc

@@ -53,6 +53,7 @@ makedepends=(
   'git'
   'ninja'
   'pkgconf'
+  'protobuf'  # protoc for rustpush's cloudkit-proto
 )
 checkdepends=('python')
 optdepends=(

@@ -32,6 +32,9 @@ jobs:
       # needs a Windows perl, and the preinstalled Strawberry Perl is first on
       # PATH in pwsh steps (Git Bash's perl is not, so cargo runs in pwsh).
       - uses: ilammy/setup-nasm@v1
+      # prost-build (rustpush's cloudkit-proto) runs protoc.
+      - name: protoc
+        run: choco install protoc --no-progress -y
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -77,8 +80,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Submodules and patches
         run: tools/bootstrap.sh --no-download
-      - name: dbus-daemon (D-Bus integration tests)
-        run: sudo apt-get update && sudo apt-get install -y dbus
+      # dbus-daemon for the D-Bus integration tests; protoc for prost-build
+      # (rustpush's cloudkit-proto).
+      - name: dbus-daemon and protoc
+        run: sudo apt-get update && sudo apt-get install -y dbus protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
