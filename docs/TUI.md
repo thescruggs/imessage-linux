@@ -75,9 +75,17 @@ app keeps retrying (D-Bus activation starts it when the unit is enabled).
 | `Ctrl+L` | Redraw |
 | `?` | Help; `q` (from the lists) or `Ctrl+Q` / `Ctrl+C` quits |
 
-Opening a chat (or a new message arriving in the open chat) marks it read
-in the daemon, which sends a read receipt as Messages.app does. Typing in
-the composer sends a typing indicator once per draft.
+Opening a chat (moving to it, confirming a filter, picking a search
+result) marks it read in the daemon, which sends a read receipt as
+Messages.app does. The chat selected at start-up is only shown, not
+opened, and neither is one the selection lands on when a filter is
+cleared. A new message in the open chat is marked read only while you can
+see it: the terminal has focus and no picker, search or help covers the
+transcript; otherwise it stays unread until focus comes back or the popup
+closes. Focus comes from the terminal's focus reports; under tmux they
+need `set -g focus-events on`, and where none arrive the terminal counts
+as always focused. Typing in the composer sends a typing indicator once
+per draft.
 
 ## How it talks to the daemon
 

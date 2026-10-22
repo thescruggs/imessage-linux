@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream};
+use crossterm::event::{DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event, EventStream};
 use futures_util::StreamExt;
 use imsg_client::Bus;
 use imsg_tui::app::{self, App, AppEvent};
@@ -92,7 +92,16 @@ async fn run(backend: backend::Backend, contacts: contacts::Contacts, contact_di
     }
 
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    // Focus reports (\x1b[I / \x1b[O): incoming messages in the open chat
+    // are marked read only while the terminal has focus.
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste, EnableFocusChange);
+    // ratatui's panic hook restores the screen; turn the modes off too so
+    // the shell does not get paste brackets and focus reports.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste, DisableFocusChange);
+        hook(info);
+    }));
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     let mut status_poll = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -118,6 +127,8 @@ async fn run(backend: backend::Backend, contacts: contacts::Contacts, contact_di
                     }
                 }
                 Some(Ok(Event::Resize(..))) => app.force_redraw = true,
+                Some(Ok(Event::FocusGained)) => app.on_focus(true),
+                Some(Ok(Event::FocusLost)) => app.on_focus(false),
                 Some(Ok(_)) => {}
                 Some(Err(e)) => break Err(e.into()),
                 None => break Ok(()),
@@ -130,7 +141,7 @@ async fn run(backend: backend::Backend, contacts: contacts::Contacts, contact_di
             break Ok(());
         }
     };
-    let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste, DisableFocusChange);
     ratatui::restore();
     result
 }

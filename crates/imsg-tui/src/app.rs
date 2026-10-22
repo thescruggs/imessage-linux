@@ -111,6 +111,14 @@ pub struct App {
     pub previews: HashMap<String, Preview>,
     preview_pending: HashSet<String>,
     pub chat_sel: usize,
+    /// The chat the user opened (moved to, picked): only a selection that
+    /// is also opened sends read receipts. The startup selection is not.
+    opened_chat: Option<String>,
+    /// Counts `open_chat` calls (a key that opened a chat already marked it read).
+    opens: u64,
+    /// The terminal has focus (focus reporting); `true` where the
+    /// terminal never reports it.
+    pub terminal_focused: bool,
     pub chat_filter: String,
     pub messages: HashMap<String, Vec<Message>>,
     /// `Some(None)` = oldest page reached; absent = never loaded.
@@ -181,6 +189,9 @@ impl App {
             previews: HashMap::new(),
             preview_pending: HashSet::new(),
             chat_sel: 0,
+            opened_chat: None,
+            opens: 0,
+            terminal_focused: true,
             chat_filter: String::new(),
             messages: HashMap::new(),
             next_cursor: HashMap::new(),
@@ -286,6 +297,36 @@ impl App {
 
     pub fn current_chat_id(&self) -> Option<String> {
         self.current_chat().map(|c| c.id.0.clone())
+    }
+
+    /// The user is looking at this chat's transcript: opened, selected,
+    /// not hidden behind a big popup, and the terminal has focus. Only
+    /// then do incoming messages get a read receipt.
+    pub fn chat_visible(&self, chat_id: &str) -> bool {
+        self.new_chat.is_none()
+            && self.terminal_focused
+            && transcript_shown(self.mode)
+            && self.opened_chat.as_deref() == Some(chat_id)
+            && self.current_chat_id().as_deref() == Some(chat_id)
+    }
+
+    /// Mark the visible chat read if it has unread messages (it just
+    /// became visible again: focus came back, a popup closed).
+    fn catch_up_read(&self) {
+        if let Some(c) = self.current_chat()
+            && c.unread_count > 0
+            && self.chat_visible(&c.id.0)
+        {
+            self.mark_read(c.id.0.clone());
+        }
+    }
+
+    /// The terminal gained or lost focus.
+    pub fn on_focus(&mut self, focused: bool) {
+        self.terminal_focused = focused;
+        if focused {
+            self.catch_up_read();
+        }
     }
 
     pub fn current_messages(&self) -> &[Message] {
@@ -809,6 +850,11 @@ impl App {
                 self.chat_sel = pos;
             }
         }
+        if let Some(id) = &self.opened_chat
+            && !self.chats.iter().any(|c| c.id.0 == *id)
+        {
+            self.opened_chat = None;
+        }
         if self.new_chat.is_none() {
             self.ensure_messages();
         }
@@ -875,7 +921,7 @@ impl App {
                         self.ensure_messages();
                     }
                 }
-                if current && !mine {
+                if !mine && self.chat_visible(&chat_id) {
                     self.mark_read(chat_id.clone());
                 }
                 if !self.chats.iter().any(|c| c.id.0 == chat_id) {
@@ -896,6 +942,16 @@ impl App {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return Ok(());
         }
+        let (shown, opens) = (transcript_shown(self.mode), self.opens);
+        let r = self.on_key_press(key, ev);
+        if !shown && transcript_shown(self.mode) && self.opens == opens {
+            // A popup closed over the open chat: what arrived meanwhile is seen now.
+            self.catch_up_read();
+        }
+        r
+    }
+
+    fn on_key_press(&mut self, key: KeyEvent, ev: Event) -> Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // Global keys
         match (key.code, ctrl) {
@@ -996,12 +1052,7 @@ impl App {
             KeyCode::Char('/') => self.mode = Mode::ChatFilter,
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc
-                if !self.chat_filter.is_empty() => {
-                    self.chat_filter.clear();
-                    self.chat_sel = 0;
-                    self.open_chat();
-                }
+            KeyCode::Esc if !self.chat_filter.is_empty() => self.clear_chat_filter(),
             _ => {}
         }
         Ok(())
@@ -1018,10 +1069,26 @@ impl App {
         self.ensure_messages();
     }
 
+    /// Drop the chat filter, keeping the selection on the same chat (no
+    /// read receipt: clearing a filter is not picking a chat).
+    fn clear_chat_filter(&mut self) {
+        let cur = self.current_chat_id();
+        self.chat_filter.clear();
+        match cur.and_then(|id| self.chats.iter().position(|c| c.id.0 == id)) {
+            Some(pos) => self.chat_sel = pos,
+            None => {
+                self.chat_sel = 0;
+                self.on_chat_changed();
+            }
+        }
+    }
+
     /// The user opened the selected chat (moved to it, confirmed a
     /// filter, picked a search result): show it and mark it read.
     fn open_chat(&mut self) {
         self.on_chat_changed();
+        self.opened_chat = self.current_chat_id();
+        self.opens += 1;
         if let Some(c) = self.current_chat()
             && c.unread_count > 0
         {
@@ -1195,10 +1262,8 @@ impl App {
     fn key_chat_filter(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
-                self.chat_filter.clear();
                 self.mode = Mode::Normal;
-                self.chat_sel = 0;
-                self.open_chat();
+                self.clear_chat_filter();
             }
             KeyCode::Enter | KeyCode::Down | KeyCode::Tab => {
                 self.mode = Mode::Normal;
@@ -1344,6 +1409,7 @@ impl App {
         let name = self.contacts.name_for(&uri).map(str::to_string).unwrap_or(if name.starts_with("Send to") { Handle::new(&uri).address().to_string() } else { name });
         self.chat_filter.clear();
         self.new_chat = Some(NewChat { uri, name });
+        self.opened_chat = None;
         self.scroll = 0;
         self.msg_sel = None;
         self.reply_to = None;
@@ -1432,6 +1498,12 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// The transcript is on screen in this mode (small popups leave it
+/// visible; the pickers, search and help cover it).
+fn transcript_shown(mode: Mode) -> bool {
+    matches!(mode, Mode::Normal | Mode::ChatFilter | Mode::React | Mode::Attach)
 }
 
 /// The daemon's `kind` argument for a reaction we already have.
@@ -1710,6 +1782,67 @@ mod tests {
         assert_eq!(app.current_chat_id().as_deref(), Some("mailto:b@x"));
         app.start_conversation("x".into(), "not an address".into());
         assert!(app.status.contains("not an email address"));
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.on_key(Event::Key(code.into())).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_an_opened_chat_on_screen_is_visible() {
+        let mut app = app().await;
+        let mut pinned = chat("mailto:p@x", 10);
+        pinned.pinned = true;
+        pinned.pin_order = Some(0);
+        app.merge_chats(vec![chat("mailto:b@x", 300), pinned]);
+        // The startup selection (the pinned chat, row 0) is shown, not opened.
+        assert_eq!(app.current_chat_id().as_deref(), Some("mailto:p@x"));
+        assert!(!app.chat_visible("mailto:p@x"));
+        key(&mut app, KeyCode::Down);
+        assert!(app.chat_visible("mailto:b@x"));
+        key(&mut app, KeyCode::Up);
+        assert!(app.chat_visible("mailto:p@x"));
+        assert!(!app.chat_visible("mailto:b@x"), "selected elsewhere");
+        app.on_focus(false);
+        assert!(!app.chat_visible("mailto:p@x"), "terminal unfocused");
+        app.on_focus(true);
+        assert!(app.chat_visible("mailto:p@x"));
+        key(&mut app, KeyCode::Char('?'));
+        assert!(!app.chat_visible("mailto:p@x"), "help covers the transcript");
+        key(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.chat_visible("mailto:p@x"));
+        // A new conversation is on screen instead.
+        app.start_conversation("Carol".into(), "carol@x".into());
+        assert!(app.new_chat.is_some());
+        assert!(!app.chat_visible("mailto:p@x"));
+        // The opened chat leaving the list forgets it.
+        app.new_chat = None;
+        app.merge_chats(vec![chat("mailto:b@x", 300)]);
+        app.merge_chats(vec![chat("mailto:b@x", 300), chat("mailto:p@x", 10)]);
+        assert!(!app.chat_visible("mailto:p@x"));
+    }
+
+    #[tokio::test]
+    async fn clearing_the_filter_keeps_the_selection() {
+        let mut app = app().await;
+        app.merge_chats(vec![chat("mailto:a@x", 300), chat("mailto:b@x", 200), chat("mailto:c@x", 100)]);
+        key(&mut app, KeyCode::Char('/'));
+        key(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.current_chat_id().as_deref(), Some("mailto:c@x"));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.chat_filter.is_empty());
+        assert_eq!(app.current_chat_id().as_deref(), Some("mailto:c@x"));
+        assert!(!app.chat_visible("mailto:c@x"), "clearing a filter does not open a chat");
+        // The same from the list (a confirmed filter, then Esc there).
+        key(&mut app, KeyCode::Char('/'));
+        key(&mut app, KeyCode::Char('b'));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.chat_visible("mailto:b@x"));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.chat_filter.is_empty());
+        assert_eq!(app.current_chat_id().as_deref(), Some("mailto:b@x"));
+        assert!(app.chat_visible("mailto:b@x"));
     }
 
     #[tokio::test]

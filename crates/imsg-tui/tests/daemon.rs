@@ -17,12 +17,13 @@ use imessaged::engine::{ChatTarget, Engine, EngineEvent};
 use imessaged::keyring::StateKey;
 use imessaged::store::{Store, StoreHandle};
 use imsg_client::{Bus, Target};
-use imsg_tui::app::{App, AppEvent};
+use imsg_tui::app::{App, AppEvent, Mode};
 use imsg_tui::backend::{Backend, DaemonEvent};
 use imsg_tui::contacts::{Contacts, Person};
 use tokio::sync::mpsc;
 
 const BOB: &str = "mailto:bob@example.com";
+const CAROL: &str = "mailto:carol@example.com";
 
 struct Harness {
     bus: common::PrivateBus,
@@ -61,11 +62,15 @@ impl Harness {
 }
 
 fn incoming(id: &str, at: u64, text: &str) -> EngineEvent {
+    incoming_from(BOB, id, at, text)
+}
+
+fn incoming_from(from: &str, id: &str, at: u64, text: &str) -> EngineEvent {
     EngineEvent::MessageReceived {
         message: Message {
             id: MessageId::new(id),
-            chat_id: ChatId::direct(BOB),
-            sender: Handle::new(BOB),
+            chat_id: ChatId::direct(from),
+            sender: Handle::new(from),
             sent_at: at,
             text: Some(text.into()),
             parts: vec![MessagePart::Text { text: text.into() }],
@@ -80,7 +85,7 @@ fn incoming(id: &str, at: u64, text: &str) -> EngineEvent {
             verified: true,
             service: Default::default(),
         },
-        chat: Chat { id: ChatId::direct(BOB), participants: vec![Handle::new(BOB)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None, pinned: false, pin_order: None },
+        chat: Chat { id: ChatId::direct(from), participants: vec![Handle::new(from)], display_name: None, is_group: false, last_message_at: Some(at), unread_count: 0, background: None, icon_path: None, pinned: false, pin_order: None },
         attachments: vec![],
     }
 }
@@ -246,6 +251,92 @@ async fn app_loads_chats_previews_and_live_messages() {
     assert_eq!(app.previews[BOB].at, 3_000);
     pump(&mut app, &mut rx, "live read", |a| a.chats[0].unread_count == 0 && a.chats[0].last_message_at == Some(3_000)).await;
     assert!(h.mock.calls().iter().any(|c| matches!(c, MockCall::MarkRead { .. })));
+
+    drop(rx);
+    forward.abort();
+    loop_task.abort();
+    h.shutdown().await;
+}
+
+fn mark_reads(h: &Harness) -> usize {
+    h.mock.calls().iter().filter(|c| matches!(c, MockCall::MarkRead { .. })).count()
+}
+
+/// Left running, the TUI must not send read receipts for the chat it
+/// merely selected at startup (the pinned one on top), nor while the
+/// terminal does not have focus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn app_marks_read_only_an_opened_focused_chat() {
+    let Some(h) = Harness::logged_in().await else { return };
+    h.mock.inject(incoming_from(CAROL, "C1", 2_000, "from carol"));
+    h.mock.inject(incoming("M1", 1_000, "from bob"));
+    let b = h.backend();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while b.chats().await.unwrap().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "messages were not stored");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Bob is older but pinned: he sorts first and is selected at startup.
+    let client = imsg_client::Client::connect(&Bus::Address(h.bus.address.clone())).await.unwrap();
+    client.set_chat_pinned(BOB, true, None).await.unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut app = App::new(b, tx.clone(), Contacts::default(), vec![]);
+    let (dtx, mut drx) = mpsc::unbounded_channel();
+    let b = app.backend.clone();
+    let loop_task = tokio::spawn(async move { b.signal_loop(dtx).await });
+    let forward = {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = drx.recv().await {
+                if tx.send(AppEvent::Daemon(ev)).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    pump(&mut app, &mut rx, "chat list", |a| a.chats.len() == 2).await;
+    assert_eq!(app.chats[0].id.0, BOB);
+    assert_eq!(app.current_chat_id().as_deref(), Some(BOB));
+    pump(&mut app, &mut rx, "history", |a| a.current_messages().len() == 1).await;
+
+    // A message to the selected but never opened chat: shown, not read.
+    let bob_unread = |a: &App| a.chats.iter().find(|c| c.id.0 == BOB).map(|c| c.unread_count);
+    h.mock.inject(incoming("M2", 3_000, "are you there?"));
+    pump(&mut app, &mut rx, "live message, unread", |a| a.current_messages().len() == 2 && bob_unread(a) == Some(2)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(mark_reads(&h), 0, "no read receipt for a chat the user never opened");
+
+    // Moving there and back opens it: read.
+    app.on_key(crossterm::event::Event::Key(crossterm::event::KeyCode::Down.into())).unwrap();
+    app.on_key(crossterm::event::Event::Key(crossterm::event::KeyCode::Up.into())).unwrap();
+    pump(&mut app, &mut rx, "read on open", |a| a.chats.iter().all(|c| c.unread_count == 0)).await;
+    assert_eq!(mark_reads(&h), 2, "carol on the way, then bob");
+
+    // Unfocused: a new message stays unread until focus comes back.
+    h.mock.clear_calls();
+    app.on_focus(false);
+    h.mock.inject(incoming("M3", 4_000, "hello?"));
+    pump(&mut app, &mut rx, "unfocused message, unread", |a| a.current_messages().len() == 3 && bob_unread(a) == Some(1)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(mark_reads(&h), 0, "no read receipt while the terminal is unfocused");
+    app.on_focus(true);
+    pump(&mut app, &mut rx, "read on focus", |a| bob_unread(a) == Some(0)).await;
+    assert_eq!(mark_reads(&h), 1);
+
+    // Behind help a message stays unread; it is read once the transcript
+    // shows again (here through a global key into the small attach prompt).
+    h.mock.clear_calls();
+    app.on_key(crossterm::event::Event::Key(crossterm::event::KeyCode::Char('?').into())).unwrap();
+    assert_eq!(app.mode, Mode::Help);
+    h.mock.inject(incoming("M4", 5_000, "still there?"));
+    pump(&mut app, &mut rx, "message behind help, unread", |a| a.current_messages().len() == 4 && bob_unread(a) == Some(1)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(mark_reads(&h), 0, "no read receipt while help covers the transcript");
+    app.on_key(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('f'), crossterm::event::KeyModifiers::CONTROL))).unwrap();
+    assert_eq!(app.mode, Mode::Attach);
+    pump(&mut app, &mut rx, "read when the popup closes", |a| bob_unread(a) == Some(0)).await;
+    assert_eq!(mark_reads(&h), 1);
 
     drop(rx);
     forward.abort();
