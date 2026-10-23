@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+* **New: `imsg-bridge`, imessaged over the tailnet**
+  ([docs/BRIDGE.md](docs/BRIDGE.md)). A small service next to the daemon,
+  an ordinary D-Bus client of it, that re-exposes the messaging part of
+  the API as HTTP plus one WebSocket event stream for remote clients (the
+  portable Windows client, [docs/PORTABLE-WINDOWS.md](docs/PORTABLE-WINDOWS.md)).
+  It listens on this host's Tailscale addresses only (looked up through
+  tailscaled's LocalAPI, retried every 5 s until Tailscale is up; never
+  `0.0.0.0`) and requires both an allowed tailnet peer (LocalAPI whois:
+  your own login or `tag:imsg-portable`) and a per-device bearer token
+  (`imsg-bridge token new|list|revoke`; only SHA-256 hashes are stored,
+  a revoke applies at once, failed attempts wait 1 s, an access log
+  records connections without message content). Chats, paged history,
+  search, sending text and files (uploads up to 100 MiB, deleted after the
+  send), reactions, edits, unsends, typing, read receipts, pins, handle
+  lookups, shared profiles, SMS forwarding state, two-factor codes and the
+  host's vCard contacts; attachments, contact photos, group photos and
+  backgrounds are streamed with Range / ETag support, and only from inside
+  the daemon's state directory (symlinks resolved). All nine daemon signals
+  arrive on `GET /v1/events` as JSON frames in the daemon's order, plus
+  `daemon` lost / connected when the daemon goes away or comes back.
+  Login, logout, shutdown, re-registration, enabling SMS forwarding and the
+  import / purge maintenance calls are deliberately not exposed. New
+  systemd user unit `packaging/systemd/imsg-bridge.service` (not enabled
+  by the Arch package).
+
+* **New: `imsg-app`, a portable desktop client** (Windows and Linux;
+  [docs/PORTABLE-WINDOWS.md](docs/PORTABLE-WINDOWS.md)) that talks to
+  `imsg-bridge` over the tailnet and runs from a USB stick: one static
+  `imsg-app.exe` (Slint, software renderer, embedded Noto Sans; imports
+  only Windows system DLLs), built with `tools/windows/build-portable.sh`
+  into `dist/windows/portable/imsg-portable-<version>.zip`. With a file
+  named `portable` (or `imsg-app.toml`) next to the exe, settings, the
+  encrypted pairing (`secrets.bin`: argon2id + AES-256-GCM under a
+  passphrase asked at every start), cache and optional logs all stay in
+  that folder; otherwise `%LOCALAPPDATA%\imsg-app` / `~/.config/imsg-app`.
+  First start pairs with the `imsg+bridge://…#token` string from
+  `imsg-bridge token new`. Chat list (pins first, names from the host's
+  address book, then shared names; unread dots, previews, group and
+  contact photos, search), bubble transcript (iMessage blue / SMS green,
+  sender names in groups, time headers, delivery state, edited / unsent /
+  unverified marks, reactions, reply quotes, link cards, inline JPEG / PNG /
+  GIF / WebP pictures, other files with Open / Save…, older pages on
+  scroll), composer (Enter sends, Shift+Enter new line, attach, typing
+  indicator both ways), new message to numbers, addresses or contacts,
+  two-factor code prompt, read receipts while the chat is on screen, tray
+  balloon notifications (sender only by default) and taskbar flashing,
+  live updates with reconnect and resync, and settings (text size S / M /
+  L, notifications, bridge URL, re-pair, passphrase, clear cache, sign
+  out, colours). Looks like kmessages: light and dark themes that follow
+  the Windows light/dark setting (or `theme = "light"` / `"dark"`), body
+  text ≥ 7:1 outside the bubbles, kmessages' bubble colours and tails,
+  round avatars with stable per-contact tints, "Pinned" / "Conversations"
+  sections, link cards with preview pictures, typing bubbles, a pill
+  composer and a "Connected as …" status footer. The typed client
+  library behind it is the new crate `imsg-remote`.
+* `imsg-tui` now uses ratatui 0.30 and `ratatui-textarea` 0.9 (the
+  successor of `tui-textarea`): ratatui 0.29 pinned a `unicode-width`
+  that the Slint toolkit cannot share. No visible change.
+
 ## 0.1.14 (2026-10-21)
 
 * **New: `imsg-tui`, a terminal app.** The Mac-only

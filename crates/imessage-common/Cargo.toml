@@ -35,3 +35,5 @@ clipboard-win = "5.4"
 serde_json.workspace = true
 # Drift guard: the fixture must also parse as open-absinthe's HardwareConfig.
 open-absinthe.workspace = true
+# contacts tests.
+tempfile = "3"

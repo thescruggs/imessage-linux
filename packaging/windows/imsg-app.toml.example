@@ -1,0 +1,23 @@
+# imsg-app settings. Rename to imsg-app.toml (optional: the file named
+# "portable" already keeps everything in this folder). The bridge token
+# is never stored here; it lives encrypted in secrets.bin.
+
+# The bridge on the Linux host (vash, over Tailscale). With this set you
+# can pair with the bare token instead of the whole pairing string.
+bridge = "http://100.64.0.10:7227"
+
+# Write logs\imsg-app.log (handles masked, no message text).
+log = false
+
+# Text size: "s", "m" (default, larger than usual) or "l".
+font_size = "m"
+
+# Colours: "system" (default: follow the Windows light/dark app setting,
+# also when it changes), "light" or "dark".
+theme = "system"
+
+[notifications]
+enabled = true
+# Show the message text in notifications. Off: the sender's name only
+# (safer on a shared screen).
+show_text = false

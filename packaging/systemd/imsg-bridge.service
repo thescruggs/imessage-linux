@@ -1,0 +1,57 @@
+# systemd *user* unit for imsg-bridge (docs/BRIDGE.md): imessaged over
+# HTTP + WebSocket on this host's Tailscale addresses.
+#
+#   install -Dm644 packaging/systemd/imsg-bridge.service ~/.config/systemd/user/imsg-bridge.service
+#   systemctl --user daemon-reload
+#   imsg-bridge token new <device>          # pairing string for the client
+#   systemctl --user enable --now imsg-bridge
+#
+# It waits (retrying every 5 s) until Tailscale has an address, and exits
+# when the addresses change; Restart=always brings it back on the new ones.
+
+[Unit]
+Description=imsg-bridge: imessaged over the tailnet
+After=imessaged.service dbus.socket
+Wants=imessaged.service
+Requires=dbus.socket
+
+[Service]
+Type=simple
+# `cargo install --path crates/imsg-bridge` puts the binary here. For a
+# distribution package use /usr/bin/imsg-bridge instead.
+ExecStart=%h/.cargo/bin/imsg-bridge serve
+Restart=always
+RestartSec=5
+
+# %S = $XDG_STATE_HOME (tokens.toml, access.log), %C = $XDG_CACHE_HOME
+# (uploads in flight, read by imessaged when it sends them).
+StateDirectory=imsg-bridge
+StateDirectoryMode=0700
+CacheDirectory=imsg-bridge
+CacheDirectoryMode=0700
+UMask=0077
+
+# Hardening. The home directory is read-only: the bridge reads the
+# daemon's state dir (attachments, photos, backgrounds), the vCards in
+# ~/.local/share/kpeoplevcard and its config; it writes only its own state
+# and cache dirs. It needs the session bus and tailscaled's socket
+# (/run/tailscale/tailscaled.sock, AF_UNIX) and TCP on the tailnet.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/imsg-bridge %C/imsg-bridge
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

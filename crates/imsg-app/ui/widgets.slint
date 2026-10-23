@@ -1,0 +1,244 @@
+import { Theme, Icons } from "theme.slint";
+
+// A text button with our colours (Fluent's are too faint for the user).
+export component Btn inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <bool> small: false;
+    callback clicked;
+
+    min-width: label.preferred-width + (root.small ? 16px : 28px);
+    min-height: label.preferred-height + (root.small ? 6px : 14px);
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 6px;
+    border-width: fs.has-focus ? 2px : 1px;
+    border-color: fs.has-focus ? Theme.accent : (root.primary && root.enabled ? Theme.accent : Theme.border);
+    background: !root.enabled ? Theme.panel
+        : root.primary ? (ta.pressed ? Theme.accent-pressed : ta.has-hover ? Theme.accent-hover : Theme.accent)
+        : (ta.pressed ? Theme.panel : ta.has-hover ? Theme.raised-hover : Theme.raised);
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
+    label := Text {
+        text: root.text;
+        color: !root.enabled ? Theme.text-dim : root.primary ? Theme.on-accent : Theme.text-strong;
+        font-weight: root.primary ? 700 : 400;
+        font-size: root.small ? Theme.small : Theme.base;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// A flat icon button (toolbar, composer, inside bubbles): the icon is a
+// white PNG tinted with `fg`; a soft highlight on hover.
+export component IconBtn inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <color> fg: Theme.text;
+    in property <color> hover-bg: Theme.raised-hover;
+    in property <bool> enabled: true;
+    in property <length> size: max(32px, Theme.base * 2);
+    in property <float> icon-scale: 0.6;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked;
+
+    width: root.size;
+    height: root.size;
+    border-radius: self.height / 2;
+    border-width: fs.has-focus ? 2px : 0px;
+    border-color: Theme.accent;
+    background: root.enabled && ta.has-hover ? root.hover-bg : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
+    Image {
+        source: root.icon;
+        colorize: root.enabled ? root.fg : Theme.text-dim;
+        width: root.size * root.icon-scale;
+        height: self.width;
+        image-rendering: smooth;
+        accessible-role: none;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// A text link-style button.
+export component LinkBtn inherits Rectangle {
+    in property <string> text;
+    in property <color> fg: Theme.accent;
+    callback clicked;
+    min-width: t.preferred-width + 8px;
+    min-height: t.preferred-height + 4px;
+    horizontal-stretch: 0;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: ta.has-hover ? root.fg : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    t := Text {
+        text: root.text;
+        color: root.fg;
+        font-size: Theme.small;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Round avatar. Photos arrive with a circular alpha mask baked in
+// (images.rs: the software renderer cannot clip images to a circle).
+// Without a photo: a tinted circle with initials, or a person / group
+// icon (phone numbers, groups), as kmessages.
+export component Avatar inherits Rectangle {
+    in property <string> initials;
+    in property <image> photo;
+    in property <bool> has-photo;
+    in property <bool> is-group;
+    in property <int> tint;
+    in property <length> size: 40px;
+    property <color> ink: Theme.avatar-ink[Math.mod(root.tint, 8)];
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: root.has-photo ? transparent : Theme.avatar-fill[Math.mod(root.tint, 8)];
+    border-width: root.has-photo ? 0px : max(1px, root.size / 28);
+    border-color: root.ink;
+    accessible-role: none;
+    if !root.has-photo && (root.is-group || root.initials == "#"): Image {
+        source: root.is-group ? Icons.group : Icons.person;
+        colorize: root.ink;
+        width: root.size * 0.56;
+        height: self.width;
+        image-rendering: smooth;
+    }
+    if !root.has-photo && !root.is-group && root.initials != "#": Text {
+        text: root.initials;
+        color: root.ink;
+        font-weight: 700;
+        font-size: root.size * 0.38;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+    if root.has-photo: Image {
+        source: root.photo;
+        width: 100%;
+        height: 100%;
+        image-fit: cover;
+        image-rendering: smooth;
+    }
+}
+
+export component Heading inherits Text {
+    color: Theme.text-strong;
+    font-weight: 700;
+    font-size: Theme.large;
+    wrap: word-wrap;
+}
+
+export component Body inherits Text {
+    color: Theme.text;
+    wrap: word-wrap;
+}
+
+// Dialog frame centred over its parent, with a dimmed backdrop.
+export component Overlay inherits Rectangle {
+    in property <length> panel-width: 560px;
+    callback dismiss;
+    background: Theme.dark ? #000000b0 : #00000070;
+    TouchArea { }  // swallow clicks behind the panel
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: min(root.panel-width, root.width - 32px);
+                background: Theme.bg;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    @children
+                }
+            }
+        }
+    }
+}
+
+// Three dots in an incoming-bubble pill (kmessages TypingBubble.qml),
+// pulsing left to right.
+export component TypingDots inherits Rectangle {
+    in property <bool> small;
+    in property <color> fill: Theme.bubble-in;
+    in property <color> dot-color: Theme.text;
+    property <length> dot: root.small ? 6px : 8px;
+    property <duration> t: animation-tick();
+    width: root.dot * 7;
+    height: root.dot * (root.small ? 3 : 4.5);
+    border-radius: self.height / 2;
+    background: root.fill;
+    accessible-role: none;
+    HorizontalLayout {
+        alignment: center;
+        spacing: root.dot * 0.6;
+        for i in 3: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: root.dot;
+                height: root.dot;
+                border-radius: root.dot / 2;
+                background: root.dot-color;
+                // A 1.2 s wave: each dot brightens in turn.
+                opacity: 0.35 + 0.55 * max(0, 1 - Math.abs(Math.mod(root.t / 1ms - i * 180, 1200) - 300) / 300);
+            }
+        }
+    }
+}

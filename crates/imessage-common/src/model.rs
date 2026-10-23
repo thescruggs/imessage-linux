@@ -477,6 +477,22 @@ pub enum ReactionKind {
     Emoji(String),
 }
 
+impl ReactionKind {
+    /// The `kind` argument of a react request (`love` … `question`, or the
+    /// emoji itself).
+    pub fn arg(&self) -> String {
+        match self {
+            ReactionKind::Love => "love".into(),
+            ReactionKind::Like => "like".into(),
+            ReactionKind::Dislike => "dislike".into(),
+            ReactionKind::Laugh => "laugh".into(),
+            ReactionKind::Emphasize => "emphasize".into(),
+            ReactionKind::Question => "question".into(),
+            ReactionKind::Emoji(e) => e.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reaction {
     pub kind: ReactionKind,

@@ -1,0 +1,98 @@
+// Colours, light and dark (kmessages / Breeze look). `dark` follows the
+// std-widgets Palette: pinned light or dark by the setting (imsg-app.toml
+// `theme`, app.slint set-theme-mode), or left `unknown`, in which case the
+// Fluent palette follows the system setting (winit: the Windows app mode,
+// live) and `dark` reads it back from the palette's background.
+//
+// The user reads low-contrast text badly: body text >= 7:1, secondary
+// text >= 4.5:1 (WCAG 2.x relative-luminance ratios):
+//
+//   light                          on bg #FFFFFF  on panel #E8EAEC  on bubble-in #E7E7E7
+//   text        #232629            15.21          12.6              12.3
+//   text-dim    #4D5257             7.89           6.5               6.4
+//   accent      #1460BD             6.11           5.1              (links, "Edited")
+//   negative    #B3261E             6.54           5.4
+//   selection   #FFFFFF on #1D5FB8  6.21  (selected chat row: all its text white)
+//
+//   dark                           on bg #191919  on panel #262625  on bubble-in #30302E
+//   text        #E8E6DC            14.05          12.11             10.6
+//   text-dim    #B0AEA5             7.91           6.81              5.9
+//   accent      #6CB4FF             8.05           6.9
+//   negative    #FF8A80             7.70           6.6
+//   selection   #FAFAF7 on #1F4E99  7.70
+//
+// Bubbles are kmessages' exactly (user decision, overrides the rule for
+// bubble text only): sent iMessage #1982FC (white 3.72), SMS #34C759
+// (white 2.22), incoming = background tinted 11% toward the text colour
+// with the normal text colour on it.
+
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark
+        || (Palette.color-scheme == ColorScheme.unknown && Palette.background.to-hsv().value < 0.5);
+
+    // Window / list / transcript background.
+    out property <color> bg: dark ? #191919 : #FFFFFF;
+    // Toolbars (headers), status footer, dialogs.
+    out property <color> panel: dark ? #262625 : #E8EAEC;
+    // Buttons, tooltips.
+    out property <color> raised: dark ? #40403E : #F6F7F8;
+    out property <color> raised-hover: dark ? #4C4C49 : #DCE3EA;
+    out property <color> hover: dark ? #232323 : #EEF3F9;
+    // Separator lines, outlines.
+    out property <color> border: dark ? #4A4A47 : #BEC2C6;
+    out property <color> text: dark ? #E8E6DC : #232629;
+    out property <color> text-strong: dark ? #FAFAF7 : #101214;
+    out property <color> text-dim: dark ? #B0AEA5 : #4D5257;
+    // Links, "Edited", focus rings, primary buttons.
+    out property <color> accent: dark ? #6CB4FF : #1460BD;
+    out property <color> accent-hover: dark ? #8CC5FF : #1A6FD6;
+    out property <color> accent-pressed: dark ? #4FA0F0 : #0F4E9C;
+    out property <color> on-accent: dark ? #101214 : #FFFFFF;
+    // Selected chat row (white text on it).
+    out property <color> selection: dark ? #1F4E99 : #1D5FB8;
+    out property <color> on-selection: dark ? #FAFAF7 : #FFFFFF;
+    // Status dot and warnings / errors.
+    out property <color> positive: dark ? #4CD07D : #1E8E4E;
+    out property <color> neutral: dark ? #F6B94C : #C25E00;
+    out property <color> negative: dark ? #FF8A80 : #B3261E;
+    // The unread dot (kmessages).
+    out property <color> unread: #1982FC;
+
+    out property <color> bubble-imessage: #1982FC;
+    out property <color> bubble-sms: #34C759;
+    out property <color> bubble-in: dark ? #30302E : #E7E7E7;
+    out property <color> on-bubble-out: #FFFFFF;
+
+    // Avatar tints (state.rs tint_index): ink = ring / initials / icon,
+    // fill = the circle (ink >= 4.1:1 on its fill).
+    out property <[color]> avatar-ink: dark
+        ? [#7DB8FF, #4DD0C0, #7BD88F, #FFB070, #FF8A80, #C3A6FF, #FF8CC6, #AAB7C4]
+        : [#1D5FB8, #00695C, #256D29, #9A4508, #C62828, #6A3FB5, #AD1457, #4D5B6A];
+    out property <[color]> avatar-fill: dark
+        ? [#2D3947, #233E3A, #2D3F31, #47372A, #47302E, #3B3547, #47303C, #36393B]
+        : [#DFE9F5, #DBECEA, #E2EDE2, #F5E7DD, #F7E1E1, #EAE4F5, #F4DEE7, #E6E8EA];
+
+    // Base font size (S 14px / M 16px / L 19px), set from the settings.
+    in-out property <length> base: 16px;
+    out property <length> small: self.base * 0.875;
+    out property <length> large: self.base * 1.25;
+}
+
+// White PNG icons (tools/gen-ui-icons.py), tinted with `colorize`.
+export global Icons {
+    out property <image> paperclip: @image-url("../assets/icons/paperclip.png");
+    out property <image> send: @image-url("../assets/icons/send.png");
+    out property <image> compose: @image-url("../assets/icons/compose.png");
+    out property <image> settings: @image-url("../assets/icons/settings.png");
+    out property <image> pin: @image-url("../assets/icons/pin.png");
+    out property <image> info: @image-url("../assets/icons/info.png");
+    out property <image> download: @image-url("../assets/icons/download.png");
+    out property <image> file: @image-url("../assets/icons/file.png");
+    out property <image> person: @image-url("../assets/icons/person.png");
+    out property <image> group: @image-url("../assets/icons/group.png");
+    out property <image> globe: @image-url("../assets/icons/globe.png");
+    out property <image> search: @image-url("../assets/icons/search.png");
+    out property <image> warning: @image-url("../assets/icons/warning.png");
+}

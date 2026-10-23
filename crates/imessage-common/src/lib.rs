@@ -1,5 +1,7 @@
 //! Types shared between the `imessaged` daemon and the `imsg` CLI.
 
+pub mod api;
+pub mod contacts;
 pub mod hwconfig;
 pub mod import;
 pub mod model;

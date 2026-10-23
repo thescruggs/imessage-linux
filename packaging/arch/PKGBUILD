@@ -122,7 +122,7 @@ prepare() {
 
 build() {
   cd "$srcdir/imessage-linux"
-  _cargo build --frozen --release -p imessaged -p imsg -p imsg-tui
+  _cargo build --frozen --release -p imessaged -p imsg -p imsg-tui -p imsg-bridge
 
   cmake -B "$srcdir/build-kmessages" -S kmessages -G Ninja \
     -DCMAKE_BUILD_TYPE=None \
@@ -136,18 +136,24 @@ check() {
   cd "$srcdir/imessage-linux"
   # Tests needing Apple's binary or the network skip themselves; D-Bus
   # tests need dbus-daemon (else they print SKIP).
-  _cargo test --frozen --release -p imessage-common -p open-absinthe -p imessaged -p imsg -p imsg-client -p imsg-tui
+  _cargo test --frozen --release -p imessage-common -p open-absinthe -p imessaged -p imsg -p imsg-client -p imsg-tui -p imsg-bridge
 }
 
 package() {
   cd "$srcdir/imessage-linux"
-  install -Dm755 -t "$pkgdir/usr/bin" target/release/imessaged target/release/imsg target/release/imsg-tui
+  install -Dm755 -t "$pkgdir/usr/bin" target/release/imessaged target/release/imsg target/release/imsg-tui \
+    target/release/imsg-bridge
 
   # systemd user unit: the checkout's unit runs ~/.cargo/bin/imessaged
   sed 's|^ExecStart=%h/\.cargo/bin/imessaged |ExecStart=/usr/bin/imessaged |' \
     packaging/systemd/imessaged.service > "$srcdir/imessaged.service"
   grep -q '^ExecStart=/usr/bin/imessaged ' "$srcdir/imessaged.service"
   install -Dm644 "$srcdir/imessaged.service" "$pkgdir/usr/lib/systemd/user/imessaged.service"
+  # imsg-bridge (docs/BRIDGE.md): shipped, not enabled; same ExecStart rewrite.
+  sed 's|^ExecStart=%h/\.cargo/bin/imsg-bridge |ExecStart=/usr/bin/imsg-bridge |' \
+    packaging/systemd/imsg-bridge.service > "$srcdir/imsg-bridge.service"
+  grep -q '^ExecStart=/usr/bin/imsg-bridge ' "$srcdir/imsg-bridge.service"
+  install -Dm644 "$srcdir/imsg-bridge.service" "$pkgdir/usr/lib/systemd/user/imsg-bridge.service"
   install -Dm644 packaging/dbus/org.imessage.Daemon1.service \
     "$pkgdir/usr/share/dbus-1/services/org.imessage.Daemon1.service"
 

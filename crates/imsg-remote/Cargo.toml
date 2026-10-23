@@ -1,0 +1,32 @@
+[package]
+name = "imsg-remote"
+description = "Client library for imsg-bridge (docs/BRIDGE.md), used by the portable client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+imessage-common.workspace = true
+# 0.11: the version rustpush already pins, so the workspace keeps one
+# reqwest. No TLS: the bridge speaks plain HTTP inside the tailnet
+# (WireGuard encrypts it).
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs", "io-util", "net"] }
+tokio-util = { version = "0.7", features = ["io"] }
+# Default features = connect + handshake, no TLS.
+tokio-tungstenite = "0.20"
+futures-util = "0.3"
+bytes = "1"
+serde.workspace = true
+serde_json.workspace = true
+percent-encoding = "2"
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+# examples/fake_bridge.rs: canned pictures.
+image = { version = "0.25", default-features = false, features = ["png"] }
