@@ -33,6 +33,10 @@ It logs in, registers and sends/receives iMessages on a real Apple ID:
 * **Text messages (SMS / MMS / RCS) through your iPhone** ("Text Message
   Forwarding", like a Mac): green bubbles, sent by your iPhone; see
   [Text messages](#text-messages-sms-through-your-iphone).
+* `imsg-bridge` (unreleased): the daemon's messaging API over HTTP +
+  WebSocket on this host's Tailscale addresses only, for remote clients
+  (per-device tokens plus tailnet identity; no login / logout over the
+  network). Setup and API: [docs/BRIDGE.md](docs/BRIDGE.md).
 
 Still missing: sending transcript backgrounds (they are received only),
 publishing your own shared name and photo, and

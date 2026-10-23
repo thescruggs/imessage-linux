@@ -469,6 +469,52 @@ shown by kmessages.
   this one; the protocol (pairing, payloads) documented in `docs/HELPER.md`
   so the ssh tools stay a supported fallback.
 
+### Windows port
+
+See `docs/WINDOWS-PLAN.md` (proposal, not scheduled).
+
+### Contacts over iCloud CardDAV (no Mac needed)
+
+Contacts today need the Mac awake and reachable over ssh (`imsg sync-mac`),
+and ssh fails whenever the 1Password agent refuses to sign. iCloud exposes
+the same address book over standard CardDAV (RFC 6352), so Linux can sync
+contacts on its own. This was verified by hand on 2026-10-18 with curl:
+a contact was created and appeared on the Mac and iPhone.
+
+* **Auth**: Apple ID + an **app-specific password** (appleid.apple.com →
+  Sign-In and Security). The account password, 2FA and anisette are not
+  involved. Store it in Secret Service like the daemon's state key; never in
+  config files.
+* **Discovery** (three requests, cache the result):
+  1. `PROPFIND https://contacts.icloud.com/` (Depth 0,
+     `current-user-principal`) → `/<dsid>/principal/`
+  2. `PROPFIND` that principal for `card:addressbook-home-set` →
+     `https://pNN-contacts.icloud.com:443/<dsid>/carddavhome/` (the pNN shard
+     differs per account, so never hard-code it)
+  3. The address book is `<home>card/` (iCloud has a single book; Groups are
+     vCards with `X-ADDRESSBOOKSERVER-KIND:group`).
+* **Read / sync**: `REPORT` `sync-collection` (RFC 6578) on `<home>card/`
+  with the saved `sync-token` returns only changed/deleted hrefs; fetch them
+  with `addressbook-multiget`. First run: empty token = full listing.
+  Photos are inline `PHOTO;ENCODING=b` in the vCard 3.0. Write to
+  `~/.local/share/kpeoplevcard/icloud-<uid>.vcf` (new `icloud-` prefix, so
+  `mac-*` files from `sync-mac` and these never collide; pick one source per
+  install and have `imsg doctor` warn when both exist).
+* **Write** (new contact from kmessages, e.g. "Add to Contacts" on an unknown
+  sender): `PUT <home>card/<UUID>.vcf` with `Content-Type: text/vcard`,
+  `If-None-Match: *` (→ 201, never overwrites); edits use `If-Match: <etag>`.
+  vCard 3.0 with CRLF line endings, `N`, `FN`, `UID`; escape `,` `;` `\n`.
+  Search first with `addressbook-query` (`FN` text-match) to avoid duplicates.
+* **Where it lives**: a `carddav` module in the daemon (it already has HTTPS,
+  tokio and Secret Service), exposed as `imsg contacts sync --icloud` and a
+  periodic sync (every 15–30 min + the Sync button). The Mac `sync-mac` path
+  stays for pins, backgrounds and history, which CardDAV does not cover.
+* **Limits**: no pins/favorites in vCards (pins stay Mac-sourced); "Me" card
+  and contact posters are not exposed; rate limits are undocumented, so use
+  sync-tokens rather than full listings.
+* **Tests**: a local CardDAV fixture (e.g. Radicale in a temp dir) for
+  discovery, sync-token deltas, 412 on etag conflicts and the 201 create path.
+
 ## Non-goals / known limits
 
 * A phone number of your own without an iPhone on the account (iPhone-class

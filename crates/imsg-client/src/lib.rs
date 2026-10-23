@@ -13,8 +13,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use imessage_common::model::{Chat, ConnectionState, Message, RegistrationState};
-use serde::Deserialize;
+use imessage_common::model::{Chat, Message, RegistrationState};
 use serde::de::DeserializeOwned;
 use zbus::DBusError as _;
 use zbus::proxy;
@@ -221,50 +220,7 @@ pub trait Daemon1 {
 // JSON payloads that have no model type
 // ---------------------------------------------------------------------------
 
-/// `GetStatus`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Status {
-    pub version: String,
-    pub connection: ConnectionState,
-    pub registered: bool,
-    pub registration: RegistrationState,
-    pub unread: Option<u32>,
-    /// Older daemons do not report it.
-    #[serde(default)]
-    pub profiles: Option<imessage_common::model::ProfilesStatus>,
-    /// Text Message Forwarding; older daemons do not report it.
-    #[serde(default)]
-    pub sms: Option<imessage_common::model::SmsForwarding>,
-    /// The daemon's `mac_host` setting (`imsg sync-mac`); older daemons
-    /// do not report it.
-    #[serde(default)]
-    pub mac_host: Option<String>,
-}
-
-/// `ListMessages`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct MessagePage {
-    pub messages: Vec<Message>,
-    pub next_cursor: Option<String>,
-}
-
-/// `SendText` / `SendFile`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SentMessage {
-    pub id: String,
-    pub chat_id: String,
-    pub sent_at: u64,
-    pub sender: imessage_common::model::Handle,
-    #[serde(default)]
-    pub service: imessage_common::model::Service,
-}
-
-/// `LookupHandles` element.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Reachability {
-    pub handle: String,
-    pub reachable: bool,
-}
+pub use imessage_common::api::{MessagePage, Reachability, SentMessage, Status};
 
 /// `Login` / `SubmitTwoFactor` outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,6 +580,7 @@ impl Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imessage_common::model::ConnectionState;
 
     #[tokio::test]
     async fn long_calls_time_out_with_a_hint() {

@@ -1,0 +1,55 @@
+[package]
+name = "imsg-app"
+description = "Portable desktop client for imessaged over imsg-bridge (docs/PORTABLE-WINDOWS.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+imessage-common.workspace = true
+imsg-remote.workspace = true
+# Software renderer + winit: no GPU / OpenGL needed (RDP, VMs), one static
+# exe. Feature set proven by the Phase-0 spike (docs/PORTABLE-WINDOWS.md).
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+    "accessibility",
+    # Window focus events and request_user_attention (taskbar flash).
+    "unstable-winit-030",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+log.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# secrets.bin: argon2id + AES-256-GCM.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+getrandom = "0.2"
+zeroize = { version = "1", features = ["derive"] }
+# Inline pictures: only the formats Windows-side decoding needs (HEIC and
+# video show as file rows).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# Native Save / Open file dialogs.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(windows)'.dependencies]
+# Tray icon + balloon notifications (Shell_NotifyIconW), no AUMID/registry.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build = "1.18"
+
+[dev-dependencies]
+tempfile = "3"

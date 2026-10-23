@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use imessage_common::model::{Chat, Handle, Message, MessageId, ReactionKind, Service};
+use imessage_common::model::{Chat, Handle, Message, MessageId, Service};
 use imessage_common::platform::desktop::{self, Opened, open_with_default};
 use imsg_client::{MessagePage, SentMessage, Status, Target};
 use tokio::sync::mpsc;
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::backend::{Backend, DaemonEvent, PAGE, guess_mime};
 use crate::contacts::{Contacts, expand_tilde};
@@ -660,7 +660,7 @@ impl App {
 
     /// Our current reaction on a message, as the daemon's `kind` string.
     fn my_reaction(&self, m: &Message) -> Option<String> {
-        m.reactions.iter().find(|r| r.added && self.is_me(&r.sender)).map(|r| reaction_arg(&r.kind))
+        m.reactions.iter().find(|r| r.added && self.is_me(&r.sender)).map(|r| r.kind.arg())
     }
 
     fn react(&mut self, input: &str) {
@@ -1235,7 +1235,7 @@ impl App {
 
     /// When the user finishes typing `:shortcode:` replace it inline with the emoji.
     fn maybe_expand_shortcode(&mut self) {
-        let (row, col) = self.compose.cursor();
+        let ratatui_textarea::DataCursor(row, col) = self.compose.cursor();
         let line = match self.compose.lines().get(row) {
             Some(l) => l.clone(),
             None => return,
@@ -1506,19 +1506,6 @@ fn transcript_shown(mode: Mode) -> bool {
     matches!(mode, Mode::Normal | Mode::ChatFilter | Mode::React | Mode::Attach)
 }
 
-/// The daemon's `kind` argument for a reaction we already have.
-fn reaction_arg(k: &ReactionKind) -> String {
-    match k {
-        ReactionKind::Love => "love".into(),
-        ReactionKind::Like => "like".into(),
-        ReactionKind::Dislike => "dislike".into(),
-        ReactionKind::Laugh => "laugh".into(),
-        ReactionKind::Emphasize => "emphasize".into(),
-        ReactionKind::Question => "question".into(),
-        ReactionKind::Emoji(e) => e.clone(),
-    }
-}
-
 /// `1`-`6`, a tapback name / alias, or an emoji -> `React`'s `kind`.
 pub fn parse_reaction(input: &str) -> Option<String> {
     let a = input.trim();
@@ -1651,7 +1638,7 @@ fn base64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imessage_common::model::{ChatId, DeliveryState, MessagePart};
+    use imessage_common::model::{ChatId, DeliveryState, MessagePart, ReactionKind};
 
     async fn app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1865,8 +1852,8 @@ mod tests {
         assert_eq!(parse_reaction(":fire:").as_deref(), Some("🔥"));
         assert_eq!(parse_reaction("nope"), None);
         assert_eq!(parse_reaction(""), None);
-        assert_eq!(reaction_arg(&ReactionKind::Emoji("🔥".into())), "🔥");
-        assert_eq!(reaction_arg(&ReactionKind::Emphasize), "emphasize");
+        assert_eq!(ReactionKind::Emoji("🔥".into()).arg(), "🔥");
+        assert_eq!(ReactionKind::Emphasize.arg(), "emphasize");
     }
 
     #[test]

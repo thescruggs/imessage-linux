@@ -1,0 +1,237 @@
+// Tapbacks: the chips on a bubble's top corner and the picker bar
+// (kmessages ReactionChips.qml / TapbackPicker.qml). The software
+// renderer has no colour emoji, so the six classic tapbacks are white
+// PNG icons (tools/gen-tapback-icons.py) tinted with `colorize`; other
+// emoji reactions are text.
+
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// One chip: everyone who reacted with one kind (state.rs ReactionView).
+export struct ReactionItem {
+    // "love" … "question", or the emoji itself
+    kind: string,
+    label: string,
+    count: int,
+    mine: bool,
+    senders: string,
+}
+
+export global Tapbacks {
+    out property <[{kind: string, label: string}]> all: [
+        { kind: "love", label: "Love" },
+        { kind: "like", label: "Like" },
+        { kind: "dislike", label: "Dislike" },
+        { kind: "laugh", label: "Laugh" },
+        { kind: "emphasize", label: "Emphasize" },
+        { kind: "question", label: "Question" },
+    ];
+    out property <image> react-icon: @image-url("../assets/tapbacks/react.png");
+    // Emoji reactions are text in this font (ui.rs: Segoe UI Emoji on
+    // Windows, whose glyphs have monochrome outlines the software renderer
+    // can draw; the UI font has no emoji).
+    in property <string> emoji-font;
+
+    pure public function has-icon(kind: string) -> bool {
+        kind == "love" || kind == "like" || kind == "dislike" || kind == "laugh" || kind == "emphasize" || kind == "question"
+    }
+
+    pure public function icon(kind: string) -> image {
+        kind == "love" ? @image-url("../assets/tapbacks/love.png")
+            : kind == "like" ? @image-url("../assets/tapbacks/like.png")
+            : kind == "dislike" ? @image-url("../assets/tapbacks/dislike.png")
+            : kind == "laugh" ? @image-url("../assets/tapbacks/laugh.png")
+            : kind == "emphasize" ? @image-url("../assets/tapbacks/emphasize.png")
+            : @image-url("../assets/tapbacks/question.png")
+    }
+}
+
+// Glyph: an icon for the six, text for an emoji.
+component Glyph inherits HorizontalLayout {
+    in property <string> kind;
+    in property <string> label;
+    in property <color> fg;
+    in property <length> size;
+    alignment: center;
+    if Tapbacks.has-icon(root.kind): Image {
+        source: Tapbacks.icon(root.kind);
+        colorize: root.fg;
+        width: root.size;
+        height: root.size;
+        image-rendering: smooth;
+        accessible-role: none;
+    }
+    if !Tapbacks.has-icon(root.kind): Text {
+        text: root.label;
+        color: root.fg;
+        font-family: Tapbacks.emoji-font;
+        font-size: root.size * 0.85;
+        height: root.size;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+export component ReactionChip inherits Rectangle {
+    in property <ReactionItem> r;
+    in property <bool> can-remove;
+    callback remove();
+    out property <bool> hovered: ta.has-hover;
+
+    height: Theme.base * 1.45;
+    width: max(self.height, row.preferred-width + 12px);
+    border-radius: self.height / 2;
+    border-width: 2px;
+    border-color: Theme.bg;
+    background: root.r.mine ? Theme.bubble-imessage : Theme.bubble-in;
+    accessible-role: button;
+    accessible-label: root.r.label + (root.r.count > 1 ? " ×" + root.r.count : "") + " from " + root.r.senders
+        + (root.r.mine && root.can-remove ? " (click to remove yours)" : "");
+    accessible-enabled: root.r.mine && root.can-remove;
+    accessible-action-default => { if (root.r.mine && root.can-remove) { root.remove(); } }
+
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: 3px;
+        VerticalLayout {
+            alignment: center;
+            Glyph {
+                kind: root.r.kind;
+                label: root.r.label;
+                fg: root.r.mine ? Theme.on-bubble-out : Theme.text;
+                size: root.height * 0.62;
+            }
+        }
+        if root.r.count > 1: Text {
+            text: root.r.count;
+            color: root.r.mine ? Theme.on-bubble-out : Theme.text;
+            font-size: Theme.small;
+            font-weight: 700;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: root.r.mine && root.can-remove ? pointer : default;
+        clicked => { if (root.r.mine && root.can-remove) { root.remove(); } }
+    }
+}
+
+// The senders of a hovered chip, drawn beside the chips.
+export component ChipTip inherits Rectangle {
+    in property <string> text;
+    width: t.preferred-width + 14px;
+    height: t.preferred-height + 2px;
+    border-radius: 6px;
+    background: Theme.raised;
+    border-width: 1px;
+    border-color: Theme.border;
+    t := Text {
+        text: root.text;
+        color: Theme.text-strong;
+        font-size: Theme.small;
+        accessible-role: none;
+    }
+}
+
+// One toggle in the picker; checked = our current tapback.
+component TapbackBtn inherits Rectangle {
+    in property <string> kind;
+    in property <string> label;
+    in property <bool> checked;
+    callback clicked;
+    width: Theme.base * 2.4;
+    height: self.width;
+    border-radius: self.width / 2;
+    background: root.checked ? Theme.bubble-imessage : ta.pressed ? Theme.panel : ta.has-hover ? Theme.raised-hover : transparent;
+    border-width: fs.has-focus ? 2px : 0px;
+    border-color: Theme.accent;
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    Glyph {
+        kind: root.kind;
+        label: root.label;
+        fg: root.checked ? Theme.on-bubble-out : Theme.text;
+        size: root.width * 0.54;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// The picker's pill: six toggles and a field for any other emoji.
+// Lives in a PopupWindow (MessageView in app.slint).
+export component TapbackBar inherits Rectangle {
+    in property <string> my-reaction;
+    callback picked(string);
+    callback cancel();
+
+    border-radius: self.height / 2;
+    background: Theme.bg;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: groupbox;
+    accessible-label: "Tapback";
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+        HorizontalLayout {
+            padding: 4px;
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 2px;
+            for t in Tapbacks.all: TapbackBtn {
+                kind: t.kind;
+                label: t.label;
+                checked: root.my-reaction == t.kind;
+                clicked => { root.picked(t.kind); }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+            VerticalLayout {
+                alignment: center;
+                padding-left: 6px;
+                other := LineEdit {
+                    width: Theme.base * 8;
+                    placeholder-text: "Other emoji…";
+                    accessible-label: "Other emoji (type one, then Enter)";
+                    accepted => {
+                        if (self.text != "") {
+                            root.picked(self.text);
+                        }
+                    }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) {
+                            root.cancel();
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+        }
+    }
+
+    public function focus-keys() {
+        keys.focus();
+    }
+}

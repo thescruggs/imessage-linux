@@ -6,6 +6,10 @@ members = [
     "crates/imsg",
     "crates/imsg-client",
     "crates/imsg-tui",
+    # Remote access (docs/BRIDGE.md, docs/PORTABLE-WINDOWS.md).
+    "crates/imsg-bridge",
+    "crates/imsg-remote",
+    "crates/imsg-app",
     # NAC emulator (drop-in replacement for the closed `open-absinthe`).
     "crates/open-absinthe",
 ]
@@ -22,6 +26,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 imessage-common = { path = "crates/imessage-common" }
 imsg-client = { path = "crates/imsg-client" }
+imsg-remote = { path = "crates/imsg-remote" }
 open-absinthe = { path = "crates/open-absinthe" }
 serde = { version = "1", features = ["derive"] }
 plist = "1.7"

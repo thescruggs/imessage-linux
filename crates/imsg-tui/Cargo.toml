@@ -22,10 +22,12 @@ log.workspace = true
 env_logger.workspace = true
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-# Pinned together: tui-textarea 0.7 is built against ratatui 0.29 / crossterm 0.28.
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = "0.7"
+# Pinned together: ratatui-textarea 0.9 (the ratatui org's successor of
+# tui-textarea) is built against ratatui 0.30 / crossterm 0.29. ratatui 0.29
+# pinned unicode-width =0.2.0, which Slint (imsg-app) cannot share.
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui-textarea = "0.9"
 emojis = "0.9"
 unicode-width = "0.2"
 
@@ -35,4 +37,4 @@ unicode-width = "0.2"
 imessaged = { path = "../imessaged" }
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 tempfile = "3"
-crossterm = { version = "0.28" }
+crossterm = { version = "0.29" }
