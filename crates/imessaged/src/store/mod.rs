@@ -1594,6 +1594,7 @@ impl StoreHandle {
 
 mod housekeeping;
 mod import;
+mod merge;
 mod profiles;
 pub use profiles::{IconDownload, ShareOutcome};
 pub use housekeeping::{PurgeSummary, PurgedChat};

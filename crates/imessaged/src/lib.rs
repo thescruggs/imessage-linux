@@ -2,6 +2,7 @@
 
 pub mod background;
 pub mod config;
+pub mod contacts;
 pub mod daemon;
 pub mod dbus;
 pub mod engine;

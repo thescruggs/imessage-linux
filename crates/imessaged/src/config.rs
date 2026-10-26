@@ -29,6 +29,11 @@
 //! link_previews     = true                         # fetch a preview (title, image) of the first
 //!                     # link in an iMessage you send, as Messages does; the
 //!                     # daemon contacts that site when you send, never on receive
+//! link_contacts     = true                         # one conversation per person: the email
+//!                     # addresses and phone numbers on one contact card share
+//!                     # a chat (as on the iPhone); see crate::contacts
+//! contacts_dir      = "~/.local/share/kpeoplevcard" # the vCards for link_contacts (what
+//!                     # `imsg sync-mac` writes); this is the default
 //! ```
 //!
 //! **Logging and privacy.** The default filter ([`DEFAULT_LOG_LEVEL`]) keeps
@@ -169,6 +174,8 @@ pub struct FileConfig {
     pub sms_relay_number: Option<String>,
     pub mac_host: Option<String>,
     pub link_previews: Option<bool>,
+    pub link_contacts: Option<bool>,
+    pub contacts_dir: Option<String>,
 }
 
 impl FileConfig {
@@ -201,6 +208,8 @@ pub struct Overrides {
     pub sms_relay_number: Option<String>,
     pub mac_host: Option<String>,
     pub link_previews: Option<bool>,
+    pub link_contacts: Option<bool>,
+    pub contacts_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +248,11 @@ pub struct DaemonConfig {
     /// send and send it with the text (Messages' URL balloon). The daemon
     /// then contacts that site; it never fetches anything on receive.
     pub link_previews: bool,
+    /// Keep the one-to-one chats with the addresses on one contact card
+    /// (`contacts_dir`) as one conversation (see `crate::contacts`).
+    pub link_contacts: bool,
+    /// The vCard folder for `link_contacts`.
+    pub contacts_dir: PathBuf,
 }
 
 impl DaemonConfig {
@@ -256,6 +270,8 @@ impl DaemonConfig {
             sms_relay_number: None,
             mac_host: None,
             link_previews: true,
+            link_contacts: true,
+            contacts_dir: imessage_common::paths::kpeople_vcard_dir(),
         }
     }
 
@@ -303,6 +319,18 @@ impl DaemonConfig {
         }
         if let Some(v) = over.link_previews.or(file.link_previews) {
             c.link_previews = v;
+        }
+        if let Some(v) = over.link_contacts.or(file.link_contacts) {
+            c.link_contacts = v;
+        }
+        if let Some(v) = over.contacts_dir.or(file.contacts_dir) {
+            let v = v.trim();
+            if !v.is_empty() {
+                c.contacts_dir = match v.strip_prefix("~/").zip(imessage_common::paths::home_dir()) {
+                    Some((rest, home)) => home.join(rest),
+                    None => PathBuf::from(v),
+                };
+            }
         }
         c
     }
@@ -394,6 +422,21 @@ mod tests {
     }
 
     #[test]
+    fn contact_links_settings() {
+        let c = DaemonConfig::resolve("/s".into(), FileConfig::default(), Overrides::default());
+        assert!(c.link_contacts);
+        assert_eq!(c.contacts_dir, imessage_common::paths::kpeople_vcard_dir());
+        let f = FileConfig::parse("link_contacts = false\ncontacts_dir = \"/cards\"\n").unwrap();
+        let c = DaemonConfig::resolve("/s".into(), f.clone(), Overrides::default());
+        assert!(!c.link_contacts);
+        assert_eq!(c.contacts_dir, PathBuf::from("/cards"));
+        let o = Overrides { link_contacts: Some(true), contacts_dir: Some("  ".into()), ..Default::default() };
+        let c = DaemonConfig::resolve("/s".into(), f, o);
+        assert!(c.link_contacts);
+        assert_eq!(c.contacts_dir, imessage_common::paths::kpeople_vcard_dir(), "blank = the default");
+    }
+
+    #[test]
     fn file_then_overrides() {
         let f = FileConfig::parse(
             "anisette_url = \"https://ani.example/\"\nkey_provider = \"file\"\nlog_level = \"debug\"\n",
@@ -415,6 +458,8 @@ mod tests {
             sms_relay_number: None,
             mac_host: None,
             link_previews: None,
+            link_contacts: None,
+            contacts_dir: None,
         };
         let c = DaemonConfig::resolve("/s".into(), f, o);
         assert_eq!(c.anisette_url, "http://localhost:6969");

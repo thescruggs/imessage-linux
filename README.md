@@ -242,6 +242,21 @@ other_handles = ["+15551234567"]     # or IMESSAGED_OTHER_HANDLES=a,b / --other-
 
 They are never sent from. Messages already stored are not rewritten.
 
+### One conversation per person
+
+Like the iPhone, the daemon keeps one conversation per contact: when a
+contact card has both an email address and a phone number, messages to
+and from either land in the same chat, and replies go to the address
+they last wrote from. The cards are the vCards `imsg sync-mac` copies
+from your Mac (`~/.local/share/kpeoplevcard`); existing separate chats are
+merged the next time the daemon starts or the cards change. To turn it
+off, or to read cards from another folder:
+
+```toml
+link_contacts = false                    # or IMESSAGED_LINK_CONTACTS / --link-contacts
+contacts_dir = "~/Contacts/vcards"      # or IMESSAGED_CONTACTS_DIR / --contacts-dir
+```
+
 ## Text messages (SMS through your iPhone)
 
 Like a Mac, the daemon can send and receive SMS / MMS / RCS through your

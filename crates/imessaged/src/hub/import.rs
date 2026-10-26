@@ -175,6 +175,8 @@ impl Hub {
             result.reactions,
             result.reactions_orphaned
         );
+        // Mac chats are per address: fold a linked person's back together.
+        self.merge_linked_chats().await;
         Ok(result)
     }
 }

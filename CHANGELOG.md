@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+* **One conversation per person.** When a contact card (the vCards `imsg
+  sync-mac` copies from the Mac) has both an email address and a phone
+  number, the daemon now keeps a single chat for them, as Messages on the
+  iPhone does: existing separate chats are merged (messages, unread state,
+  pin, background), new messages from either address land in it, and
+  replies go to the address the person last wrote from. New settings
+  `link_contacts` (default `true`) and `contacts_dir`; see
+  [docs/DAEMON.md](docs/DAEMON.md#contact-links).
+
 * **New: `imsg-bridge`, imessaged over the tailnet**
   ([docs/BRIDGE.md](docs/BRIDGE.md)). A small service next to the daemon,
   an ordinary D-Bus client of it, that re-exposes the messaging part of

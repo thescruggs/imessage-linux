@@ -262,6 +262,8 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `sms_relay_number` | `--sms-relay-number` / `IMESSAGED_SMS_RELAY_NUMBER` | unset = the first phone number in `other_handles`; the iPhone number text messages are relayed through (must be a phone number) |
 | `mac_host` | `--mac-host` / `IMESSAGED_MAC_HOST` | unset; the ssh destination of your Mac (`mac.local`, `me@mac.local`, a `Host` alias) for `imsg sync-mac` and kmessages' "Sync from Mac". Only reported (`GetStatus.mac_host`); the daemon never connects to it. A value starting with `-` or containing spaces or shell characters fails startup. `imsg doctor` suggests the host your ssh `anisette_command` reaches |
 | `link_previews` | `--link-previews BOOL` / `--no-link-previews` / `IMESSAGED_LINK_PREVIEWS` | `true`; fetch a preview of the first link in an iMessage you send and send it with the text (see [Link previews](#link-previews)). The daemon then contacts the linked site when you send; never when you receive |
+| `link_contacts` | `--link-contacts BOOL` / `IMESSAGED_LINK_CONTACTS` | `true`; one conversation per person: the addresses on one contact card share a chat (see [Contact links](#contact-links)) |
+| `contacts_dir` | `--contacts-dir` / `IMESSAGED_CONTACTS_DIR` | `$XDG_DATA_HOME/kpeoplevcard` (what `imsg sync-mac` writes); a leading `~/` is the home directory |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
 | — | `--transport` / `IMESSAGED_TRANSPORT` | `session` on Linux, `p2p` on Windows: how clients reach the API ([DBUS.md](DBUS.md#peer-to-peer-transport-windows)) |
@@ -298,6 +300,47 @@ uses registered handles only). `GetStatus` reports them as
 `registration.other_handles`. Messages and chats already stored are not
 rewritten: older rows from the phone keep `is_from_me = false` and their
 old chat ids.
+
+### Contact links
+
+Messages on the iPhone shows one conversation per contact, whichever of
+their addresses a message used. With `link_contacts` (the default) the
+daemon does the same (`src/contacts.rs`, `src/hub/links.rs`):
+
+* It reads the `EMAIL` / `TEL` lines of the `.vcf` files in
+  `contacts_dir` (phone numbers without a country code are taken as +1,
+  as kmessages does). Cards with the same name that share an address are
+  joined (the Mac exports one card per account: iCloud, Google, …); a
+  person with two or more usable addresses is linked. An address on the
+  cards of different people (a shared landline) and our
+  own addresses (registered, `other_handles`, the SMS number) are never
+  linked; nothing is linked before the registration says which addresses
+  are ours. The folder is checked at startup, after each registration and
+  every 60 s (file names, sizes and times; the cards are only re-read
+  when those change).
+* A person's chat is the 1:1 chat with their *canonical* address: the
+  first phone number in sorted order, else the first email address.
+  Stored 1:1 chats of their other addresses are merged into it in one
+  transaction: messages, unread state, the newer background, the pin
+  (the canonical chat's own, else the merged chat's place), the newer
+  activity time; the other chat row is deleted. Clients get `ChatUpdated`
+  for the merged chat and a `BackgroundError` "… clients should resync".
+  A merge is not undone when a card changes later.
+* Engine events (messages, receipts, typing, tapbacks, edits, unsends,
+  backgrounds) naming a linked address are filed under the person's chat
+  before they reach the store. `GetChat` / `ListMessages` / `MarkRead` /
+  `SetChatPinned` / `ReorderPins` / `ImportChatBackground` with a
+  merged-away id act on the person's chat, and `ImportMessages` merges
+  again when it is done (Mac chats are per address).
+* Sends to the person's chat go to the address they last wrote from (the
+  newest incoming message), or their canonical address if they never
+  wrote. A tapback or read receipt goes to the address of the message it
+  is about; a tapback, edit or unsend of one of *our* messages to the
+  address they had last written from when we sent it. A text message
+  (`service = sms`, or no choice in a chat that is in SMS mode) only
+  considers their phone numbers. iMessage vs SMS is then chosen for that
+  address as usual. The stored row and the returned `chat_id` use the
+  person's chat.
 
 `store_credentials = false` drops `PersistAccountData` (username, SRP
 hash, GSA tokens) from `SavedState` — never written, and removed from an

@@ -82,6 +82,16 @@ struct Args {
     #[arg(long)]
     no_link_previews: bool,
 
+    /// One conversation per person: the email addresses and phone numbers
+    /// on one contact card share a chat (default true).
+    #[arg(long, env = "IMESSAGED_LINK_CONTACTS")]
+    link_contacts: Option<bool>,
+
+    /// The vCard folder for --link-contacts (default
+    /// ~/.local/share/kpeoplevcard, where `imsg sync-mac` writes).
+    #[arg(long, env = "IMESSAGED_CONTACTS_DIR")]
+    contacts_dir: Option<String>,
+
     /// Do not serve the D-Bus API (headless / tests). Messages are still
     /// received and stored.
     #[arg(long)]
@@ -121,6 +131,8 @@ async fn run(args: Args, state_dir: PathBuf) -> anyhow::Result<()> {
             sms_relay_number: args.sms_relay_number,
             mac_host: args.mac_host,
             link_previews: if args.no_link_previews { Some(false) } else { args.link_previews },
+            link_contacts: args.link_contacts,
+            contacts_dir: args.contacts_dir,
         },
     )?;
 

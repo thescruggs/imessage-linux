@@ -111,6 +111,11 @@ impl Daemon {
         hub.set_link_previews(self.cfg.link_previews.then(crate::linkpreview::FetchOptions::default));
         hub.delete_empty_groups().await;
         hub.seed_engine_chats().await;
+        // Before the event pump starts, so no event lands in a chat that is
+        // about to be merged.
+        hub.set_contacts_dir(self.cfg.link_contacts.then(|| self.cfg.contacts_dir.clone()));
+        hub.refresh_contact_links().await;
+        hub.spawn_contact_links();
         let conn = match &self.bus {
             Some(bus) => match crate::dbus::serve(hub.clone(), bus, self.peer_lock.clone()).await {
                 Ok(c) => Some(c),
@@ -241,14 +246,17 @@ async fn pump(hub: Arc<Hub>, mut rx: broadcast::Receiver<EngineEvent>, mut stop:
 }
 
 async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
+    let ev = hub.link_event(ev);
     log_event(&ev);
     match &ev {
         EngineEvent::Typing(t) => return hub.on_typing(t.chat_id.clone(), t.sender.clone(), t.typing).await,
         EngineEvent::ConnectionChanged(s) => return hub.emit(DaemonSignal::ConnectionStateChanged(s.clone())).await,
         EngineEvent::RegistrationChanged(r) => {
             if r.is_registered() {
-                // The engine now knows our handles: re-teach it stored groups.
+                // The engine now knows our handles: re-teach it stored groups,
+                // and our own addresses can no longer be mistaken for a contact's.
                 hub.seed_engine_chats().await;
+                hub.refresh_contact_links().await;
             }
             return hub.emit(DaemonSignal::RegisteredChanged(r.is_registered())).await;
         }

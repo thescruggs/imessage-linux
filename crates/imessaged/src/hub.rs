@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use imessage_common::model::{
@@ -269,6 +269,9 @@ pub struct Hub {
     /// Link previews for links we send (`link_previews` setting); `None` =
     /// off (the default for a bare `Hub`; the daemon turns them on).
     link_previews: Mutex<Option<Arc<Fetcher>>>,
+    /// One conversation per person (see `hub/links.rs`).
+    links: RwLock<Arc<crate::contacts::ContactLinks>>,
+    link_source: Mutex<links::LinkSource>,
 }
 
 impl Hub {
@@ -289,6 +292,8 @@ impl Hub {
             reachability: Mutex::new(HashMap::new()),
             mac_host: Mutex::new(None),
             link_previews: Mutex::new(None),
+            links: RwLock::default(),
+            link_source: Mutex::default(),
         })
     }
 
@@ -637,6 +642,16 @@ impl Hub {
         }
     }
 
+    /// Whether a send is meant as a text message: asked for, or (no
+    /// choice given) to a chat that is in SMS mode now.
+    async fn wants_sms(&self, target: &ChatTarget, hint: Option<Service>) -> bool {
+        match (hint, target) {
+            (Some(s), _) => s == Service::Sms,
+            (None, ChatTarget::Chat(id)) => self.chat_is_sms(&self.link_chat(id)).await,
+            (None, ChatTarget::Participants(_)) => false,
+        }
+    }
+
     /// Text messages have no tapbacks, edits, unsend or typing indicators.
     async fn refuse_sms(&self, id: &MessageId, what: &str) -> OpResult<()> {
         match self.stored_message(id).await? {
@@ -653,7 +668,7 @@ impl Hub {
     /// (0 = first); `None` = last for a new pin, unchanged for a pinned one. Emits `ChatUpdated` for every chat whose
     /// pin changed and returns the chat.
     pub async fn set_chat_pinned(self: &Arc<Self>, chat_id: &str, pinned: bool, order: Option<u32>) -> OpResult<Chat> {
-        let id = ChatId(chat_id.to_string());
+        let id = self.link_chat(&ChatId(chat_id.to_string()));
         let k = id.clone();
         let updates = self.store()?.call(move |s| s.set_chat_pinned(&k, pinned, order)).await?;
         self.publish(updates).await;
@@ -664,7 +679,7 @@ impl Hub {
     /// Put `ids` first among the pins, in this order (pinning them); the
     /// other pins follow. Returns all pinned chats in order.
     pub async fn reorder_pins(self: &Arc<Self>, ids: Vec<String>) -> OpResult<Vec<Chat>> {
-        let ids: Vec<ChatId> = ids.into_iter().map(ChatId).collect();
+        let ids: Vec<ChatId> = ids.into_iter().map(|i| self.link_chat(&ChatId(i))).collect();
         let updates = self.store()?.call(move |s| s.reorder_pins(&ids)).await?;
         self.publish(updates).await;
         Ok(self.store()?.call(|s| s.pinned_chats()).await?)
@@ -676,7 +691,7 @@ impl Hub {
     /// photo, and participants' shared profiles older than a day (or never
     /// fetched) are fetched again (`HandleProfileUpdated` when they land).
     pub async fn get_chat(self: &Arc<Self>, id: &str) -> OpResult<Chat> {
-        let id = ChatId(id.to_string());
+        let id = self.link_chat(&ChatId(id.to_string()));
         let k = id.clone();
         let chat = self.store()?.call(move |s| s.get_chat(&k)).await?.ok_or_else(|| OpError::NotFound(format!("chat {id}")))?;
         if let Some(bg) = &chat.background {
@@ -730,7 +745,7 @@ impl Hub {
     /// The file is copied into `state_dir/backgrounds/<chat>/`. A later
     /// background change from iMessage replaces it.
     pub async fn import_chat_background(self: &Arc<Self>, chat_id: &str, path: &str) -> OpResult<Chat> {
-        let id = ChatId(chat_id.to_string());
+        let id = self.link_chat(&ChatId(chat_id.to_string()));
         let k = id.clone();
         self.store()?.call(move |s| s.get_chat(&k)).await?.ok_or_else(|| OpError::NotFound(format!("chat {id}")))?;
         let src = PathBuf::from(path);
@@ -848,7 +863,7 @@ impl Hub {
     }
 
     pub async fn list_messages(&self, chat_id: &str, before: &str, limit: u32) -> OpResult<MessagePage> {
-        let (chat, before) = (ChatId(chat_id.to_string()), before.to_string());
+        let (chat, before) = (self.link_chat(&ChatId(chat_id.to_string())), before.to_string());
         Ok(self.store()?.call(move |s| s.list_messages(&chat, Some(&before), limit)).await?)
     }
 
@@ -893,7 +908,7 @@ impl Hub {
         // chat the engine sent to with the people in it.
         let participants = if msg.chat_id.0.starts_with(ChatId::GROUP_PARTICIPANTS_PREFIX) {
             msg.chat_id.0[ChatId::GROUP_PARTICIPANTS_PREFIX.len()..].split(',').map(Handle::new).collect()
-        } else if !msg.chat_id.is_group() && msg.service == Service::Sms {
+        } else if !msg.chat_id.is_group() && (msg.service == Service::Sms || !self.contact_links().members(&msg.chat_id).is_empty()) {
             vec![Handle::new(&msg.chat_id.0)]
         } else {
             participants
@@ -957,6 +972,7 @@ impl Hub {
         if text.is_empty() {
             return Err(OpError::InvalidInput("empty message".into()));
         }
+        let target = self.route(target.clone(), None, self.wants_sms(&target, service).await).await;
         let service = self.choose_service(&target, service).await;
         // Text messages carry no reply reference.
         let reply_to = reply_to.filter(|_| service == Service::Imessage);
@@ -984,7 +1000,7 @@ impl Hub {
             link = None;
             r = send(None).await;
         }
-        let sent = r?;
+        let sent = self.link_sent(r?);
         let mut parts = vec![MessagePart::Text { text: text.to_string() }];
         let mut atts = vec![];
         if let Some((part, link_atts)) = link.as_ref().and_then(|l| convert::link_for_sent(&sent.id, l)) {
@@ -1036,12 +1052,14 @@ impl Hub {
             return Err(OpError::InvalidInput(format!("{path} is not a regular file")));
         }
         let mime = if mime.trim().is_empty() { "application/octet-stream" } else { mime.trim() };
+        let target = self.route(target.clone(), None, self.wants_sms(&target, service).await).await;
         let service = self.choose_service(&target, service).await;
         let r = self.engine.send_attachment_via(&target, &p, mime, service).await;
         let sent = match r {
             Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.send_attachment_via(&target, &p, mime, service).await?,
             r => r?,
         };
+        let sent = self.link_sent(sent);
         let filename = safe_component(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), "attachment");
         let id = AttachmentId::for_part(&sent.id, 0);
         // Keep our own copy: the caller may delete or move the original, and
@@ -1102,8 +1120,8 @@ impl Hub {
 
     pub async fn react(self: &Arc<Self>, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> OpResult<()> {
         let kind = parse_reaction_kind(kind)?;
-        let target = Self::target(chat_id, &[])?;
         let mid = MessageId::new(message_id);
+        let target = self.route(Self::target(chat_id, &[])?, self.stored_message(&mid).await?.as_ref(), false).await;
         self.refuse_sms(&mid, "a tapback").await?;
         let r = self.engine.react(&target, &mid, kind.clone(), remove).await;
         let sent = match r {
@@ -1121,9 +1139,9 @@ impl Hub {
         if text.is_empty() {
             return Err(OpError::InvalidInput("empty message".into()));
         }
-        let target = Self::target(chat_id, &[])?;
         let mid = MessageId::new(message_id);
         self.require_own(&mid, "edit").await?;
+        let target = self.route(Self::target(chat_id, &[])?, self.stored_message(&mid).await?.as_ref(), false).await;
         self.refuse_sms(&mid, "editing").await?;
         let r = self.engine.edit(&target, &mid, text).await;
         let sent = match r {
@@ -1138,9 +1156,9 @@ impl Hub {
     }
 
     pub async fn unsend(self: &Arc<Self>, chat_id: &str, message_id: &str) -> OpResult<()> {
-        let target = Self::target(chat_id, &[])?;
         let mid = MessageId::new(message_id);
         self.require_own(&mid, "unsend").await?;
+        let target = self.route(Self::target(chat_id, &[])?, self.stored_message(&mid).await?.as_ref(), false).await;
         self.refuse_sms(&mid, "unsend").await?;
         let r = self.engine.unsend(&target, &mid).await;
         let sent = match r {
@@ -1154,8 +1172,8 @@ impl Hub {
     }
 
     pub async fn set_typing(&self, chat_id: &str, typing: bool) -> OpResult<()> {
-        let target = Self::target(chat_id, &[])?;
-        if self.chat_is_sms(&ChatId(chat_id.trim().to_string())).await {
+        let target = self.route(Self::target(chat_id, &[])?, None, false).await;
+        if self.chat_is_sms(&self.link_chat(&ChatId(chat_id.trim().to_string()))).await {
             return Err(EngineError::Unsupported("typing indicators are not available for text messages (SMS)".into()).into());
         }
         match self.engine.set_typing(&target, typing).await {
@@ -1171,7 +1189,7 @@ impl Hub {
     /// one of our own handles, `other_handles` included (rows stored before
     /// an address was added there still say `is_from_me = false`).
     pub async fn mark_read(self: &Arc<Self>, chat_id: &str, up_to: &str) -> OpResult<()> {
-        let chat = ChatId(chat_id.to_string());
+        let chat = self.link_chat(&ChatId(chat_id.to_string()));
         let up_to = (!up_to.trim().is_empty()).then(|| MessageId::new(up_to.trim()));
         let (c, u) = (chat.clone(), up_to.clone());
         let reg = self.engine.registration_state().await;
@@ -1194,7 +1212,8 @@ impl Hub {
             .await?;
         self.publish(vec![StoreUpdate::ChatUpdated(updated)]).await;
         if let Some(id) = receipt_for {
-            let target = ChatTarget::Chat(chat);
+            let about = self.stored_message(&id).await.ok().flatten();
+            let target = self.route(ChatTarget::Chat(chat), about.as_ref(), false).await;
             let r = match self.engine.mark_read(&target, &id).await {
                 Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.mark_read(&target, &id).await,
                 r => r,
@@ -1276,6 +1295,7 @@ impl Hub {
 }
 
 mod import;
+mod links;
 mod profiles;
 pub use import::{MAX_IMPORT_MESSAGES, MAX_IMPORT_REACTIONS};
 pub use profiles::{CHAT_ICONS_DIR, PROFILE_FETCH_CONCURRENCY, PROFILE_MAX_AGE, PROFILES_DIR, image_ext};
