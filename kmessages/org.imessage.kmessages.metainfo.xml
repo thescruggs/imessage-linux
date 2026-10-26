@@ -30,6 +30,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.15" date="2026-10-25">
+      <description>
+        <p>A contact who writes from both an email address and a phone number now has one conversation, as on the iPhone, and replies go to the address they last wrote from.</p>
+      </description>
+    </release>
     <release version="0.1.14" date="2026-10-21">
       <description>
         <p>Messages in the open conversation stay unread and notify you while you are away from the keyboard, and the task manager icon shows the unread count.</p>

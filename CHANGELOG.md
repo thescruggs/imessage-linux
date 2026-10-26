@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.15 (2026-10-25)
 
 * **One conversation per person.** When a contact card (the vCards `imsg
   sync-mac` copies from the Mac) has both an email address and a phone

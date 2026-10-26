@@ -3898,7 +3898,7 @@ checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "imessage-common"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "clipboard-win",
  "libc",
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "imessaged"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3958,7 +3958,7 @@ checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
 name = "imsg"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3987,7 +3987,7 @@ dependencies = [
 
 [[package]]
 name = "imsg-app"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4011,7 +4011,7 @@ dependencies = [
 
 [[package]]
 name = "imsg-bridge"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -4038,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "imsg-client"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "imessage-common",
  "serde",
@@ -4049,7 +4049,7 @@ dependencies = [
 
 [[package]]
 name = "imsg-remote"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "axum",
  "bytes",
@@ -4070,7 +4070,7 @@ dependencies = [
 
 [[package]]
 name = "imsg-tui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
