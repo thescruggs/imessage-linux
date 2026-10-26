@@ -256,7 +256,9 @@ async fn handle_event(hub: &Arc<Hub>, ev: EngineEvent) {
                 // The engine now knows our handles: re-teach it stored groups,
                 // and our own addresses can no longer be mistaken for a contact's.
                 hub.seed_engine_chats().await;
-                hub.refresh_contact_links().await;
+                // Off the pump: reading the cards must not hold up messages.
+                let h = hub.clone();
+                tokio::spawn(async move { h.refresh_contact_links().await });
             }
             return hub.emit(DaemonSignal::RegisteredChanged(r.is_registered())).await;
         }
