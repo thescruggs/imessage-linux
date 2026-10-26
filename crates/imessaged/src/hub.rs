@@ -1210,10 +1210,17 @@ impl Hub {
                 Ok((updated, receipt_for))
             })
             .await?;
+        // Where the receipt goes is settled before the update is announced,
+        // so the receipt follows it without further store round trips.
+        let receipt_for = match receipt_for {
+            Some(id) => {
+                let about = self.stored_message(&id).await.ok().flatten();
+                Some((self.route(ChatTarget::Chat(chat), about.as_ref(), false).await, id))
+            }
+            None => None,
+        };
         self.publish(vec![StoreUpdate::ChatUpdated(updated)]).await;
-        if let Some(id) = receipt_for {
-            let about = self.stored_message(&id).await.ok().flatten();
-            let target = self.route(ChatTarget::Chat(chat), about.as_ref(), false).await;
+        if let Some((target, id)) = receipt_for {
             let r = match self.engine.mark_read(&target, &id).await {
                 Err(EngineError::ChatNotFound(_)) if self.reseed(&target).await => self.engine.mark_read(&target, &id).await,
                 r => r,
