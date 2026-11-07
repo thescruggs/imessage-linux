@@ -30,6 +30,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-11-07">
+      <description>
+        <p>Contact names and photos now come straight from your iCloud contacts, signed in with an app-specific password in Settings, and stay current without a Mac. Numbers and emails with custom labels resolve too, and the app-specific password can be changed any time.</p>
+      </description>
+    </release>
     <release version="0.1.15" date="2026-10-25">
       <description>
         <p>A contact who writes from both an email address and a phone number now has one conversation, as on the iPhone, and replies go to the address they last wrote from.</p>

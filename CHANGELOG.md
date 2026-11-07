@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 * **iCloud contacts, without the Mac.** The daemon now syncs your
   contacts from iCloud itself, over CardDAV with an app-specific password
