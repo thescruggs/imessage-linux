@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use crate::client::{self, CliError, Client, LoginOutcome, exit};
 use crate::format::{self, Style};
 use crate::resolve;
-use crate::{Command, Ctx, SmsCommand, StoreCommand};
+use crate::{Command, ContactsCommand, Ctx, SmsCommand, StoreCommand};
 
 /// Wrong two-factor codes tolerated before giving up.
 const MAX_BAD_CODES: u32 = 3;
@@ -89,6 +89,7 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> anyhow::Result<u8> {
             Ok(exit::OK)
         }
         Command::Sms { command } => sms(&client, ctx, command).await,
+        Command::Contacts { command } => contacts(&client, ctx, command).await,
         Command::SendFile { to, file, mime, sms, imessage } => {
             let path = std::fs::canonicalize(&file).map_err(|e| CliError::usage(format!("{}: {e}", file.display())))?;
             if !path.is_file() {
@@ -313,6 +314,57 @@ async fn sms(client: &Client, ctx: &Ctx, command: SmsCommand) -> anyhow::Result<
         );
     }
     Ok(exit::OK)
+}
+
+/// `imsg contacts …`. A login whose first sync failed (the account is
+/// saved; the status says why) exits 1 after printing the status.
+async fn contacts(client: &Client, ctx: &Ctx, command: ContactsCommand) -> anyhow::Result<u8> {
+    let login = matches!(command, ContactsCommand::Login { .. });
+    let s = match command {
+        ContactsCommand::Login { apple_id, password_stdin } => {
+            let apple_id = match apple_id {
+                Some(a) => a,
+                None => tty_line("Apple ID: ")?,
+            };
+            if apple_id.trim().is_empty() {
+                return Err(CliError::usage("empty Apple ID").into());
+            }
+            if !password_stdin && !ctx.quiet {
+                eprintln!(
+                    "{}",
+                    ctx.err_style.dim(
+                        "Contacts need an app-specific password, not your Apple ID password: create one at \
+                         appleid.apple.com > Sign-In and Security > App-Specific Passwords."
+                    )
+                );
+            }
+            let password: Zeroizing<String> = Zeroizing::new(if password_stdin {
+                if std::io::stdin().is_terminal() {
+                    return Err(CliError::usage("--password-stdin: stdin is a terminal; pipe the password or drop the flag").into());
+                }
+                Input::new(true).stdin_line()?.ok_or_else(|| CliError::usage("no password on stdin"))?
+            } else {
+                rpassword::prompt_password(format!("App-specific password for {}: ", apple_id.trim()))
+                    .map_err(|e| CliError::usage(format!("cannot read the password from the terminal ({e}); use --password-stdin")))?
+            });
+            if password.trim().is_empty() {
+                return Err(CliError::usage("empty password").into());
+            }
+            if !ctx.quiet && !ctx.json {
+                eprintln!("checking with iCloud and syncing (the first sync can take a few minutes) ...");
+            }
+            client.set_contacts_account(apple_id.trim(), &password).await?
+        }
+        ContactsCommand::Logout { remove_cards } => client.clear_contacts_account(remove_cards).await?,
+        ContactsCommand::Sync => client.sync_contacts().await?,
+        ContactsCommand::Status => client.contacts_sync().await?,
+    };
+    if ctx.json {
+        println!("{}", s.raw);
+    } else {
+        print!("{}", format::contacts_sync_table(&s.value, ctx.style));
+    }
+    Ok(if login && s.value.last_error.is_some() { exit::ERROR } else { exit::OK })
 }
 
 async fn register(client: &Client, ctx: &Ctx) -> anyhow::Result<u8> {

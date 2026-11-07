@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""Export contacts, pinned conversations and transcript backgrounds from a Mac as one tar stream.
+"""Export pinned conversations and transcript backgrounds from a Mac as one tar stream.
 
 Runs ON THE MAC (macOS' own /usr/bin/python3, 3.9+, standard library only)
 and is normally fed over ssh by `imsg sync-mac`:
 
-    ssh <mac> python3 - --contacts --pins < tools/mac-sync-export.py > sync.tar
+    ssh <mac> python3 - --pins < tools/mac-sync-export.py > sync.tar
 
 Needs Full Disk Access for the ssh session (System Settings > Privacy &
-Security) to read the Contacts database and chat.db. Everything is opened
-read-only; nothing on the Mac changes.
+Security) to read chat.db. Everything is opened read-only; nothing on the
+Mac changes. (Contacts are not exported here: the daemon syncs them from
+iCloud itself, see `imsg contacts login`.)
 
-Sections (each only when asked for; one failing does not stop the others):
+Sections (each only when asked for; one failing does not stop the others;
+with none asked for, --pins):
 
-  --contacts     the Contacts database (~/Library/Application Support/
-                 AddressBook) as one vCard 3.0 per person, photo embedded
-                 (JPEG, at most 256 px, shrunk with sips), named
-                 contacts/mac-<uid>.vcf. Same output as the former
-                 tools/mac-contacts-export.sh.
   --pins         the pinning preferences as XML (`defaults export
                  com.apple.messages.pinning`, else ~/Library/Preferences/
                  com.apple.messages.pinning.plist via `plutil -convert
@@ -30,51 +27,40 @@ Sections (each only when asked for; one failing does not stop the others):
 
 Output (tar on stdout, nothing else; diagnostics go to stderr):
 
-    sync.json                    {"format": 1, "exported_at": ..., "contacts": {...},
+    sync.json                    {"format": 1, "exported_at": ...,
                                   "pins": {...}, "pin_chats": [...], "backgrounds": {...}}
                                  a section is null when not asked for, else
                                  its counters or {"error": "..."}
-    contacts/mac-<uid>.vcf       one per person
     pins.plist                   the pinning preferences, XML
     backgrounds.jsonl            see mac-backgrounds-export.py
     backgrounds/<id>[-watchBackground]
-
-The output is your address book: keep it private.
 """
 
 import argparse
-import base64
-import glob
 import io
 import json
 import os
 import plistlib
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import types
 import urllib.parse
 
-AB = os.path.expanduser("~/Library/Application Support/AddressBook")
 PINNING = os.path.expanduser("~/Library/Preferences/com.apple.messages.pinning.plist")
 PINNING_DOMAIN = "com.apple.messages.pinning"
 CHAT_DB = os.path.expanduser("~/Library/Messages/chat.db")
-PHOTO_MAX = 256
 
 
 def parse_args(argv=None):
     # (no __doc__ when imsg put _BACKGROUNDS_SRC in front of it)
-    p = argparse.ArgumentParser(description="Export contacts, pins and backgrounds from a Mac as one tar stream.")
-    p.add_argument("--contacts", action="store_true", help="export the Contacts database as vCards")
+    p = argparse.ArgumentParser(description="Export pins and backgrounds from a Mac as one tar stream.")
     p.add_argument("--pins", action="store_true", help="export the pinned conversations")
     p.add_argument("--backgrounds", action="store_true", help="export the chats' transcript backgrounds")
     p.add_argument("--max-file-mb", type=float, default=32.0, help="backgrounds: skip cached files larger than this (default 32)")
-    p.add_argument("--addressbook", default=AB, help=argparse.SUPPRESS)
     p.add_argument("--pinning", default=PINNING, help=argparse.SUPPRESS)
     p.add_argument("--db", default=CHAT_DB, help=argparse.SUPPRESS)
     p.add_argument("--cache", default=None, help=argparse.SUPPRESS)
@@ -87,158 +73,6 @@ def add_bytes(tar, name, data):
     info.mtime = int(time.time())
     info.mode = 0o600
     tar.addfile(info, io.BytesIO(data))
-
-
-# ---------------------------------------------------------------------------
-# contacts (ported unchanged from tools/mac-contacts-export.sh)
-# ---------------------------------------------------------------------------
-
-def esc(s):
-    return (s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
-             .replace("\r\n", "\\n").replace("\n", "\\n"))
-
-
-def fold(line):
-    # RFC 2425: lines of at most 75 octets, continued with a leading space.
-    raw = line.encode("utf-8")
-    if len(raw) <= 75:
-        return line + "\r\n"
-    out, cur = [], b""
-    for ch in line:
-        b = ch.encode("utf-8")
-        if len(cur) + len(b) > (75 if not out else 74):
-            out.append(cur)
-            cur = b""
-        cur += b
-    out.append(cur)
-    return "\r\n ".join(x.decode("utf-8") for x in out) + "\r\n"
-
-
-def label_type(label):
-    l = (label or "").lower()
-    for key, t in (("iphone", "CELL"), ("mobile", "CELL"), ("cell", "CELL"), ("home", "HOME"),
-                   ("work", "WORK"), ("main", "MAIN"), ("fax", "FAX"), ("pager", "PAGER")):
-        if key in l:
-            return t
-    return "OTHER" if l else ""
-
-
-def blob(data, support):
-    # Core Data "allows external storage": 0x01 + bytes inline, 0x02 + UUID of a file.
-    if not data:
-        return None
-    data = bytes(data)
-    if data[0] == 1:
-        return data[1:]
-    if data[0] == 2:
-        name = data[1:].split(b"\0")[0].decode("ascii", "replace")
-        path = os.path.join(support, "_EXTERNAL_DATA", name)
-        if os.path.isfile(path):
-            with open(path, "rb") as f:
-                return f.read()
-        return None
-    return data
-
-
-def shrink(img, tmp):
-    src, dst = os.path.join(tmp, "in"), os.path.join(tmp, "out.jpg")
-    with open(src, "wb") as f:
-        f.write(img)
-    try:
-        subprocess.run(["sips", "-Z", str(PHOTO_MAX), "-s", "format", "jpeg", "-s", "formatOptions", "85",
-                        src, "--out", dst], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with open(dst, "rb") as f:
-            return f.read()
-    except Exception:
-        return img if img[:2] == b"\xff\xd8" else None
-
-
-def connect(path, tmp):
-    try:
-        db = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
-        db.execute("select count(*) from ZABCDRECORD").fetchone()
-        return db
-    except sqlite3.Error:
-        # Fall back to a private copy (database + WAL) if read-only open fails.
-        copy = os.path.join(tmp, "copy-%d.abcddb" % len(os.listdir(tmp)))
-        for ext in ("", "-wal", "-shm"):
-            if os.path.exists(path + ext):
-                shutil.copyfile(path + ext, copy + ext)
-        return sqlite3.connect(copy)
-
-
-def vcards(ab=AB):
-    """Yield (file name, vCard bytes, has photo) for every person in the
-    Contacts database under `ab` (all sources, each person once)."""
-    stores = sorted(glob.glob(os.path.join(ab, "Sources", "*", "AddressBook-v22.abcddb")))
-    stores.append(os.path.join(ab, "AddressBook-v22.abcddb"))
-    seen = set()
-    with tempfile.TemporaryDirectory() as tmp:
-        for store in stores:
-            if not os.path.isfile(store):
-                continue
-            support = os.path.join(os.path.dirname(store), ".AddressBook-v22_SUPPORT")
-            db = connect(store, tmp)
-            ent = db.execute("select Z_ENT from Z_PRIMARYKEY where Z_NAME = 'ABCDContact'").fetchone()
-            if not ent:
-                continue
-            emails, phones = {}, {}
-            for owner, addr, label in db.execute(
-                    "select ZOWNER, ZADDRESS, ZLABEL from ZABCDEMAILADDRESS where ZADDRESS is not null "
-                    "order by ZOWNER, ZISPRIMARY desc, ZORDERINGINDEX"):
-                emails.setdefault(owner, []).append((addr.strip(), label))
-            for owner, num, label in db.execute(
-                    "select ZOWNER, ZFULLNUMBER, ZLABEL from ZABCDPHONENUMBER where ZFULLNUMBER is not null "
-                    "order by ZOWNER, ZISPRIMARY desc, ZORDERINGINDEX"):
-                phones.setdefault(owner, []).append((num.strip(), label))
-            rows = db.execute(
-                "select Z_PK, ZUNIQUEID, ZFIRSTNAME, ZMIDDLENAME, ZLASTNAME, ZTITLE, ZSUFFIX, ZORGANIZATION, "
-                "ZNICKNAME, ZDISPLAYFLAGS, ZTHUMBNAILIMAGEDATA, ZIMAGEDATA from ZABCDRECORD where Z_ENT = ?", ent)
-            for (pk, uid, first, middle, last, title, suffix, org, nick, flags, thumb, image) in rows:
-                uid = uid or "pk%d" % pk
-                if uid in seen:
-                    continue
-                seen.add(uid)
-                em, ph = emails.get(pk, []), phones.get(pk, [])
-                person = " ".join(x.strip() for x in (title, first, middle, last, suffix) if x and x.strip())
-                show_company = bool((flags or 0) & 1) and org
-                fn = (org if show_company else person) or org or nick or (em[0][0] if em else "") or (ph[0][0] if ph else "")
-                if not fn:
-                    continue
-                lines = ["BEGIN:VCARD", "VERSION:3.0", "PRODID:-//imessage-linux//mac-contacts-export//EN",
-                         "UID:" + esc(uid), "FN:" + esc(fn.strip()),
-                         "N:" + ";".join(esc((x or "").strip()) for x in (last, first, middle, title, suffix))]
-                if nick:
-                    lines.append("NICKNAME:" + esc(nick.strip()))
-                if org:
-                    lines.append("ORG:" + esc(org.strip()))
-                if show_company:
-                    lines.append("X-ABShowAs:COMPANY")
-                for addr, label in em:
-                    t = label_type(label)
-                    lines.append("EMAIL;TYPE=INTERNET%s:%s" % ("," + t if t in ("HOME", "WORK") else "", esc(addr)))
-                for num, label in ph:
-                    t = label_type(label)
-                    lines.append("TEL%s:%s" % (";TYPE=" + t if t else "", esc(num)))
-                img = blob(thumb, support) or blob(image, support)
-                if img:
-                    img = shrink(img, tmp)
-                if img:
-                    lines.append("PHOTO;ENCODING=b;TYPE=JPEG:" + base64.b64encode(img).decode("ascii"))
-                lines.append("END:VCARD")
-                data = "".join(fold(l) for l in lines).encode("utf-8")
-                yield "mac-%s.vcf" % re.sub(r"[^A-Za-z0-9-]", "_", uid), data, bool(img)
-
-
-def export_contacts(tar, ab):
-    if not os.path.isdir(ab):
-        raise OSError("no Contacts database at %s" % ab)
-    written, photos = 0, 0
-    for name, data, photo in vcards(ab):
-        add_bytes(tar, "contacts/" + name, data)
-        written += 1
-        photos += photo
-    return {"count": written, "photos": photos}
 
 
 # ---------------------------------------------------------------------------
@@ -368,12 +202,8 @@ def section(meta, key, fn):
 
 
 def export(args, out_stream):
-    meta = {"format": 1, "exported_at": int(time.time()), "contacts": None, "pins": None, "pin_chats": [], "backgrounds": None}
+    meta = {"format": 1, "exported_at": int(time.time()), "pins": None, "pin_chats": [], "backgrounds": None}
     tar = tarfile.open(fileobj=out_stream, mode="w|", format=tarfile.PAX_FORMAT)
-    if args.contacts:
-        r = section(meta, "contacts", lambda: export_contacts(tar, args.addressbook))
-        if r is not None:
-            meta["contacts"] = r
     if args.pins:
         r = section(meta, "pins", lambda: export_pins(tar, args.pinning, args.db))
         if r is not None:
@@ -390,15 +220,13 @@ def export(args, out_stream):
 
 def main():
     args = parse_args()
-    if not (args.contacts or args.pins or args.backgrounds):
-        args.contacts = args.pins = True
+    if not (args.pins or args.backgrounds):
+        args.pins = True
     try:
         meta = export(args, sys.stdout.buffer)
     except BrokenPipeError:
         return 1
     done = []
-    if meta["contacts"] and "count" in meta["contacts"]:
-        done.append("%d contacts (%d with photos)" % (meta["contacts"]["count"], meta["contacts"]["photos"]))
     if meta["pins"] and "count" in meta["pins"]:
         done.append("%d pins" % meta["pins"]["count"])
     if meta["backgrounds"] and "files" in meta["backgrounds"]:

@@ -1,6 +1,6 @@
 //! The address book: vCards from the folder kmessages (KPeople) reads,
-//! `~/.local/share/kpeoplevcard` (`imsg sync-mac` and KDE Connect write
-//! there), or the directories in `IMSG_CONTACTS_DIR` (`:`-separated; `;` on Windows).
+//! `~/.local/share/kpeoplevcard` (imessaged's iCloud contacts sync and KDE
+//! Connect write there), or the directories in `IMSG_CONTACTS_DIR` (`:`-separated; `;` on Windows).
 //! Parsed once at start-up; `Ctrl+R` re-reads them.
 
 use std::collections::HashMap;

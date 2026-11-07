@@ -34,6 +34,8 @@ mode 0700.
 | `backgrounds/<chat id>/<background id>[.heic\|.png\|.jpg]` | daemon | no (0600, dirs 0700) | chat transcript backgrounds: the payload as Apple sent it (or as imported) and the picture extracted from it (`src/background.rs`). The MMCS locator (with the file key) is sealed in `messages.db` like attachment locators. |
 | `profiles/<handle>/<record key>.<ext>` | daemon | no (0600, dirs 0700) | photos contacts shared with us ("Share Name and Photo"; `/`, `+`, `=` of the base64 record key become `_`, `-`, `~`; extension sniffed: `jpg`, `png`, `heic`, `gif`, `webp`, else `img`). See [Shared names and photos](#shared-names-and-photos-cloudkit). |
 | `chat_icons/<chat id>/<id>.<ext>` | daemon | no (0600, dirs 0700) | group photos (`id` = the message that changed it; extension sniffed). |
+| `contacts-account.enc` | daemon (`SetContactsAccount`) | **yes** (state key, `IMSE`) | the Apple ID and app-specific password of the [iCloud contacts sync](#icloud-contacts); removed by `ClearContactsAccount` |
+| `contacts-index.json` | daemon | no | what the iCloud contacts sync wrote: each card's CardDAV ETag and file name, the last sync time |
 
 ### `SavedState` (inside `state.enc`)
 
@@ -260,10 +262,11 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `sender_handle` | `--sender-handle` / `IMESSAGED_SENDER_HANDLE` | unset = the first registered email handle |
 | `other_handles` | `--other-handle` (repeatable) / `IMESSAGED_OTHER_HANDLES` (comma-separated) | `[]` |
 | `sms_relay_number` | `--sms-relay-number` / `IMESSAGED_SMS_RELAY_NUMBER` | unset = the first phone number in `other_handles`; the iPhone number text messages are relayed through (must be a phone number) |
-| `mac_host` | `--mac-host` / `IMESSAGED_MAC_HOST` | unset; the ssh destination of your Mac (`mac.local`, `me@mac.local`, a `Host` alias) for `imsg sync-mac` and kmessages' "Sync from Mac". Only reported (`GetStatus.mac_host`); the daemon never connects to it. A value starting with `-` or containing spaces or shell characters fails startup. `imsg doctor` suggests the host your ssh `anisette_command` reaches |
+| `mac_host` | `--mac-host` / `IMESSAGED_MAC_HOST` | unset; the ssh destination of your Mac (`mac.local`, `me@mac.local`, a `Host` alias) for `imsg sync-mac` (pins, backgrounds) and kmessages' "Sync from Mac". Only reported (`GetStatus.mac_host`); the daemon never connects to it. A value starting with `-` or containing spaces or shell characters fails startup. `imsg doctor` suggests the host your ssh `anisette_command` reaches |
 | `link_previews` | `--link-previews BOOL` / `--no-link-previews` / `IMESSAGED_LINK_PREVIEWS` | `true`; fetch a preview of the first link in an iMessage you send and send it with the text (see [Link previews](#link-previews)). The daemon then contacts the linked site when you send; never when you receive |
 | `link_contacts` | `--link-contacts BOOL` / `IMESSAGED_LINK_CONTACTS` | `true`; one conversation per person: the addresses on one contact card share a chat (see [Contact links](#contact-links)) |
-| `contacts_dir` | `--contacts-dir` / `IMESSAGED_CONTACTS_DIR` | `$XDG_DATA_HOME/kpeoplevcard` (what `imsg sync-mac` writes); a leading `~/` is the home directory |
+| `contacts_dir` | `--contacts-dir` / `IMESSAGED_CONTACTS_DIR` | `$XDG_DATA_HOME/kpeoplevcard`; the vCard folder `link_contacts` reads and the [iCloud contacts sync](#icloud-contacts) writes; a leading `~/` is the home directory |
+| `contacts_sync_minutes` | `--contacts-sync-minutes` / `IMESSAGED_CONTACTS_SYNC_MINUTES` | `60`; once an iCloud contacts account is set (`imsg contacts login`), sync it this often; `0` = only on request (`imsg contacts sync`, `SyncContacts`) |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
 | — | `--transport` / `IMESSAGED_TRANSPORT` | `session` on Linux, `p2p` on Windows: how clients reach the API ([DBUS.md](DBUS.md#peer-to-peer-transport-windows)) |
@@ -310,7 +313,7 @@ daemon does the same (`src/contacts.rs`, `src/hub/links.rs`):
 * It reads the `EMAIL` / `TEL` lines of the `.vcf` files in
   `contacts_dir` (phone numbers without a country code are taken as +1,
   as kmessages does). Cards with the same name that share an address are
-  joined (the Mac exports one card per account: iCloud, Google, …); a
+  joined (an address book can hold one card per account: iCloud, Google, …); a
   person with two or more usable addresses is linked. An address on the
   cards of different people (a shared landline) and our
   own addresses (registered, `other_handles`, the SMS number) are never
@@ -341,6 +344,37 @@ daemon does the same (`src/contacts.rs`, `src/hub/links.rs`):
   considers their phone numbers. iMessage vs SMS is then chosen for that
   address as usual. The stored row and the returned `chat_id` use the
   person's chat.
+
+### iCloud contacts
+
+The address book (contact names and photos for kmessages, `imsg-tui` and
+the bridge; the cards [Contact links](#contact-links) read) comes from
+iCloud over CardDAV (`src/carddav.rs`, `src/hub/contacts_sync.rs`); no
+Mac is needed. It is off until an account is set:
+`imsg contacts login` (or kmessages Settings > iCloud Contacts), i.e.
+`SetContactsAccount` with an Apple ID and an **app-specific password**
+(appleid.apple.com > Sign-In and Security > App-Specific Passwords;
+iCloud refuses the normal password for CardDAV). The password is checked
+with `contacts.icloud.com` before it is saved, sealed with the state key
+(`contacts-account.enc`).
+
+* Each contact is one `icloud-<20 hex>.vcf` (0600) in `contacts_dir`;
+  photos stored as a link are fetched and embedded; contact groups are
+  skipped. Other vCards in the folder are not touched, except the
+  `mac-*.vcf` cards an older `imsg sync-mac` copied from the Mac, which
+  the first successful sync removes (`removed_mac` in the report).
+* Later syncs fetch only cards whose ETag changed
+  (`contacts-index.json`); cards deleted in iCloud are removed.
+* Syncs run every `contacts_sync_minutes` (default 60; the first 30 s
+  after startup, or when the interval since the last sync is up), after
+  a failure again within 15 minutes, and on `SyncContacts`; one at a
+  time. When iCloud refuses the password (revoked) automatic syncs stop
+  (`auth_failed`) until it is set again. A sync that changed cards
+  refreshes the contact links right away.
+* Only contacts stored in iCloud are synced: Google, Exchange or other
+  accounts on the user's devices are not included.
+* Status: `GetContactsSync` / `GetStatus.contacts_sync` / signal
+  `ContactsSyncChanged` ([DBUS.md](DBUS.md#contactssyncstatus)).
 
 `store_credentials = false` drops `PersistAccountData` (username, SRP
 hash, GSA tokens) from `SavedState` — never written, and removed from an

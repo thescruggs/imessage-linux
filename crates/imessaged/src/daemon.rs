@@ -26,6 +26,8 @@ pub struct Daemon {
     bus: Option<BusChoice>,
     peer_lock: Option<Arc<crate::dbus::peer::DirLock>>,
     typing_timeout: Duration,
+    /// Where the iCloud contacts sync starts discovery (`None`: iCloud).
+    contacts_base: Option<String>,
 }
 
 impl Daemon {
@@ -59,12 +61,12 @@ impl Daemon {
             ),
             other => anyhow::anyhow!("cannot load {}: {other}", cfg.state_path().display()),
         })?;
-        Ok(Daemon { cfg, engine: Arc::new(engine), store: Some(StoreHandle::new(store)), bus: None, peer_lock: None, typing_timeout: DEFAULT_TYPING_TIMEOUT })
+        Ok(Daemon { cfg, engine: Arc::new(engine), store: Some(StoreHandle::new(store)), bus: None, peer_lock: None, typing_timeout: DEFAULT_TYPING_TIMEOUT, contacts_base: None })
     }
 
     /// Any engine, no store, no D-Bus (events are only logged).
     pub fn with_engine(cfg: DaemonConfig, engine: Arc<dyn Engine>) -> Daemon {
-        Daemon { cfg, engine, store: None, bus: None, peer_lock: None, typing_timeout: DEFAULT_TYPING_TIMEOUT }
+        Daemon { cfg, engine, store: None, bus: None, peer_lock: None, typing_timeout: DEFAULT_TYPING_TIMEOUT, contacts_base: None }
     }
 
     pub fn with_store(mut self, store: StoreHandle) -> Daemon {
@@ -87,6 +89,12 @@ impl Daemon {
 
     pub fn with_typing_timeout(mut self, d: Duration) -> Daemon {
         self.typing_timeout = d;
+        self
+    }
+
+    /// Tests: a CardDAV server for the iCloud contacts sync instead of iCloud.
+    pub fn with_contacts_base(mut self, url: impl Into<String>) -> Daemon {
+        self.contacts_base = Some(url.into());
         self
     }
 
@@ -116,6 +124,9 @@ impl Daemon {
         hub.set_contacts_dir(self.cfg.link_contacts.then(|| self.cfg.contacts_dir.clone()));
         hub.refresh_contact_links().await;
         hub.spawn_contact_links();
+        hub.configure_contacts_sync(self.cfg.contacts_dir.clone(), self.cfg.contacts_sync_minutes, self.contacts_base.clone());
+        hub.load_contacts_sync().await;
+        hub.spawn_contacts_sync();
         let conn = match &self.bus {
             Some(bus) => match crate::dbus::serve(hub.clone(), bus, self.peer_lock.clone()).await {
                 Ok(c) => Some(c),

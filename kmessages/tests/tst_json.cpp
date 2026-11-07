@@ -170,6 +170,43 @@ private Q_SLOTS:
         QVERIFY(s && s->macHost.isEmpty());
     }
 
+    void contactsSync()
+    {
+        // Older daemon: no `contacts_sync`.
+        QVERIFY(!Json::parseStatus(fixture("status.json"))->contactsSync.known);
+        auto s = Json::parseStatus(uR"({"version":"1","connection":{"state":"connected"},"registered":true,"registration":{"handles":[]},"unread":0,
+            "contacts_sync":{"account":null,"syncing":false,"interval_minutes":60,"last_sync":null,"last":null,"last_error":null,"auth_failed":false}})"_s);
+        QVERIFY(s && s->contactsSync.known);
+        QVERIFY(s->contactsSync.account.isEmpty());
+        QCOMPARE(s->contactsSync.intervalMinutes, 60);
+        QVERIFY(!s->contactsSync.hasLast);
+        QCOMPARE(s->contactsSync.lastSync, 0);
+
+        auto c = Json::parseContactsSync(uR"({"account":"me@icloud.com","syncing":true,"interval_minutes":0,"last_sync":1700000000000,
+            "last":{"dir":"/x","cards":312,"photos":200,"written":3,"unchanged":308,"removed":1,"removed_mac":40},
+            "last_error":"HTTP 503","auth_failed":true})"_s);
+        QVERIFY(c && c->known);
+        QCOMPARE(c->account, u"me@icloud.com"_s);
+        QVERIFY(c->syncing);
+        QCOMPARE(c->intervalMinutes, 0);
+        QCOMPARE(c->lastSync, 1700000000000LL);
+        QVERIFY(c->hasLast);
+        QCOMPARE(c->cards, 312);
+        QCOMPARE(c->photos, 200);
+        QCOMPARE(c->written, 3);
+        QCOMPARE(c->unchanged, 308);
+        QCOMPARE(c->removed, 1);
+        QCOMPARE(c->removedMac, 40);
+        QCOMPARE(c->lastError, u"HTTP 503"_s);
+        QVERIFY(c->authFailed);
+        // serde defaults: everything optional.
+        c = Json::parseContactsSync(u"{}"_s);
+        QVERIFY(c && c->known && c->account.isEmpty() && !c->syncing && !c->authFailed);
+        QString err;
+        QVERIFY(!Json::parseContactsSync(u"[1]"_s, &err));
+        QVERIFY(!err.isEmpty());
+    }
+
     void chatBackground()
     {
         const QString base = uR"({"id":"mailto:bob@example.com","participants":[],"is_group":false,"unread_count":0,"background":%1})"_s;

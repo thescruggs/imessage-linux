@@ -40,7 +40,7 @@ pkgbase = imessage-linux
 	depends = systemd
 	depends = zlib
 	optdepends = kimageformats: HEIC chat backgrounds and photos in kmessages
-	optdepends = openssh: anisette from your Mac, contacts and history import
+	optdepends = openssh: anisette from your Mac, pins and history import
 	options = !lto
 	source = imessage-linux::git+https://github.com/thescruggs/imessage-linux.git#tag=v0.1.15
 	source = rustpush::git+https://github.com/OpenBubbles/rustpush.git

@@ -291,14 +291,11 @@ pub enum Command {
         #[arg(long, requires = "backgrounds")]
         create: bool,
     },
-    /// Copy contacts (with photos) and pinned conversations from your Mac
-    /// (over ssh), optionally also the chats' backgrounds.
+    /// Copy pinned conversations from your Mac (over ssh), optionally also
+    /// the chats' backgrounds. (Contacts come from iCloud: `imsg contacts`.)
     SyncMac {
         /// ssh destination of the Mac (default: the daemon's mac_host).
         host: Option<String>,
-        /// Contacts, as vCards for KDE's address book (KPeople).
-        #[arg(long)]
-        contacts: bool,
         /// Pinned conversations (pins only here are kept).
         #[arg(long)]
         pins: bool,
@@ -308,12 +305,15 @@ pub enum Command {
         /// Fetch and compare; change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Write the vCards here instead of ~/.local/share/kpeoplevcard.
-        #[arg(long, value_name = "DIR")]
-        contacts_dir: Option<PathBuf>,
         /// Abort if the export is larger than this many MB.
         #[arg(long, default_value_t = 2048, value_name = "MB")]
         max_total_mb: u64,
+    },
+    /// Your iCloud contacts (CardDAV, with an app-specific password): the
+    /// daemon keeps them in ~/.local/share/kpeoplevcard for kmessages.
+    Contacts {
+        #[command(subcommand)]
+        command: ContactsCommand,
     },
     /// Text Message Forwarding: SMS / MMS / RCS relayed by your iPhone.
     Sms {
@@ -332,6 +332,31 @@ pub enum Command {
     },
     /// Print the imsg and imessaged versions.
     Version,
+}
+
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum ContactsCommand {
+    /// Sync the contacts of this Apple ID: asks for an app-specific
+    /// password (appleid.apple.com > Sign-In and Security > App-Specific
+    /// Passwords), checks it with iCloud, saves it (encrypted) and syncs.
+    Login {
+        /// The Apple ID (prompted for when missing).
+        #[arg(long)]
+        apple_id: Option<String>,
+        /// Read the app-specific password from the first line of stdin.
+        #[arg(long, requires = "apple_id")]
+        password_stdin: bool,
+    },
+    /// Stop syncing and forget the app-specific password.
+    Logout {
+        /// Also delete the synced contact cards.
+        #[arg(long)]
+        remove_cards: bool,
+    },
+    /// Sync now.
+    Sync,
+    /// Show the account and the last sync.
+    Status,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -449,8 +474,8 @@ fn main() -> ExitCode {
                         Command::ImportMac { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run, .. } => {
                             import::run(import::ImportArgs { host, days, since, max_attachment_mb, max_total_mb, imessage_only, dry_run }, &ctx).await
                         }
-                        Command::SyncMac { host, contacts, pins, backgrounds, dry_run, contacts_dir, max_total_mb } => {
-                            sync::run(sync::SyncArgs { host, contacts, pins, backgrounds, dry_run, contacts_dir, max_total_mb }, &state_dir, &ctx).await
+                        Command::SyncMac { host, pins, backgrounds, dry_run, max_total_mb } => {
+                            sync::run(sync::SyncArgs { host, pins, backgrounds, dry_run, max_total_mb }, &state_dir, &ctx).await
                         }
                         other => commands::run(other, &ctx).await,
                     }
@@ -584,11 +609,18 @@ mod tests {
         let c = parse(&["sync-mac"]).unwrap();
         assert_eq!(
             c.command,
-            Command::SyncMac { host: None, contacts: false, pins: false, backgrounds: false, dry_run: false, contacts_dir: None, max_total_mb: 2048 }
+            Command::SyncMac { host: None, pins: false, backgrounds: false, dry_run: false, max_total_mb: 2048 }
         );
         let c = parse(&["sync-mac", "mac.local", "--pins", "--backgrounds", "--dry-run", "--json"]).unwrap();
         assert!(c.json);
-        assert!(matches!(c.command, Command::SyncMac { host: Some(h), pins: true, backgrounds: true, dry_run: true, contacts: false, .. } if h == "mac.local"));
+        assert!(matches!(c.command, Command::SyncMac { host: Some(h), pins: true, backgrounds: true, dry_run: true, .. } if h == "mac.local"));
+        assert!(parse(&["sync-mac", "--contacts"]).is_err(), "contacts come from iCloud now");
+        let c = parse(&["contacts", "login", "--apple-id", "me@icloud.com", "--password-stdin"]).unwrap();
+        assert_eq!(c.command, Command::Contacts { command: ContactsCommand::Login { apple_id: Some("me@icloud.com".into()), password_stdin: true } });
+        assert!(parse(&["contacts", "login", "--password-stdin"]).is_err(), "--password-stdin needs --apple-id");
+        let c = parse(&["contacts", "logout", "--remove-cards"]).unwrap();
+        assert_eq!(c.command, Command::Contacts { command: ContactsCommand::Logout { remove_cards: true } });
+        assert_eq!(parse(&["contacts", "sync"]).unwrap().command, Command::Contacts { command: ContactsCommand::Sync });
         let c = parse(&["store", "purge-invalid-chats"]).unwrap();
         assert_eq!(c.command, Command::Store { command: StoreCommand::PurgeInvalidChats { yes: false } });
         let c = parse(&["store", "purge-invalid-chats", "--yes"]).unwrap();

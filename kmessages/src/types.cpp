@@ -735,6 +735,7 @@ std::optional<Status> parseStatus(const QString &json, QString *error)
     s.profilesDetail = optString(profiles.value("detail"_L1));
     applySms(o->value("sms"_L1).toObject(), &s);
     s.macHost = optString(o->value("mac_host"_L1));
+    s.contactsSync = contactsSync(o->value("contacts_sync"_L1));
     s.registeredAt = optInt(reg.value("registered_at"_L1));
     s.expiresAt = optInt(reg.value("expires_at"_L1));
     const auto unread = o->value("unread"_L1);
@@ -761,6 +762,42 @@ bool parseSmsForwarding(const QString &json, Status *s, QString *error)
         s->smsState = u"off"_s; // serde default
     }
     return true;
+}
+
+ContactsSync contactsSync(const QJsonValue &v)
+{
+    ContactsSync c;
+    if (!v.isObject()) {
+        return c;
+    }
+    const QJsonObject o = v.toObject();
+    c.known = true;
+    c.account = optString(o.value("account"_L1));
+    c.syncing = o.value("syncing"_L1).toBool();
+    c.intervalMinutes = o.value("interval_minutes"_L1).toInt();
+    c.lastSync = optInt(o.value("last_sync"_L1));
+    if (const auto last = o.value("last"_L1); last.isObject()) {
+        const QJsonObject l = last.toObject();
+        c.hasLast = true;
+        c.cards = l.value("cards"_L1).toInt();
+        c.photos = l.value("photos"_L1).toInt();
+        c.written = l.value("written"_L1).toInt();
+        c.unchanged = l.value("unchanged"_L1).toInt();
+        c.removed = l.value("removed"_L1).toInt();
+        c.removedMac = l.value("removed_mac"_L1).toInt();
+    }
+    c.lastError = optString(o.value("last_error"_L1));
+    c.authFailed = o.value("auth_failed"_L1).toBool();
+    return c;
+}
+
+std::optional<ContactsSync> parseContactsSync(const QString &json, QString *error)
+{
+    auto o = parseObject(json, error);
+    if (!o) {
+        return std::nullopt;
+    }
+    return contactsSync(*o);
 }
 
 std::optional<SentMessage> parseSentMessage(const QString &json, QString *error)

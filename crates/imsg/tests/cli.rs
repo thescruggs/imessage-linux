@@ -522,7 +522,7 @@ async fn sync_mac_with_a_fake_ssh() {
     let o = sync(&["sync-mac", "fakemac", "--dry-run", "--json"]).await;
     assert_eq!(o.code, 0, "{} {}", o.stderr, o.stdout);
     let v = o.json();
-    assert_eq!((v["contacts"]["received"].as_u64(), v["contacts"]["written"].as_u64()), (Some(6), Some(6)));
+    assert!(v.get("contacts").is_none(), "contacts come from iCloud now: {}", o.stdout);
     let results: Vec<(&str, &str)> = v["pins"]["mac"].as_array().unwrap().iter().map(|r| (r["pin"].as_str().unwrap(), r["result"].as_str().unwrap())).collect();
     assert_eq!(
         results,
@@ -540,23 +540,23 @@ async fn sync_mac_with_a_fake_ssh() {
     let bob = h.run(&["chat", "bob@example.com", "--json"]).await.json();
     assert_eq!(bob["pinned"], false);
 
-    // for real: vCards written, bob pinned first, carol (local) kept after
+    // for real: bob pinned first, carol (local) kept after; no vCards
     let o = sync(&["sync-mac", "fakemac"]).await;
     assert_eq!(o.code, 0, "{}", o.stderr);
-    assert!(o.stdout.contains("contacts     6 from the Mac (2 with photos): 6 written, 0 unchanged, 0 removed"), "{}", o.stdout);
+    assert!(!o.stdout.contains("contacts"), "{}", o.stdout);
     assert!(o.stdout.contains("pins         5 on the Mac: 1 pinned, 4 not found; 1 local pin(s) kept"), "{}", o.stdout);
-    let vcf = data.join("kpeoplevcard/mac-AAAA-1111_ABPerson.vcf");
-    assert!(std::fs::read_to_string(&vcf).unwrap().contains("FN:Alice Anderson"));
+    assert!(!data.join("kpeoplevcard").exists());
     let chats = h.run(&["chats", "--json"]).await.json();
     let order = |id: &str| chats.as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["pin_order"].as_u64();
     assert_eq!((order("mailto:bob@example.com"), order("mailto:carol@example.com")), (Some(0), Some(1)));
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(fake.state.join("imsg/mac-pins.json")).unwrap()).unwrap();
     assert_eq!(saved["chats"], serde_json::json!(["mailto:bob@example.com"]));
 
-    // again: nothing to write; the Mac unpins bob (pins only addresses
-    // now, so nothing is unmapped) -> unpinned here, carol stays
+    // --contacts is gone (clap rejects it: usage error)
     let o = sync(&["sync-mac", "fakemac", "--contacts", "--json"]).await;
-    assert_eq!((o.json()["contacts"]["unchanged"].as_u64(), o.json().get("pins").is_none()), (Some(6), true));
+    assert_eq!(o.code, 2, "{} {}", o.stderr, o.stdout);
+    // the Mac unpins bob (pins only addresses now, so nothing is
+    // unmapped) -> unpinned here, carol stays
     fake.set_mac_pins(&["carol@example.com"]);
     let o = sync(&["sync-mac", "fakemac", "--pins", "--json"]).await;
     assert_eq!(o.code, 0, "{}", o.stderr);
@@ -576,58 +576,26 @@ async fn sync_mac_with_a_fake_ssh() {
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert_eq!(o.json()["backgrounds"]["chats"][0]["result"], "not-in-daemon");
 
-    // a section failing on the Mac: reported, exit 1, the folder left alone
-    std::fs::remove_dir_all(fake.mac.join("Library/Application Support/AddressBook")).unwrap();
-    let o = sync(&["sync-mac", "fakemac", "--json"]).await;
-    assert_eq!(o.code, 1, "{}", o.stderr);
-    assert!(o.json()["contacts"]["error"].as_str().unwrap().contains("no Contacts database"));
-    assert!(o.json()["pins"]["order"].is_array());
-    assert!(vcf.exists());
+    // a section failing on the Mac: reported, exit 1, the others go on
+    std::fs::write(fake.mac.join("Library/Preferences/com.apple.messages.pinning.plist"), b"not a plist").unwrap();
+    let o = sync(&["sync-mac", "fakemac", "--pins", "--backgrounds", "--json"]).await;
+    assert_eq!(o.code, 1, "{} {}", o.stderr, o.stdout);
+    assert!(o.json()["pins"]["error"].is_string(), "{}", o.stdout);
+    assert_eq!(o.json()["backgrounds"]["chats"][0]["result"], "not-in-daemon");
+    assert_eq!(h.run(&["chat", "carol@example.com", "--json"]).await.json()["pinned"], true);
     h.shutdown().await;
 }
 
-/// The contacts part needs no daemon when HOST is given; pins do.
+/// Without a daemon there is nothing to sync into: exit 5, even with HOST.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sync_mac_contacts_without_a_daemon() {
+async fn sync_mac_without_a_daemon() {
     let Some(fake) = FakeMac::new() else { return };
-    let dir = fake.t.path().join("vcards");
     let state = fake.t.path().join("imessaged");
-    let cmd = |args: &[&str]| {
-        let mut c = imsg_command("unix:path=/nonexistent/imsg-test-bus", &state, args);
-        fake.env(&mut c);
-        c
-    };
-    let o = run(cmd(&["sync-mac", "fakemac", "--contacts", "--contacts-dir", dir.to_str().unwrap()]), None).await;
-    assert_eq!(o.code, 0, "{} {}", o.stderr, o.stdout);
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 6);
-    let o = run(cmd(&["sync-mac", "fakemac", "--pins", "--json"]), None).await;
+    let mut c = imsg_command("unix:path=/nonexistent/imsg-test-bus", &state, &["sync-mac", "fakemac", "--json"]);
+    fake.env(&mut c);
+    let o = run(c, None).await;
     assert_eq!(o.code, 5, "{}", o.stderr);
     assert!(o.json()["error"].as_str().unwrap().contains("D-Bus"), "{}", o.stdout);
-}
-
-/// tools/mac-contacts-export.sh: through imsg when it is there, else the
-/// exporter directly; the same files either way.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mac_contacts_export_wrapper() {
-    let Some(fake) = FakeMac::new() else { return };
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/mac-contacts-export.sh");
-    let (a, b) = (fake.t.path().join("via-imsg"), fake.t.path().join("fallback"));
-    for (imsg, out) in [(IMSG, &a), ("/nonexistent/imsg", &b)] {
-        let mut c = tokio::process::Command::new("bash");
-        c.arg(script).arg("fakemac").arg(out).env("IMSG", imsg).env("IMSG_BUS_ADDRESS", "unix:path=/nonexistent/imsg-test-bus");
-        c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        fake.env(&mut c);
-        let o = run(c, None).await;
-        assert_eq!(o.code, 0, "{imsg}: {} {}", o.stderr, o.stdout);
-    }
-    let names = |d: &std::path::Path| {
-        let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap()).map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).unwrap())).collect();
-        v.sort();
-        v
-    };
-    let (va, vb) = (names(&a), names(&b));
-    assert_eq!(va.len(), 6);
-    assert!(va == vb, "both branches write the same vCards");
 }
 
 /// `IMESSAGED_TRANSPORT=p2p` (Windows' default): no `--bus-address`, imsg

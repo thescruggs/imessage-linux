@@ -158,6 +158,26 @@ struct MessagePage {
     QString nextCursor; ///< empty = this was the oldest page
 };
 
+/// The daemon's iCloud contacts sync (`GetStatus.contacts_sync`,
+/// `GetContactsSync`, signal `ContactsSyncChanged`).
+struct ContactsSync {
+    bool known = false; ///< the daemon reports it (false: older daemon without CardDAV sync)
+    QString account; ///< the Apple ID whose contacts are synced, "" = not set up
+    bool syncing = false;
+    int intervalMinutes = 0; ///< automatic sync interval, 0 = only on request
+    qint64 lastSync = 0; ///< ms of the last successful sync, 0 = never
+    bool hasLast = false; ///< the report below is from that sync
+    int cards = 0; ///< contacts in iCloud
+    int photos = 0;
+    int written = 0; ///< new or changed vCards
+    int unchanged = 0;
+    int removed = 0; ///< vCards of contacts no longer in iCloud
+    int removedMac = 0; ///< vCards an earlier `imsg sync-mac` copied, replaced by iCloud's
+    QString lastError; ///< why the last sync failed ("" = it did not)
+    bool authFailed = false; ///< Apple refused the app-specific password: no automatic syncs until it is set again
+    bool operator==(const ContactsSync &) const = default;
+};
+
 struct Status {
     QString version;
     QString connectionState;
@@ -176,6 +196,7 @@ struct Status {
     QString smsDetail;
     qint64 smsSince = 0; ///< ms
     QString macHost; ///< `mac_host`: the Mac `imsg sync-mac` copies from ("" = unset / older daemon)
+    ContactsSync contactsSync; ///< `contacts_sync` (known = false: older daemon)
 };
 
 struct SentMessage {
@@ -227,6 +248,10 @@ std::optional<Status> parseStatus(const QString &json, QString *error = nullptr)
 /// `sms` object of a status (also `SmsForwardingChanged` / `EnableSmsForwarding`): fills the sms* fields of `s`.
 void applySms(const QJsonObject &sms, Status *s);
 bool parseSmsForwarding(const QString &json, Status *s, QString *error = nullptr);
+/// A ContactsSyncStatus object (`contacts_sync` of a status; `null` / missing = older daemon, known = false).
+ContactsSync contactsSync(const QJsonValue &v);
+/// ContactsSyncStatus JSON (`ContactsSyncChanged` / the contacts methods' replies).
+std::optional<ContactsSync> parseContactsSync(const QString &json, QString *error = nullptr);
 std::optional<SentMessage> parseSentMessage(const QString &json, QString *error = nullptr);
 std::optional<QList<HandleReachability>> parseLookup(const QString &json, QString *error = nullptr);
 /// A HandleProfile object, or std::nullopt for `null` / nothing to show.

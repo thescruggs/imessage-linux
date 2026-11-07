@@ -12,8 +12,10 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLocale>
 #include <QLoggingCategory>
 #include <QMimeDatabase>
+#include <QTimeZone>
 #include <QTimer>
 
 using namespace Qt::StringLiterals;
@@ -40,6 +42,7 @@ void noteSharedProfiles(const Chat &c)
 
 constexpr int LongTimeoutMs = 120 * 1000; // login, 2FA, file transfer, activation
 constexpr int MediumTimeoutMs = 60 * 1000; // React / Edit / Unsend / MarkRead: an IDS round trip
+constexpr int ContactsTimeoutMs = 10 * 60 * 1000; // a whole address book with photos
 const QString ErrorPrefix = u"org.imessage.Daemon1.Error."_s;
 }
 
@@ -64,6 +67,7 @@ DaemonClient::DaemonClient(const QDBusConnection &bus, QObject *parent)
         {"BackgroundError", SLOT(onBackgroundError(QString))},
         {"HandleProfileUpdated", SLOT(onHandleProfileUpdated(QString, QString))},
         {"SmsForwardingChanged", SLOT(onSmsForwardingChanged(QString))},
+        {"ContactsSyncChanged", SLOT(onContactsSyncChanged(QString))},
     };
     for (const auto &s : signals_) {
         if (!m_bus.connect(Service, Path, Interface, QString::fromLatin1(s.name), this, s.slot)) {
@@ -501,6 +505,127 @@ void DaemonClient::onSmsForwardingChanged(const QString &json)
     Q_EMIT statusChanged();
 }
 
+QDateTime DaemonClient::contactsLastSync() const
+{
+    const qint64 ms = m_status.contactsSync.lastSync;
+    return ms > 0 ? QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC) : QDateTime();
+}
+
+QString DaemonClient::contactsLastSyncText() const
+{
+    const QDateTime last = contactsLastSync();
+    return last.isValid() ? QLocale().toString(last.toLocalTime(), QLocale::ShortFormat) : QString();
+}
+
+QString DaemonClient::contactsSyncSummary(const ContactsSync &c)
+{
+    if (!c.hasLast) {
+        return {};
+    }
+    QStringList details;
+    if (c.written > 0) {
+        details << i18ncp("iCloud contacts sync", "%1 updated", "%1 updated", c.written);
+    }
+    if (c.removed + c.removedMac > 0) {
+        details << i18ncp("iCloud contacts sync", "%1 removed", "%1 removed", c.removed + c.removedMac);
+    }
+    const QString head = i18ncp("iCloud contacts sync", "%1 contact", "%1 contacts", c.cards);
+    return details.isEmpty() ? head : i18nc("iCloud contacts sync: %1 = '312 contacts', %2 = details", "%1 (%2)", head, details.join(u", "_s));
+}
+
+QString DaemonClient::contactsErrorMessage(const QString &errorName, const QString &message)
+{
+    if (errorName == "org.freedesktop.DBus.Error.UnknownMethod"_L1 || errorName == "org.freedesktop.DBus.Error.UnknownInterface"_L1) {
+        return i18n("This version of imessaged cannot sync iCloud contacts. Update it and try again.");
+    }
+    if (errorName == "org.freedesktop.DBus.Error.ServiceUnknown"_L1) {
+        return i18n("iCloud contacts: imessaged is not running.");
+    }
+    if (isTimeout(errorName)) {
+        return i18n("iCloud contacts: no answer from imessaged in time. The sync may still be running.");
+    }
+    if (errorName == "NotFound"_L1) {
+        return i18n("No iCloud account is set up for contacts. Sign in under Settings.");
+    }
+    return i18nc("%1 = error from the daemon", "iCloud contacts: %1", message);
+}
+
+void DaemonClient::contactsCall(const QString &method, const QVariantList &args, const QString &operation, std::function<QString(const ContactsSync &)> success)
+{
+    ++m_contactsCalls;
+    Q_EMIT contactsSyncChanged();
+    const auto done = [this] {
+        --m_contactsCalls;
+        Q_EMIT contactsSyncChanged();
+    };
+    call(method, args, [this, operation, success, done](const QDBusMessage &r) {
+        QString error;
+        auto c = Json::parseContactsSync(firstString(r), &error);
+        if (!c) {
+            qCWarning(KM_DBUS) << "bad" << operation << "reply:" << error;
+            done();
+            Q_EMIT contactsSyncFinished(operation, false, u"Parse"_s, contactsErrorMessage(u"Parse"_s, error));
+            return;
+        }
+        setContactsSync(*c);
+        done();
+        Q_EMIT contactsSyncFinished(operation, true, QString(), success(*c));
+    }, [this, operation, done](const QString &name, const QString &message) {
+        done();
+        Q_EMIT contactsSyncFinished(operation, false, name, contactsErrorMessage(name, message));
+        // The failure is in the status too (last_error / auth_failed).
+        refreshStatus();
+    }, ContactsTimeoutMs);
+}
+
+void DaemonClient::setContactsAccount(const QString &appleId, const QString &appPassword)
+{
+    // Apple shows app-specific passwords as "abcd-efgh-ijkl-mnop"; pasted
+    // ones may carry spaces.
+    QString password = appPassword;
+    password.remove(u' ');
+    contactsCall(u"SetContactsAccount"_s, {appleId.trimmed(), password}, u"signIn"_s, [](const ContactsSync &c) {
+        const QString summary = contactsSyncSummary(c);
+        return summary.isEmpty() ? i18n("Signed in to iCloud contacts as %1.", c.account)
+                                 : i18nc("%1 = Apple ID, %2 = '312 contacts'", "Signed in to iCloud contacts as %1: %2", c.account, summary);
+    });
+}
+
+void DaemonClient::clearContactsAccount(bool removeCards)
+{
+    contactsCall(u"ClearContactsAccount"_s, {removeCards}, u"signOut"_s, [removeCards](const ContactsSync &) {
+        return removeCards ? i18n("Signed out of iCloud contacts; the synced contacts were removed.") : i18n("Signed out of iCloud contacts.");
+    });
+}
+
+void DaemonClient::syncContacts()
+{
+    contactsCall(u"SyncContacts"_s, {}, u"sync"_s, [](const ContactsSync &c) {
+        const QString summary = contactsSyncSummary(c);
+        return summary.isEmpty() ? i18n("Contacts synced from iCloud.") : i18nc("%1 = '312 contacts (3 updated)'", "Contacts synced from iCloud: %1", summary);
+    });
+}
+
+void DaemonClient::onContactsSyncChanged(const QString &json)
+{
+    QString error;
+    auto c = Json::parseContactsSync(json, &error);
+    if (!c) {
+        qCWarning(KM_DBUS) << "bad ContactsSyncChanged payload:" << error;
+        return;
+    }
+    setContactsSync(*c);
+}
+
+void DaemonClient::setContactsSync(const ContactsSync &c)
+{
+    if (c == m_status.contactsSync) {
+        return;
+    }
+    m_status.contactsSync = c;
+    Q_EMIT contactsSyncChanged();
+}
+
 void DaemonClient::refreshStatus()
 {
     refreshStatusThen({});
@@ -565,11 +690,15 @@ void DaemonClient::setAvailable(bool available)
     m_available = available;
     qCInfo(KM_DBUS) << "daemon" << (available ? "available" : "gone");
     if (!available) {
+        const bool hadContacts = m_status.contactsSync != ContactsSync();
         m_status = Status();
         m_status.connectionState = u"disconnected"_s;
         m_statusKnown = false;
         rebuildMine();
         Q_EMIT statusChanged();
+        if (hadContacts) {
+            Q_EMIT contactsSyncChanged();
+        }
     } else {
         setLastError(QString());
     }
@@ -593,6 +722,7 @@ void DaemonClient::setStatus(const Status &status)
 {
     const bool stateChanged = status.connectionState != m_status.connectionState;
     const bool otherChanged = status.otherHandles != m_status.otherHandles;
+    const bool contactsChanged = status.contactsSync != m_status.contactsSync;
     m_status = status;
     m_statusKnown = true;
     if (otherChanged) {
@@ -601,6 +731,9 @@ void DaemonClient::setStatus(const Status &status)
     Q_EMIT statusChanged();
     if (stateChanged) {
         Q_EMIT connectionStateChanged();
+    }
+    if (contactsChanged) {
+        Q_EMIT contactsSyncChanged();
     }
 }
 

@@ -58,7 +58,7 @@ makedepends=(
 checkdepends=('python')
 optdepends=(
   'kimageformats: HEIC chat backgrounds and photos in kmessages'
-  'openssh: anisette from your Mac, contacts and history import'
+  'openssh: anisette from your Mac, pins and history import'
 )
 options=('!lto')  # C/C++ LTO objects from the bundled QEMU (unicorn) do not link with rustc
 install=imessage-linux.install
@@ -163,7 +163,7 @@ package() {
   # checkout) and the scripts that run against your Mac.
   local tools="$pkgdir/usr/share/imessage-linux/tools"
   install -Dm755 -t "$tools" tools/bootstrap.sh tools/mac-hwinfo.sh \
-    tools/mac-anisette-install.sh tools/mac-contacts-export.sh
+    tools/mac-anisette-install.sh
   install -Dm644 -t "$tools" tools/mac-messages-export.py tools/mac-sync-export.py \
     tools/mac-backgrounds-export.py
   install -Dm644 -t "$tools/mac-anisette" tools/mac-anisette/*

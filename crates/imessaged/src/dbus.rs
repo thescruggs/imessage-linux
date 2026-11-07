@@ -282,6 +282,30 @@ impl Daemon1 {
         Ok(to_json(&self.hub.purge_invalid_chats(dry_run).await?))
     }
 
+    /// Sign the iCloud contacts sync in with an Apple ID and an
+    /// app-specific password (checked against iCloud first; nothing is
+    /// saved if refused), then sync. -> ContactsSyncStatus JSON.
+    async fn set_contacts_account(&self, apple_id: &str, app_password: &str) -> Result<String> {
+        Ok(to_json(&self.hub.set_contacts_account(apple_id, app_password).await?))
+    }
+
+    /// Forget the iCloud contacts account; `remove_cards` also deletes the
+    /// synced vCards. -> ContactsSyncStatus JSON.
+    async fn clear_contacts_account(&self, remove_cards: bool) -> Result<String> {
+        Ok(to_json(&self.hub.clear_contacts_account(remove_cards).await?))
+    }
+
+    /// Sync the iCloud contacts now (waits for a running sync first).
+    /// -> ContactsSyncStatus JSON.
+    async fn sync_contacts(&self) -> Result<String> {
+        Ok(to_json(&self.hub.sync_contacts().await?))
+    }
+
+    /// -> ContactsSyncStatus JSON (also in GetStatus).
+    async fn get_contacts_sync(&self) -> String {
+        to_json(&self.hub.contacts_sync_status())
+    }
+
     /// Stop the daemon the way SIGTERM does (engine state saved, store
     /// closed); replies first. For Windows, where nothing else can stop it
     /// gracefully (`imsg service stop`). A supervisor may start it again.
@@ -336,6 +360,11 @@ impl Daemon1 {
     /// Text Message Forwarding changed; `state_json` is SmsForwarding JSON.
     #[zbus(signal)]
     async fn sms_forwarding_changed(emitter: &SignalEmitter<'_>, state_json: &str) -> zbus::Result<()>;
+
+    /// The iCloud contacts sync started, finished or changed account;
+    /// `status_json` is ContactsSyncStatus JSON.
+    #[zbus(signal)]
+    async fn contacts_sync_changed(emitter: &SignalEmitter<'_>, status_json: &str) -> zbus::Result<()>;
 }
 
 /// Emits [`DaemonSignal`]s on the bus, or on every peer-to-peer client.
@@ -376,6 +405,7 @@ async fn emit_on(iface: &InterfaceRef<Daemon1>, sig: &DaemonSignal) -> zbus::Res
         DaemonSignal::BackgroundError(m) => Daemon1::background_error(e, m).await,
         DaemonSignal::HandleProfileUpdated { handle, profile } => Daemon1::handle_profile_updated(e, handle, &to_json(profile)).await,
         DaemonSignal::SmsForwardingChanged(s) => Daemon1::sms_forwarding_changed(e, &to_json(s)).await,
+        DaemonSignal::ContactsSyncChanged(s) => Daemon1::contacts_sync_changed(e, &to_json(s)).await,
     }
 }
 

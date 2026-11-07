@@ -27,7 +27,8 @@ struct Args {
     #[arg(long, env = "IMESSAGED_STATE_DIR", value_name = "DIR")]
     state_dir: Option<PathBuf>,
     /// Folder(s) of vCards for contact names, `:`-separated (`;` on Windows)
-    /// (default: ~/.local/share/kpeoplevcard, where `imsg sync-mac` writes).
+    /// (default: ~/.local/share/kpeoplevcard, where imessaged writes your
+    /// iCloud contacts; see `imsg contacts login`).
     #[arg(long, env = "IMSG_CONTACTS_DIR", value_name = "DIR")]
     contacts_dir: Option<String>,
 }

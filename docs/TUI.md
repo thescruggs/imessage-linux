@@ -98,8 +98,8 @@ per draft.
 | Others | `Search`, `React`, `SetTyping`, `DownloadAttachment` (the daemon's copy is opened / copied) |
 
 Contact names: the vCards in `~/.local/share/kpeoplevcard` (subfolders
-included; `imsg sync-mac` writes your Mac's there, KDE Connect your
-phone's), matched by email (case-insensitive) or phone number (all its
+included; the daemon's iCloud contacts sync, `imsg contacts login`,
+writes yours there, KDE Connect your phone's), matched by email (case-insensitive) or phone number (all its
 digits, or the last ten for numbers without a country code or with `+1`,
 so `(205) 555-0100` matches `tel:+12055550100` but `+44 7911 123456` never
 matches `+1 791-112-3456`; the same rule as kmessages); then the name a

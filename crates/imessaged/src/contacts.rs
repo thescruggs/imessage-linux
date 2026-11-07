@@ -3,12 +3,12 @@
 //! Messages on the iPhone.
 //!
 //! The cards are the vCards in the KPeople folder (`contacts_dir`,
-//! default `$XDG_DATA_HOME/kpeoplevcard`, which `imsg sync-mac` fills from
-//! the Mac). Every one-to-one chat with a linked address is kept under the
+//! default `$XDG_DATA_HOME/kpeoplevcard`, which the iCloud contacts sync
+//! (`crate::hub::contacts_sync`) fills). Every one-to-one chat with a linked address is kept under the
 //! person's *canonical* address: their first phone number (sorted), else
 //! their first email address. Cards with the same name that share an
-//! address are one person (the Mac exports a card per account: iCloud,
-//! Google, …). An address on the cards of different people, or one of our
+//! address are one person (an address book can hold a card per account:
+//! iCloud, Google, …). An address on the cards of different people, or one of our
 //! own, is never linked.
 
 use std::collections::{HashMap, HashSet};

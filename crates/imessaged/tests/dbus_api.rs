@@ -805,3 +805,23 @@ async fn status_reports_mac_host() {
     assert_eq!(h.call_json("GetStatus", &()).await["mac_host"], "bebop.local");
     h.shutdown().await;
 }
+
+/// The iCloud contacts sync's methods without an account (the CardDAV
+/// side is tests/contacts_sync.rs): status, GetStatus.contacts_sync,
+/// SyncContacts refused, ClearContactsAccount harmless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contacts_sync_without_an_account() {
+    let Some(h) = Harness::logged_in().await else { return };
+    let p = &h.p;
+    let s = h.call_json("GetContactsSync", &()).await;
+    assert_eq!((s["account"].is_null(), s["syncing"].as_bool()), (true, Some(false)), "{s}");
+    assert_eq!(h.call_json("GetStatus", &()).await["contacts_sync"], s);
+    let e = p.call::<_, _, String>("SyncContacts", &()).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.NotFound");
+    let e = p.call::<_, _, String>("SetContactsAccount", &("", "")).await.unwrap_err();
+    assert_eq!(error_name(&e), "org.imessage.Daemon1.Error.InvalidInput");
+    let mut changed = p.receive_signal("ContactsSyncChanged").await.unwrap();
+    assert!(h.call_json("ClearContactsAccount", &(false,)).await["account"].is_null());
+    let (sj,): (String,) = next_signal(&mut changed, |_: &(String,)| true).await;
+    assert!(json(&sj)["account"].is_null());
+}

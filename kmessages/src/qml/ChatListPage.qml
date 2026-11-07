@@ -41,34 +41,49 @@ Kirigami.ScrollablePage {
         },
         Kirigami.Action {
             id: syncAction
-            objectName: "syncFromMacAction"
+            objectName: "syncAction"
             icon.name: "view-refresh"
-            text: i18n("Sync from Mac")
+            text: i18nc("toolbar: sync contacts and pins", "Sync")
             // Not IconOnly: the toolbar would use its own icon button instead
             // of displayComponent (which is icon-only anyway). KeepVisible
             // keeps it out of the overflow menu, where displayComponent
             // would be loaded as is.
             displayHint: Kirigami.DisplayHint.KeepVisible
-            enabled: !App.macSync.running
+            enabled: !App.syncing
+            readonly property bool contacts: App.daemon.contactsAccount.length > 0
+            readonly property bool mac: App.macSync.host.length > 0
             tooltip: {
-                const what = App.macSync.host.length > 0
-                    ? i18n("Copy contacts and pinned conversations from %1", App.macSync.host)
-                    : i18n("Copy contacts and pinned conversations from your Mac");
-                const when = App.macSync.running
-                    ? i18n("Syncing… Click to stop.")
-                    : (App.macSync.lastSyncText.length > 0 ? i18n("Last synced %1", App.macSync.lastSyncText) : i18n("Not synced yet"));
-                return what + "\n" + when;
+                let lines = [];
+                if (contacts) {
+                    lines.push(App.daemon.contactsSyncing || App.daemon.contactsBusy
+                        ? i18n("Syncing contacts from iCloud…")
+                        : (App.daemon.contactsLastSyncText.length > 0
+                            ? i18n("Contacts from iCloud (%1), last synced %2", App.daemon.contactsAccount, App.daemon.contactsLastSyncText)
+                            : i18n("Contacts from iCloud (%1)", App.daemon.contactsAccount)));
+                }
+                if (mac) {
+                    lines.push(App.macSync.running
+                        ? i18n("Syncing pinned conversations from %1… Click to stop.", App.macSync.host)
+                        : (App.macSync.lastSyncText.length > 0
+                            ? i18n("Pinned conversations from %1, last synced %2", App.macSync.host, App.macSync.lastSyncText)
+                            : i18n("Pinned conversations from %1", App.macSync.host)));
+                }
+                if (lines.length === 0) {
+                    lines.push(App.daemon.contactsSyncAvailable ? i18n("Set up iCloud contacts or your Mac in Settings to sync.") : i18n("Set up your Mac in Settings to sync pinned conversations."));
+                }
+                return lines.join("\n");
             }
             // A tool button that turns into a busy indicator while syncing.
             displayComponent: QQC2.ToolButton {
-                objectName: "syncFromMacButton"
+                objectName: "syncButton"
                 display: QQC2.AbstractButton.IconOnly
                 text: syncAction.text
-                icon.name: App.macSync.running ? "" : syncAction.icon.name
+                icon.name: App.syncing ? "" : syncAction.icon.name
                 // Same size with or without the icon.
                 implicitWidth: Kirigami.Units.iconSizes.smallMedium + leftPadding + rightPadding
                 implicitHeight: Kirigami.Units.iconSizes.smallMedium + topPadding + bottomPadding
-                // While syncing, a click stops it.
+                // While the Mac sync runs, a click stops it (a contacts sync cannot be stopped).
+                enabled: !App.syncing || App.macSync.running
                 onClicked: App.macSync.running ? App.macSync.stop() : syncAction.trigger()
                 QQC2.ToolTip.text: syncAction.tooltip
                 QQC2.ToolTip.visible: hovered
@@ -76,16 +91,16 @@ Kirigami.ScrollablePage {
                 Accessible.description: syncAction.tooltip
 
                 QQC2.BusyIndicator {
-                    objectName: "macSyncBusy"
+                    objectName: "syncBusy"
                     anchors.centerIn: parent
                     width: Kirigami.Units.iconSizes.smallMedium
                     height: width
                     padding: 0
-                    running: App.macSync.running
+                    running: App.syncing
                     visible: running
                 }
             }
-            onTriggered: App.macSync.start()
+            onTriggered: App.syncAll()
         },
         Kirigami.Action {
             icon.name: "settings-configure"

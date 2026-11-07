@@ -549,7 +549,7 @@ fn draw_contact_picker(f: &mut Frame, app: &App, area: Rect) {
     let matches = app.contact_matches();
     if matches.is_empty() {
         let msg = if app.contacts.is_empty() {
-            "no contacts (imsg sync-mac copies the Mac's) — type a phone number or email"
+            "no contacts (imsg contacts login syncs iCloud's) — type a phone number or email"
         } else {
             "no matches — type a phone number or email"
         };

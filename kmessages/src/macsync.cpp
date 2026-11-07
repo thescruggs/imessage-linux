@@ -19,13 +19,13 @@ namespace km
 
 namespace
 {
-constexpr int DefaultTimeoutMs = 10 * 60 * 1000; // a big address book over a slow link
+constexpr int DefaultTimeoutMs = 10 * 60 * 1000; // ssh to a Mac that is slow to wake, backgrounds over a slow link
 constexpr int KillGraceMs = 3000; // after SIGTERM, before SIGKILL
 
-/// "312 contacts (3 updated, 1 removed)"; just `head` without details.
+/// "3 pins (1 not found)"; just `head` without details.
 QString withDetails(const QString &head, const QStringList &details)
 {
-    return details.isEmpty() ? head : i18nc("sync from Mac: %1 = '312 contacts', %2 = details", "%1 (%2)", head, details.join(u", "_s));
+    return details.isEmpty() ? head : i18nc("sync from Mac: %1 = '3 pins', %2 = details", "%1 (%2)", head, details.join(u", "_s));
 }
 
 /// The last non-empty line of imsg's / ssh's diagnostics, without imsg's prefix.
@@ -244,25 +244,8 @@ QString MacSync::summarize(const QByteArray &json, int exitCode, const QString &
 
     QStringList parts;
     QStringList errors;
-    const QJsonValue contactsValue = o.value("contacts"_L1);
-    if (contactsValue.isObject()) {
-        const QJsonObject c = contactsValue.toObject();
-        if (c.contains("error"_L1)) {
-            errors << i18nc("sync from Mac: a part failed", "contacts: %1", c.value("error"_L1).toString());
-        } else {
-            const int received = c.value("received"_L1).toInt();
-            const int written = c.value("written"_L1).toInt();
-            const int removed = c.value("removed"_L1).toInt();
-            QStringList details;
-            if (written > 0) {
-                details << i18ncp("sync from Mac: contacts", "%1 updated", "%1 updated", written);
-            }
-            if (removed > 0) {
-                details << i18ncp("sync from Mac: contacts", "%1 removed", "%1 removed", removed);
-            }
-            parts << withDetails(i18ncp("sync from Mac", "%1 contact", "%1 contacts", received), details);
-        }
-    }
+    // Pins (and backgrounds); contacts now come from iCloud (older imsg
+    // versions also reported a `contacts` part: not ours to summarize).
     const QJsonValue pinsValue = o.value("pins"_L1);
     if (pinsValue.isObject()) {
         const QJsonObject p = pinsValue.toObject();

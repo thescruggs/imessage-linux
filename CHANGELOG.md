@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+* **iCloud contacts, without the Mac.** The daemon now syncs your
+  contacts from iCloud itself, over CardDAV with an app-specific password
+  (create one at appleid.apple.com → Sign-In and Security → App-Specific
+  Passwords), and keeps them current every hour (`contacts_sync_minutes`,
+  default 60, `0` = only on request). Sign in with the new `imsg contacts
+  login` (also `logout [--remove-cards]`, `sync`, `status`, all with
+  `--json`) or in kmessages Settings → iCloud Contacts; `imsg status`
+  shows a `contacts` row. Each contact is
+  `~/.local/share/kpeoplevcard/icloud-<id>.vcf` with its photo embedded
+  (linked photos are fetched); groups are skipped; only changed cards are
+  fetched again. The password is checked with iCloud before it is saved,
+  sealed with the state key. New D-Bus methods `SetContactsAccount`,
+  `ClearContactsAccount`, `SyncContacts`, `GetContactsSync`, signal
+  `ContactsSyncChanged` and `GetStatus.contacts_sync`
+  ([docs/DBUS.md](docs/DBUS.md#contactssyncstatus)).
+
+* **`imsg sync-mac` no longer copies contacts**: it syncs pins (the
+  default) and, with `--backgrounds`, transcript backgrounds; `--contacts`
+  and `--contacts-dir` are gone, as is the `contacts` part of its
+  `--json` output. The `mac-*.vcf` cards it wrote are replaced by the
+  iCloud ones on the first successful sync. Contacts from Google or other
+  non-iCloud accounts on the Mac are therefore no longer included.
+  `tools/mac-contacts-export.sh` is removed.
+
 ## 0.1.15 (2026-10-25)
 
 * **One conversation per person.** When a contact card (the vCards `imsg

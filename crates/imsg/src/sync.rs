@@ -1,19 +1,16 @@
-//! `imsg sync-mac [HOST]`: copy contacts, pinned conversations and
-//! (optionally) transcript backgrounds from a Mac (see docs/CLI.md).
+//! `imsg sync-mac [HOST]`: copy pinned conversations and (optionally)
+//! transcript backgrounds from a Mac (see docs/CLI.md). Contacts come
+//! from iCloud instead (`imsg contacts`, the daemon's CardDAV sync).
 //!
 //! 1. `tools/mac-sync-export.py` (embedded; with `--backgrounds` also
 //!    `tools/mac-backgrounds-export.py`) runs on the Mac over one ssh
 //!    connection and streams one tar: `sync.json` (what was exported, or
-//!    each section's error), `contacts/mac-<uid>.vcf`, `pins.plist`, and
-//!    the backgrounds export.
+//!    each section's error), `pins.plist`, and the backgrounds export.
 //! 2. The tar is unpacked into `~/.cache/imsg/import/<run>/` (the daemon
 //!    can read it, for the backgrounds) and removed afterwards.
-//! 3. Contacts: the `mac-*.vcf` files in the KPeople vCard folder are
-//!    replaced (only changed files are rewritten; other vCards there are
-//!    left alone). Pins: each Mac pin (`pD.pP`) is mapped to the daemon's
-//!    chat id ([`map_pin`]) and applied with `SetChatPinned` /
-//!    `ReorderPins` ([`plan_pins`]). Backgrounds: as `imsg import-mac
-//!    --backgrounds`.
+//! 3. Pins: each Mac pin (`pD.pP`) is mapped to the daemon's chat id
+//!    ([`map_pin`]) and applied with `SetChatPinned` / `ReorderPins`
+//!    ([`plan_pins`]). Backgrounds: as `imsg import-mac --backgrounds`.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -37,19 +34,16 @@ pub const PINS_STATE_FILE: &str = "mac-pins.json";
 pub struct SyncArgs {
     /// `None`: the daemon's `mac_host`.
     pub host: Option<String>,
-    pub contacts: bool,
     pub pins: bool,
     pub backgrounds: bool,
     pub dry_run: bool,
-    /// Where the vCards go (default: the KPeople folder).
-    pub contacts_dir: Option<PathBuf>,
     pub max_total_mb: u64,
 }
 
 impl SyncArgs {
-    /// (contacts, pins, backgrounds); no section flag = contacts + pins.
-    pub fn sections(&self) -> (bool, bool, bool) {
-        if self.contacts || self.pins || self.backgrounds { (self.contacts, self.pins, self.backgrounds) } else { (true, true, false) }
+    /// (pins, backgrounds); no section flag = pins.
+    pub fn sections(&self) -> (bool, bool) {
+        if self.pins || self.backgrounds { (self.pins, self.backgrounds) } else { (true, false) }
     }
 }
 
@@ -71,8 +65,6 @@ pub fn remote_script(with_backgrounds: bool) -> String {
 /// One section's result on the Mac: counters, or why it failed.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SectionMeta {
-    #[serde(default)]
-    pub photos: Option<u64>,
     /// `pins.plist`, or `None` when the Mac has no pinning preferences.
     #[serde(default)]
     pub file: Option<String>,
@@ -95,8 +87,6 @@ pub struct PinChatRec {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SyncMeta {
     #[serde(default)]
-    pub contacts: Option<SectionMeta>,
-    #[serde(default)]
     pub pins: Option<SectionMeta>,
     #[serde(default)]
     pub pin_chats: Vec<PinChatRec>,
@@ -116,111 +106,6 @@ fn section_error(m: Option<&SectionMeta>, what: &str) -> Option<String> {
         None => Some(format!("the Mac did not export {what}")),
         Some(m) => m.error.clone(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// contacts
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ContactsOutcome {
-    pub dir: String,
-    /// vCards the Mac sent.
-    pub received: usize,
-    pub photos: u64,
-    /// New or changed files (would be, in a dry run).
-    pub written: usize,
-    pub unchanged: usize,
-    /// Old `mac-*.vcf` files the Mac no longer has.
-    pub removed: usize,
-}
-
-/// `mac-<uid>.vcf` as the exporter names them (uid reduced to
-/// `[A-Za-z0-9_-]`).
-fn exported_name(n: &str) -> bool {
-    n.strip_prefix("mac-")
-        .and_then(|r| r.strip_suffix(".vcf"))
-        .is_some_and(|m| !m.is_empty() && m.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-}
-
-/// Regular files in `dir` whose name passes `keep`, sorted.
-fn files_named(dir: &Path, keep: impl Fn(&str) -> bool) -> std::io::Result<Vec<String>> {
-    let mut out = vec![];
-    let rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e),
-    };
-    for e in rd {
-        let e = e?;
-        let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
-        if keep(&name) && e.path().symlink_metadata().is_ok_and(|m| m.is_file()) {
-            out.push(name);
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Write `data` to `path` via a temp file in the same directory (0600).
-fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
-    let r = (|| {
-        let mut f = imessage_common::platform::fs::private_options().write(true).create(true).truncate(true).open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    r
-}
-
-/// Replace the `mac-*.vcf` files in `dir` with the ones staged in
-/// `staged` (the tar's `contacts/`): new and changed files are written,
-/// identical ones left alone (KPeople reloads what changes), old
-/// `mac-*.vcf` files the Mac no longer has removed; other vCards in `dir`
-/// are never touched. Nothing at all changes when the Mac sent no
-/// contacts. A dry run only counts.
-pub fn apply_contacts(staged: &Path, dir: &Path, photos: u64, dry_run: bool) -> anyhow::Result<ContactsOutcome> {
-    // read_dir follows a symlink a tar member could have made `contacts`.
-    if staged.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
-        anyhow::bail!("{}: not a plain directory in the export; {} left unchanged", staged.display(), dir.display());
-    }
-    let new = files_named(staged, exported_name).map_err(|e| anyhow::anyhow!("{}: {e}", staged.display()))?;
-    if new.is_empty() {
-        anyhow::bail!("no contacts received from the Mac; {} left unchanged", dir.display());
-    }
-    let old = files_named(dir, |n| n.starts_with("mac-") && n.ends_with(".vcf")).map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
-    let mut out = ContactsOutcome { dir: dir.display().to_string(), received: new.len(), photos, ..Default::default() };
-    let mut writes = vec![];
-    for n in &new {
-        let data = std::fs::read(staged.join(n)).map_err(|e| anyhow::anyhow!("{n}: {e}"))?;
-        if old.contains(n) && std::fs::read(dir.join(n)).is_ok_and(|cur| cur == data) {
-            out.unchanged += 1;
-        } else {
-            writes.push((n, data));
-        }
-    }
-    out.written = writes.len();
-    let gone: Vec<&String> = old.iter().filter(|n| !new.contains(n)).collect();
-    out.removed = gone.len();
-    if dry_run {
-        return Ok(out);
-    }
-    if !dir.is_dir() {
-        import::private_dir(dir).map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
-    }
-    for (n, data) in writes {
-        write_atomic(&dir.join(n), &data).map_err(|e| anyhow::anyhow!("{}: {e}", dir.join(n).display()))?;
-    }
-    for n in gone {
-        std::fs::remove_file(dir.join(n)).map_err(|e| anyhow::anyhow!("{}: {e}", dir.join(n).display()))?;
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +259,23 @@ pub(crate) fn plan_pins(mac: &MacPins, me: &Me, our: Option<&str>, known: &BTree
     plan
 }
 
+/// Write `data` to `path` via a temp file in the same directory (0600).
+fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    let r = (|| {
+        let mut f = imessage_common::platform::fs::private_options().write(true).create(true).truncate(true).open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PinsState {
     host: String,
@@ -441,8 +343,6 @@ struct Summary {
     host: String,
     dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    contacts: Option<Section<ContactsOutcome>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pins: Option<Section<PinPlan>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     backgrounds: Option<Section<BackgroundsOutcome>>,
@@ -495,33 +395,22 @@ pub async fn run(args: SyncArgs, state_dir: &Path, ctx: &Ctx) -> anyhow::Result<
 }
 
 async fn run_inner(args: SyncArgs, state_dir: &Path, ctx: &Ctx, host_out: &mut Option<String>) -> anyhow::Result<u8> {
-    let (want_contacts, want_pins, want_backgrounds) = args.sections();
-    // Pins and backgrounds go through the daemon; contacts only need it
-    // for `mac_host`.
-    let daemon = match daemon_view(ctx).await {
-        Ok(d) => Some(d),
-        Err(e) if !(want_pins || want_backgrounds) => {
-            if args.host.is_none() {
-                return Err(e.into());
-            }
-            None
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let (want_pins, want_backgrounds) = args.sections();
+    // Pins and backgrounds go through the daemon.
+    let daemon = daemon_view(ctx).await?;
     let anisette_host = crate::local::anisette_command(state_dir).and_then(|c| imessage_common::ssh::host_of_command(&c));
-    let host = pick_host(args.host.clone(), daemon.as_ref().and_then(|d| d.mac_host.clone()), anisette_host)?;
+    let host = pick_host(args.host.clone(), daemon.mac_host.clone(), anisette_host)?;
     *host_out = Some(host.clone());
-    let contacts_dir = args.contacts_dir.clone().unwrap_or_else(imessage_common::paths::kpeople_vcard_dir);
 
     let run_id = format!("sync-{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), std::process::id());
     let stage = import::stage_root().join(run_id);
     import::private_dir(&stage).map_err(|e| anyhow::anyhow!("{}: {e}", stage.display()))?;
-    let what: Vec<&str> = [(want_contacts, "contacts"), (want_pins, "pins"), (want_backgrounds, "backgrounds")].iter().filter(|w| w.0).map(|w| w.1).collect();
+    let what: Vec<&str> = [(want_pins, "pins"), (want_backgrounds, "backgrounds")].iter().filter(|w| w.0).map(|w| w.1).collect();
     if !ctx.quiet && !ctx.json {
         eprintln!("syncing {} from {host} ...", what.join(", "));
     }
     let mut script_args: Vec<String> = vec![];
-    for (on, flag) in [(want_contacts, "--contacts"), (want_pins, "--pins"), (want_backgrounds, "--backgrounds")] {
+    for (on, flag) in [(want_pins, "--pins"), (want_backgrounds, "--backgrounds")] {
         if on {
             script_args.push(flag.into());
         }
@@ -541,11 +430,10 @@ async fn run_inner(args: SyncArgs, state_dir: &Path, ctx: &Ctx, host_out: &mut O
             return Err(e);
         }
     };
-    let result = apply(&args, &host, &stage, &meta, daemon.as_ref(), &contacts_dir, (want_contacts, want_pins, want_backgrounds)).await;
+    let result = apply(&args, &host, &stage, &meta, &daemon, (want_pins, want_backgrounds)).await;
     let _ = std::fs::remove_dir_all(&stage);
     let summary = result?;
-    let failed = summary.contacts.as_ref().is_some_and(Section::failed)
-        || summary.pins.as_ref().is_some_and(Section::failed)
+    let failed = summary.pins.as_ref().is_some_and(Section::failed)
         || summary.backgrounds.as_ref().is_some_and(|b| b.failed() || matches!(b, Section::Ok(o) if o.chats.iter().any(|c| c.result == "failed")));
     if ctx.json {
         println!("{}", serde_json::to_string(&summary)?);
@@ -560,29 +448,17 @@ async fn apply(
     host: &str,
     stage: &Path,
     meta: &SyncMeta,
-    daemon: Option<&DaemonView>,
-    contacts_dir: &Path,
-    (c, p, b): (bool, bool, bool),
+    d: &DaemonView,
+    (p, b): (bool, bool),
 ) -> anyhow::Result<Summary> {
-    let mut s = Summary { host: host.to_string(), dry_run: args.dry_run, contacts: None, pins: None, backgrounds: None };
-    if c {
-        s.contacts = Some(Section::from(match section_error(meta.contacts.as_ref(), "contacts") {
-            Some(e) => Err(anyhow::anyhow!("{e}")),
-            None => {
-                let photos = meta.contacts.as_ref().and_then(|m| m.photos).unwrap_or(0);
-                apply_contacts(&stage.join("contacts"), contacts_dir, photos, args.dry_run)
-            }
-        }));
-    }
+    let mut s = Summary { host: host.to_string(), dry_run: args.dry_run, pins: None, backgrounds: None };
     if p {
-        let d = daemon.expect("pins need the daemon");
         s.pins = Some(Section::from(match section_error(meta.pins.as_ref(), "pins") {
             Some(e) => Err(anyhow::anyhow!("{e}")),
             None => apply_pins(args, host, stage, meta, d).await,
         }));
     }
     if b {
-        let d = daemon.expect("backgrounds need the daemon");
         s.backgrounds = Some(Section::from(match section_error(meta.backgrounds.as_ref(), "backgrounds") {
             Some(e) => Err(anyhow::anyhow!("{e}")),
             None => {
@@ -644,26 +520,6 @@ fn summary_text(s: &Summary, quiet: bool) -> String {
         out.push_str("dry run: nothing changed\n");
     }
     let would = |w: &str, done: &str| if s.dry_run { format!("would be {w}") } else { done.to_string() };
-    match &s.contacts {
-        None => {}
-        Some(Section::Err { error }) => {
-            let _ = writeln!(out, "contacts     failed: {error}");
-        }
-        Some(Section::Ok(c)) => {
-            let _ = writeln!(
-                out,
-                "contacts     {} from the Mac ({} with photos): {} {}, {} unchanged, {} {}; {}",
-                c.received,
-                c.photos,
-                c.written,
-                would("written", "written"),
-                c.unchanged,
-                c.removed,
-                would("removed", "removed"),
-                c.dir
-            );
-        }
-    }
     match &s.pins {
         None => {}
         Some(Section::Err { error }) => {
@@ -746,11 +602,11 @@ mod tests {
     }
 
     #[test]
-    fn sections_default_to_contacts_and_pins() {
-        let a = SyncArgs { host: None, contacts: false, pins: false, backgrounds: false, dry_run: false, contacts_dir: None, max_total_mb: 1 };
-        assert_eq!(a.sections(), (true, true, false));
-        assert_eq!(SyncArgs { backgrounds: true, ..a.clone() }.sections(), (false, false, true));
-        assert_eq!(SyncArgs { contacts: true, ..a }.sections(), (true, false, false));
+    fn sections_default_to_pins() {
+        let a = SyncArgs { host: None, pins: false, backgrounds: false, dry_run: false, max_total_mb: 1 };
+        assert_eq!(a.sections(), (true, false));
+        assert_eq!(SyncArgs { backgrounds: true, ..a.clone() }.sections(), (false, true));
+        assert_eq!(SyncArgs { pins: true, backgrounds: true, ..a }.sections(), (true, true));
     }
 
     #[test]
@@ -873,7 +729,7 @@ mod tests {
         assert_eq!(p.order, ["group:X", "mailto:bob@example.com"]);
         assert!(!p.changes(&current));
         assert_eq!(p.state_ids, last, "still the Mac's for the next sync");
-        let t = summary_text(&Summary { host: "m".into(), dry_run: false, contacts: None, pins: Some(Section::Ok(p)), backgrounds: None }, false);
+        let t = summary_text(&Summary { host: "m".into(), dry_run: false, pins: Some(Section::Ok(p)), backgrounds: None }, false);
         assert!(t.contains("group:X  kept (could not be mapped this time)"), "{t}");
         // the lookup failed on the Mac: same, and reported
         let m = MacPins { pins: vec!["bob@example.com".into()], pin_chats: vec![], lookup_error: Some("database is locked".into()) };
@@ -913,63 +769,6 @@ mod tests {
         assert!(read_pins_file(&stage, "../outside.plist").is_err());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn contacts_replace_only_mac_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let staged = tmp.path().join("stage/contacts");
-        let dir = tmp.path().join("kpeoplevcard");
-        std::fs::create_dir_all(&staged).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(staged.join("mac-A.vcf"), "A2").unwrap();
-        std::fs::write(staged.join("mac-B.vcf"), "B").unwrap();
-        std::fs::write(staged.join("mac-C_x.vcf"), "C").unwrap();
-        std::fs::write(staged.join("notes.txt"), "ignored").unwrap();
-        std::fs::write(staged.join("mac-bad name.vcf"), "ignored").unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", staged.join("mac-L.vcf")).unwrap();
-        std::fs::write(dir.join("mac-A.vcf"), "A1").unwrap();
-        std::fs::write(dir.join("mac-B.vcf"), "B").unwrap();
-        std::fs::write(dir.join("mac-old.vcf"), "gone").unwrap();
-        std::fs::write(dir.join("kdeconnect-1.vcf"), "phone").unwrap();
-
-        let dry = apply_contacts(&staged, &dir, 1, true).unwrap();
-        assert_eq!((dry.received, dry.written, dry.unchanged, dry.removed), (3, 2, 1, 1));
-        assert_eq!(std::fs::read_to_string(dir.join("mac-A.vcf")).unwrap(), "A1", "dry run writes nothing");
-        assert!(dir.join("mac-old.vcf").exists());
-
-        let b_mtime = std::fs::metadata(dir.join("mac-B.vcf")).unwrap().modified().unwrap();
-        let o = apply_contacts(&staged, &dir, 1, false).unwrap();
-        assert_eq!(o, ContactsOutcome { dir: dir.display().to_string(), ..dry });
-        assert_eq!(std::fs::read_to_string(dir.join("mac-A.vcf")).unwrap(), "A2");
-        assert_eq!(std::fs::read_to_string(dir.join("mac-C_x.vcf")).unwrap(), "C");
-        assert_eq!(std::fs::metadata(dir.join("mac-B.vcf")).unwrap().modified().unwrap(), b_mtime, "unchanged file left alone");
-        assert!(!dir.join("mac-old.vcf").exists());
-        assert!(!dir.join("mac-L.vcf").exists(), "symlinks are not followed");
-        assert_eq!(std::fs::read_to_string(dir.join("kdeconnect-1.vcf")).unwrap(), "phone", "other vCards untouched");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(dir.join("mac-A.vcf")).unwrap().permissions().mode() & 0o777, 0o600);
-
-        // nothing received: nothing changes
-        let empty = tmp.path().join("empty");
-        std::fs::create_dir_all(&empty).unwrap();
-        assert!(apply_contacts(&empty, &dir, 0, false).unwrap_err().to_string().contains("left unchanged"));
-        assert!(apply_contacts(&tmp.path().join("missing"), &dir, 0, false).is_err());
-        assert!(dir.join("mac-A.vcf").exists());
-        // a `contacts` symlinked to a directory outside the stage is refused
-        let outside = tmp.path().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("mac-Z.vcf"), "Z").unwrap();
-        let linked = tmp.path().join("stage2/contacts");
-        std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&outside, &linked).unwrap();
-        assert!(apply_contacts(&linked, &dir, 0, false).unwrap_err().to_string().contains("not a plain directory"));
-        assert!(!dir.join("mac-Z.vcf").exists() && dir.join("mac-A.vcf").exists());
-        // a new folder is created
-        let fresh = tmp.path().join("new/kpeoplevcard");
-        assert_eq!(apply_contacts(&staged, &fresh, 0, false).unwrap().written, 3);
-        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o700);
-    }
-
     #[test]
     fn host_choice() {
         assert_eq!(pick_host(Some("mac.local".into()), Some("other".into()), None).unwrap(), "mac.local");
@@ -985,15 +784,12 @@ mod tests {
         let s = Summary {
             host: "mac".into(),
             dry_run: false,
-            contacts: Some(Section::Ok(ContactsOutcome { dir: "/d".into(), received: 3, photos: 1, written: 2, unchanged: 1, removed: 0 })),
             pins: Some(Section::Err { error: "no Full Disk Access".into() }),
             backgrounds: None,
         };
         let t = summary_text(&s, false);
-        assert!(t.contains("contacts     3 from the Mac (1 with photos): 2 written, 1 unchanged, 0 removed; /d"), "{t}");
         assert!(t.contains("pins         failed: no Full Disk Access"), "{t}");
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["contacts"]["written"], 2);
         assert_eq!(v["pins"]["error"], "no Full Disk Access");
         assert!(v.get("backgrounds").is_none());
     }

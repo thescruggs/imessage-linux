@@ -109,6 +109,10 @@ fails during an interactive `Login`, the call fails at once with
 | `SendFileAs` | `chat_id_or_empty s`, `participants_json s`, `path s`, `mime s`, `service s` | `s` | `SendFile` over a chosen service (`"sms"` = MMS). |
 | `EnableSmsForwarding` | `enable b` | `s` | Ask the iPhone to relay text messages to this device (`true`), or stop (`false`). Returns [SmsForwarding](#smsforwarding) (`requested` / `off`); the user then turns this device on in the iPhone's Settings > Messages > Text Message Forwarding, and the state becomes `active` (`SmsForwardingChanged`). `InvalidInput` if no relay number is configured; `Unsupported` if no device of the account carries it. Slow (IDS round trips): 120 s timeout. |
 | `GetSmsForwarding` | — | `s` | [SmsForwarding](#smsforwarding) JSON (also `GetStatus.sms`). |
+| `SetContactsAccount` | `apple_id s`, `app_password s` | `s` | Turn on the [iCloud contacts sync](#icloud-contacts-sync) for this Apple ID with an **app-specific password** (appleid.apple.com > Sign-In and Security > App-Specific Passwords; the normal Apple ID password is refused). The daemon checks it against iCloud's CardDAV server first: `Login` if iCloud refuses it, `Transient` if iCloud cannot be reached, `Protocol` for an unexpected reply, `InvalidInput` if either is empty; nothing is saved then. Otherwise it saves the account (sealed with the state key in `$STATE_DIR/contacts-account.enc`), replacing any earlier one, and syncs. Returns [ContactsSyncStatus](#contactssyncstatus); a sync failing after the check is reported in it (`last_error`), the account stays. Slow (the first sync downloads every card and photo): 600 s timeout. |
+| `ClearContactsAccount` | `remove_cards b` | `s` | Stop syncing and forget the account. `remove_cards = true` also deletes the synced `icloud-*.vcf` files and the record of them (other vCards are not touched). Returns [ContactsSyncStatus](#contactssyncstatus) (`account: null`). Fine without an account. |
+| `SyncContacts` | — | `s` | Sync the iCloud contacts now (waits for a sync already running, then runs another). Returns [ContactsSyncStatus](#contactssyncstatus). `NotFound` without an account; a failed sync is returned as its error (`Login` when iCloud refused the password: automatic syncs then stop until `SetContactsAccount`; `Transient`; `Protocol`) and also recorded in `last_error`. 600 s timeout. |
+| `GetContactsSync` | — | `s` | [ContactsSyncStatus](#contactssyncstatus) JSON (also `GetStatus.contacts_sync`). |
 | `Reregister` | — | `s` | Register with IDS again now and return the new [`registration`](#getstatus) JSON (as `GetStatus.registration`); picks up a handle the account gained (e.g. the phone number an iPhone linked). rustpush skips it when the identity was (re)generated less than 15 s ago (then the current registration comes back). `NotLoggedIn` without an account. Slow: 120 s timeout. |
 | `React` | `chat_id s`, `message_id s`, `kind s`, `remove b` | — | `kind`: `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, `emoji:<emoji>` or a bare emoji. Stored and announced with `MessageUpdated`. `Unsupported` on a text message (SMS), like `Edit` and `Unsend`. |
 | `Edit` | `chat_id s`, `message_id s`, `text s` | — | Own messages only (`InvalidInput` otherwise). `MessageUpdated` with `edited: true`. |
@@ -145,6 +149,7 @@ fails during an interactive `Login`, the call fails at once with
 | `BackgroundError` | `message s` | Background problems not tied to a method call (registration rejected, state save failed, task restarted, events dropped — resync). Method failures are D-Bus errors instead (below). |
 | `SmsForwardingChanged` | `state_json s` | Text Message Forwarding changed state ([SmsForwarding](#smsforwarding)): requested, confirmed by the iPhone / first relayed text (`active`), turned off on the iPhone, or an error. |
 | `HandleProfileUpdated` | `handle s`, `profile_json s` | A contact's shared name / photo was fetched or changed ([HandleProfile](#handleprofile)), or `null`: they stopped sharing. Followed by `ChatUpdated` for every chat with that participant (their `profile` in it changed). |
+| `ContactsSyncChanged` | `status_json s` | The iCloud contacts sync started or finished a sync, or its account was set or cleared ([ContactsSyncStatus](#contactssyncstatus)). A sync that changed cards is followed by the contact links being refreshed (see docs/DAEMON.md). |
 
 Ordering: engine event → SQLite → signal, one event at a time, so a client
 that reacts to a signal by calling `ListMessages`/`GetChat` always sees the
@@ -169,7 +174,7 @@ change. If the daemon's own event queue overflows it emits
 | `Unsupported` | not implemented by the engine |
 | `State` / `StateKeyMismatch` | engine state storage problems |
 | `Protocol` | other engine / rustpush failure |
-| `NotFound` | no such chat / message / attachment in the store |
+| `NotFound` | no such chat / message / attachment in the store; no iCloud contacts account (`SyncContacts`) |
 | `Store` | SQLite / file system failure |
 
 ## JSON payloads
@@ -186,7 +191,11 @@ change. If the daemon's own event queue overflows it emits
   "unread": 3,
   "profiles": {"state": "ready"},
   "sms": {"state": "active", "number": "tel:+15551234567", "since": 1700000100000},
-  "mac_host": "mac.local"
+  "mac_host": "mac.local",
+  "contacts_sync": {"account": "me@example.com", "syncing": false, "interval_minutes": 60, "last_sync": 1700000200000,
+                    "last": {"dir": "/home/me/.local/share/kpeoplevcard", "cards": 312, "photos": 40,
+                             "written": 0, "unchanged": 312, "removed": 0, "removed_mac": 0},
+                    "last_error": null, "auth_failed": false}
 }
 ```
 
@@ -194,9 +203,12 @@ change. If the daemon's own event queue overflows it emits
 
 `mac_host` is the daemon's `mac_host` setting (docs/DAEMON.md,
 Configuration): the ssh destination of the user's Mac that `imsg
-sync-mac` (and the kmessages "Sync from Mac" button) copies contacts and
-pins from when no host is given; `null` when unset (older daemons omit
+sync-mac` (and the kmessages "Sync from Mac" button) copies pins (and
+backgrounds) from when no host is given; `null` when unset (older daemons omit
 it). The daemon itself never connects to it.
+
+`contacts_sync` is the [iCloud contacts sync](#contactssyncstatus)
+(older daemons omit it).
 
 `profiles` says whether contacts' shared names and photos can be fetched
 (iCloud / CloudKit access): `{"state": "ready"}`, `"pending"` (not tried
@@ -375,6 +387,64 @@ not on iMessage go out as texts (`SendTextAs` / `SendFileAs` choose
 explicitly). The iPhone confirms each text it sends; a failure turns the
 row's delivery to `failed`. Details: docs/DAEMON.md, "Text Message
 Forwarding".
+
+### ContactsSyncStatus
+
+`GetContactsSync`, `GetStatus.contacts_sync`, the `ContactsSyncChanged`
+signal and the replies of `SetContactsAccount` / `ClearContactsAccount` /
+`SyncContacts`:
+
+```json
+{
+  "account": "me@example.com",
+  "syncing": false,
+  "interval_minutes": 60,
+  "last_sync": 1700000200000,
+  "last": {"dir": "/home/me/.local/share/kpeoplevcard", "cards": 312, "photos": 40,
+           "written": 3, "unchanged": 309, "removed": 1, "removed_mac": 0},
+  "last_error": null,
+  "auth_failed": false
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `account` | the Apple ID whose contacts are synced; `null` = not set up |
+| `syncing` | a sync is running |
+| `interval_minutes` | automatic sync every this many minutes (daemon setting `contacts_sync_minutes`, default 60); `0` = only on request |
+| `last_sync` | ms since epoch of the last successful sync, `null` = never |
+| `last` | what the last successful sync did ([ContactsSyncReport](#contactssyncreport)), `null` = none |
+| `last_error` | why the last sync failed (cleared by a successful one), else `null` |
+| `auth_failed` | iCloud refused the app-specific password (revoked, or not an app-specific one): automatic syncs stop until `SetContactsAccount` |
+
+#### ContactsSyncReport
+
+| Field | Meaning |
+|---|---|
+| `dir` | the vCard folder written to (daemon setting `contacts_dir`) |
+| `cards` | contact cards in iCloud (groups not counted) |
+| `photos` | of those, with a photo |
+| `written` | new or changed files |
+| `unchanged` | files left as they were |
+| `removed` | files of cards no longer in iCloud |
+| `removed_mac` | `mac-*.vcf` cards an earlier `imsg sync-mac` copied from the Mac, removed because iCloud now supplies the address book (the first successful sync) |
+
+#### iCloud contacts sync
+
+The daemon keeps the user's iCloud address book in the vCard folder
+(`contacts_dir`, default `~/.local/share/kpeoplevcard`, which KPeople /
+kmessages and the daemon's contact links read) over CardDAV
+(`contacts.icloud.com`), signed in with an Apple ID and an app-specific
+password, no Mac needed. Each contact is one `icloud-<20 hex>.vcf` file
+(0600); linked photos are fetched and embedded; group cards are skipped;
+other vCards in the folder are left alone. Later syncs fetch only cards
+whose ETag changed (record in `$STATE_DIR/contacts-index.json`). Syncs
+run every `contacts_sync_minutes` (the first one 30 s after startup, or
+later if the last sync is more recent than the interval), after a
+failure again within 15 minutes (not after a refused password), and on
+`SyncContacts`; one at a time. Only Contacts stored in
+iCloud are synced (not Google or other accounts the user's devices may
+also have).
 
 ### HandleProfile
 

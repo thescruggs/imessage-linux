@@ -294,6 +294,18 @@ impl fmt::Debug for Store {
 }
 
 impl Store {
+    /// `plaintext` sealed with the state key, for small secrets kept in
+    /// files beside the store (the iCloud contacts account).
+    pub fn seal_secret(&self, plaintext: &[u8]) -> Vec<u8> {
+        crate::state::seal_bytes(&self.key, plaintext)
+    }
+
+    /// What [`Store::seal_secret`] sealed; `None` if it does not open
+    /// (another state key, or a damaged file).
+    pub fn open_secret(&self, sealed: &[u8]) -> Option<Vec<u8>> {
+        crate::state::open_bytes(&self.key, sealed).ok()
+    }
+
     /// Open (creating / migrating) `dir/messages.db`.
     pub fn open(dir: &Path, key: StateKey) -> StoreResult<Store> {
         crate::state::ensure_private_dir(dir).map_err(|source| StoreError::Io { path: dir.to_path_buf(), source })?;

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use imessage_common::model::{
-    Attachment, AttachmentId, Chat, ChatId, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessageId, MessagePart,
+    Attachment, AttachmentId, Chat, ChatId, ConnectionState, ContactsSyncStatus, DeliveryState, Handle, HandleProfile, Message, MessageId, MessagePart,
     ProfilesStatus, Reaction, ReactionKind, RegistrationState, Service, SmsForwarding,
 };
 use imessage_common::platform::fs as pfs;
@@ -58,6 +58,8 @@ pub enum DaemonSignal {
     HandleProfileUpdated { handle: String, profile: Option<HandleProfile> },
     /// Text Message Forwarding changed state.
     SmsForwardingChanged(SmsForwarding),
+    /// The iCloud contacts sync started, finished or changed account.
+    ContactsSyncChanged(ContactsSyncStatus),
 }
 
 /// What an operation failed with (mapped to D-Bus error names in `dbus.rs`).
@@ -101,6 +103,8 @@ pub struct Status {
     /// The daemon's `mac_host` setting: the Mac's ssh destination for
     /// `imsg sync-mac` (`null` when unset).
     pub mac_host: Option<String>,
+    /// The iCloud contacts sync (`hub/contacts_sync.rs`).
+    pub contacts_sync: ContactsSyncStatus,
 }
 
 /// `LookupHandles` result element.
@@ -272,6 +276,8 @@ pub struct Hub {
     /// One conversation per person (see `hub/links.rs`).
     links: RwLock<Arc<crate::contacts::ContactLinks>>,
     link_source: Mutex<links::LinkSource>,
+    /// The iCloud contacts sync (see `hub/contacts_sync.rs`).
+    contacts_sync: contacts_sync::ContactsSync,
 }
 
 impl Hub {
@@ -294,6 +300,7 @@ impl Hub {
             link_previews: Mutex::new(None),
             links: RwLock::default(),
             link_source: Mutex::default(),
+            contacts_sync: Default::default(),
         })
     }
 
@@ -549,6 +556,7 @@ impl Hub {
             profiles: self.engine.profiles_status().await,
             sms: self.engine.sms_forwarding().await,
             mac_host: self.mac_host.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            contacts_sync: self.contacts_sync_status(),
         }
     }
 
@@ -1301,6 +1309,7 @@ impl Hub {
     }
 }
 
+mod contacts_sync;
 mod import;
 mod links;
 mod profiles;

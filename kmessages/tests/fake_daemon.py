@@ -22,6 +22,11 @@ Text Message Forwarding: ``EnableSmsForwarding`` goes to ``requested``;
 ``SetSms`` sets any state; with it ``active``, SendText to an unreachable
 ``tel:`` chat is stored with ``service: sms``.
 SendText: the text ``__fail__`` fails with ``Error.Transient``.
+iCloud contacts: ``SetContactsAccount`` with the password ``wrong`` fails
+with ``Error.Login``; otherwise (after ``SetContactsSyncDelay`` ms, with
+``syncing`` announced meanwhile) it "syncs" 312 contacts. ``SyncContacts``
+without an account fails with ``Error.NotFound``. ``SetContactsSyncSupported
+false`` plays an older daemon (no ``contacts_sync``, UnknownMethod).
 """
 
 import argparse
@@ -269,6 +274,10 @@ class FakeDaemon(dbus.service.Object):
         self.sms = {"state": "off", "number": "tel:+15555550100", "since": None}
         self.unreachable = set()  # AddSmsChat numbers
         self.mac_host = None  # SetMacHost: GetStatus.mac_host
+        self.contacts = {"account": None, "syncing": False, "interval_minutes": 60, "last_sync": None,
+                         "last": None, "last_error": None, "auth_failed": False}
+        self.contacts_supported = True  # SetContactsSyncSupported
+        self.contacts_delay_ms = 0  # SetContactsSyncDelay
         self.tmp = tempfile.mkdtemp(prefix="kmessages-fake-")
 
     # -- helpers ----------------------------------------------------------
@@ -301,7 +310,8 @@ class FakeDaemon(dbus.service.Object):
                 "unread": self.store.unread_total(),
                 "profiles": {"state": "ready"},
                 "sms": dict(self.sms),
-                "mac_host": self.mac_host}
+                "mac_host": self.mac_host,
+                **({"contacts_sync": dict(self.contacts)} if self.contacts_supported else {})}
 
     def chat(self, cid):
         c = self.store.chats.get(cid)
@@ -455,6 +465,72 @@ class FakeDaemon(dbus.service.Object):
         elif not enable:
             self.set_sms("off", self.sms["number"])
         return dumps(self.sms)
+
+    # -- iCloud contacts sync ------------------------------------------------
+    def require_contacts(self):
+        if not self.contacts_supported:
+            raise dbus.DBusException("No such method", name="org.freedesktop.DBus.Error.UnknownMethod")
+
+    def contacts_changed(self, **fields):
+        self.contacts.update(fields)
+        self.ContactsSyncChanged(dumps(self.contacts))
+
+    def run_contacts_sync(self, reply):
+        """Announce `syncing`, then (after the delay) a finished sync and the reply."""
+        self.contacts_changed(syncing=True)
+
+        def finish():
+            self.contacts_changed(syncing=False, last_sync=int(time.time() * 1000), last_error=None, auth_failed=False,
+                                  last={"dir": os.path.join(self.tmp, "kpeoplevcard"), "cards": 312, "photos": 200,
+                                        "written": 3, "unchanged": 308, "removed": 1, "removed_mac": 0})
+            reply(dumps(self.contacts))
+            return False
+        if self.contacts_delay_ms <= 0:
+            finish()
+        else:
+            GLib.timeout_add(self.contacts_delay_ms, finish)
+
+    @dbus.service.method(IFACE, in_signature="ss", out_signature="s",
+                         async_callbacks=("reply", "error"))
+    def SetContactsAccount(self, apple_id, app_password, reply, error):
+        self.log("SetContactsAccount", apple_id)
+        try:
+            self.require_contacts()
+            if app_password == "wrong":
+                raise Error("Login", "Apple refused the password. Use an app-specific password "
+                                     "(appleid.apple.com > Sign-In and Security), not your Apple ID password.")
+        except dbus.DBusException as e:
+            error(e)
+            return
+        self.contacts_changed(account=str(apple_id), last_error=None, auth_failed=False)
+        self.run_contacts_sync(reply)
+
+    @dbus.service.method(IFACE, in_signature="b", out_signature="s")
+    def ClearContactsAccount(self, remove_cards):
+        self.log("ClearContactsAccount", bool(remove_cards))
+        self.require_contacts()
+        self.contacts_changed(account=None, syncing=False, last_sync=None, last=None, last_error=None, auth_failed=False)
+        return dumps(self.contacts)
+
+    @dbus.service.method(IFACE, in_signature="", out_signature="s",
+                         async_callbacks=("reply", "error"))
+    def SyncContacts(self, reply, error):
+        self.log("SyncContacts")
+        try:
+            self.require_contacts()
+            if not self.contacts["account"]:
+                raise Error("NotFound", "no iCloud contacts account set")
+            if self.contacts["auth_failed"]:
+                raise Error("Login", "Apple refused the app-specific password")
+        except dbus.DBusException as e:
+            error(e)
+            return
+        self.run_contacts_sync(reply)
+
+    @dbus.service.method(IFACE, in_signature="", out_signature="s")
+    def GetContactsSync(self):
+        self.require_contacts()
+        return dumps(self.contacts)
 
     @dbus.service.method(IFACE, in_signature="", out_signature="s")
     def GetSmsForwarding(self):
@@ -717,6 +793,10 @@ class FakeDaemon(dbus.service.Object):
     def SmsForwardingChanged(self, state_json):
         pass
 
+    @dbus.service.signal(IFACE, signature="s")
+    def ContactsSyncChanged(self, status_json):
+        pass
+
     # -- org.imessage.FakeControl (tests only) ------------------------------------
     @dbus.service.method(CTRL, in_signature="sss", out_signature="s")
     def InjectMessage(self, chat_id, sender, text):
@@ -895,6 +975,20 @@ class FakeDaemon(dbus.service.Object):
     def SetMacHost(self, host):
         """`mac_host` in GetStatus ("" = unset)."""
         self.mac_host = str(host) or None
+
+    @dbus.service.method(CTRL, in_signature="b", out_signature="")
+    def SetContactsSyncSupported(self, supported):
+        """False: an older daemon (no `contacts_sync` in GetStatus, contacts methods unknown)."""
+        self.contacts_supported = bool(supported)
+
+    @dbus.service.method(CTRL, in_signature="u", out_signature="")
+    def SetContactsSyncDelay(self, ms):
+        self.contacts_delay_ms = int(ms)
+
+    @dbus.service.method(CTRL, in_signature="s", out_signature="")
+    def SetContactsAuthFailed(self, error):
+        """A background sync whose password Apple refused ("" = clear it)."""
+        self.contacts_changed(auth_failed=bool(error), last_error=str(error) or None)
 
     @dbus.service.method(CTRL, in_signature="as", out_signature="")
     def SetOtherHandles(self, uris):

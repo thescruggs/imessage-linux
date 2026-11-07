@@ -68,8 +68,9 @@ struct Args {
     #[arg(long, env = "IMESSAGED_SMS_RELAY_NUMBER")]
     sms_relay_number: Option<String>,
 
-    /// ssh destination of your Mac (e.g. mac.local) for `imsg sync-mac`;
-    /// only reported in GetStatus, the daemon never connects to it.
+    /// ssh destination of your Mac (e.g. mac.local) for `imsg sync-mac`
+    /// (pins, backgrounds); only reported in GetStatus, the daemon never
+    /// connects to it.
     #[arg(long, env = "IMESSAGED_MAC_HOST")]
     mac_host: Option<String>,
 
@@ -87,10 +88,15 @@ struct Args {
     #[arg(long, env = "IMESSAGED_LINK_CONTACTS")]
     link_contacts: Option<bool>,
 
-    /// The vCard folder for --link-contacts (default
-    /// ~/.local/share/kpeoplevcard, where `imsg sync-mac` writes).
+    /// The vCard folder --link-contacts reads and the iCloud contacts sync
+    /// writes (default ~/.local/share/kpeoplevcard).
     #[arg(long, env = "IMESSAGED_CONTACTS_DIR")]
     contacts_dir: Option<String>,
+
+    /// Sync iCloud contacts every this many minutes once an account is set
+    /// (`imsg contacts login`); 0 = only on request (default 60).
+    #[arg(long, env = "IMESSAGED_CONTACTS_SYNC_MINUTES", value_name = "MINUTES")]
+    contacts_sync_minutes: Option<u32>,
 
     /// Do not serve the D-Bus API (headless / tests). Messages are still
     /// received and stored.
@@ -133,6 +139,7 @@ async fn run(args: Args, state_dir: PathBuf) -> anyhow::Result<()> {
             link_previews: if args.no_link_previews { Some(false) } else { args.link_previews },
             link_contacts: args.link_contacts,
             contacts_dir: args.contacts_dir,
+            contacts_sync_minutes: args.contacts_sync_minutes,
         },
     )?;
 

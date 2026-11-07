@@ -11,6 +11,7 @@
 
 #include <QDBusConnection>
 #include <QDBusMessage>
+#include <QDateTime>
 #include <QObject>
 #include <QSet>
 #include <QUrl>
@@ -53,6 +54,30 @@ class DaemonClient : public QObject
     /// The daemon's own list of the user's other handles (`registration.other_handles`, read-only here).
     /// Messages from them already arrive with `is_from_me`; they also count for isOtherOwnHandle().
     Q_PROPERTY(QStringList daemonOtherHandles READ daemonOtherHandles NOTIFY statusChanged)
+    /// iCloud contacts sync (CardDAV, run by the daemon): the daemon supports it (false = older daemon).
+    Q_PROPERTY(bool contactsSyncAvailable READ isContactsSyncAvailable NOTIFY contactsSyncChanged)
+    /// The Apple ID whose contacts are synced, "" = not set up.
+    Q_PROPERTY(QString contactsAccount READ contactsAccount NOTIFY contactsSyncChanged)
+    /// The daemon is syncing contacts (automatically or on request).
+    Q_PROPERTY(bool contactsSyncing READ isContactsSyncing NOTIFY contactsSyncChanged)
+    /// A setContactsAccount / syncContacts / clearContactsAccount call is waiting for its answer.
+    Q_PROPERTY(bool contactsBusy READ isContactsBusy NOTIFY contactsSyncChanged)
+    /// End of the last successful contacts sync (invalid = never), and as text ("" = never).
+    Q_PROPERTY(QDateTime contactsLastSync READ contactsLastSync NOTIFY contactsSyncChanged)
+    Q_PROPERTY(QString contactsLastSyncText READ contactsLastSyncText NOTIFY contactsSyncChanged)
+    /// What the last successful sync found / did (0 before the first).
+    Q_PROPERTY(int contactsCount READ contactsCount NOTIFY contactsSyncChanged)
+    Q_PROPERTY(int contactsPhotos READ contactsPhotos NOTIFY contactsSyncChanged)
+    Q_PROPERTY(int contactsWritten READ contactsWritten NOTIFY contactsSyncChanged)
+    Q_PROPERTY(int contactsRemoved READ contactsRemoved NOTIFY contactsSyncChanged)
+    /// "312 contacts (3 updated, 1 removed)" for the last sync, "" before the first.
+    Q_PROPERTY(QString contactsSummary READ contactsSummary NOTIFY contactsSyncChanged)
+    /// Why the last contacts sync failed ("" = it did not).
+    Q_PROPERTY(QString contactsLastError READ contactsLastError NOTIFY contactsSyncChanged)
+    /// Apple refused the app-specific password: sign in again.
+    Q_PROPERTY(bool contactsAuthFailed READ isContactsAuthFailed NOTIFY contactsSyncChanged)
+    /// Automatic sync every this many minutes, 0 = only on request.
+    Q_PROPERTY(int contactsSyncInterval READ contactsSyncInterval NOTIFY contactsSyncChanged)
     /// A GetStatus reply has arrived since the daemon (re)appeared, so ownHandles is meaningful.
     Q_PROPERTY(bool statusKnown READ isStatusKnown NOTIFY statusChanged)
     /// Last error not tied to a QML-visible call (activation failure, BackgroundError).
@@ -95,6 +120,24 @@ public:
     static bool sameHandle(const QString &a, const QString &b);
     /// Sent by the user: from here (`is_from_me`) or from one of their other handles.
     bool isFromMyself(const Message &m) const { return m.isFromMe || isOtherOwnHandle(m.sender.uri); }
+    bool isContactsSyncAvailable() const { return m_status.contactsSync.known; }
+    QString contactsAccount() const { return m_status.contactsSync.account; }
+    bool isContactsSyncing() const { return m_status.contactsSync.syncing; }
+    bool isContactsBusy() const { return m_contactsCalls > 0; }
+    QDateTime contactsLastSync() const;
+    QString contactsLastSyncText() const;
+    int contactsCount() const { return m_status.contactsSync.cards; }
+    int contactsPhotos() const { return m_status.contactsSync.photos; }
+    int contactsWritten() const { return m_status.contactsSync.written; }
+    int contactsRemoved() const { return m_status.contactsSync.removed + m_status.contactsSync.removedMac; }
+    QString contactsSummary() const { return contactsSyncSummary(m_status.contactsSync); }
+    QString contactsLastError() const { return m_status.contactsSync.lastError; }
+    bool isContactsAuthFailed() const { return m_status.contactsSync.authFailed; }
+    int contactsSyncInterval() const { return m_status.contactsSync.intervalMinutes; }
+    /// "312 contacts (3 updated, 1 removed)" for `c`'s last sync, "" without one.
+    static QString contactsSyncSummary(const ContactsSync &c);
+    /// The notification text for a failed contacts call (`errorName` as from shortErrorName()).
+    static QString contactsErrorMessage(const QString &errorName, const QString &message);
     bool isStatusKnown() const { return m_statusKnown; }
     QString lastError() const { return m_lastError; }
     const Status &status() const { return m_status; }
@@ -166,6 +209,14 @@ public:
     Q_INVOKABLE void refreshStatus();
     /// Ask the iPhone to relay text messages here (or stop). Emits smsForwardingFinished.
     Q_INVOKABLE void enableSmsForwarding(bool enable);
+    /// Sign the iCloud contacts sync in (Apple ID + app-specific password) and
+    /// run the first sync. Emits contactsSyncFinished("signIn", …).
+    Q_INVOKABLE void setContactsAccount(const QString &appleId, const QString &appPassword);
+    /// Forget the contacts account; `removeCards` also deletes the synced
+    /// contacts. Emits contactsSyncFinished("signOut", …).
+    Q_INVOKABLE void clearContactsAccount(bool removeCards);
+    /// Sync the iCloud contacts now. Emits contactsSyncFinished("sync", …).
+    Q_INVOKABLE void syncContacts();
     /// Ask the bus to start the daemon (D-Bus activation) if it is not running.
     Q_INVOKABLE void ensureStarted();
 
@@ -180,6 +231,7 @@ Q_SIGNALS:
     void statusChanged();
     void lastErrorChanged();
     void otherOwnHandlesChanged();
+    void contactsSyncChanged();
 
     void messageReceived(const QString &chatId, const km::Message &message);
     void messageUpdated(const QString &chatId, const km::Message &message);
@@ -199,6 +251,10 @@ Q_SIGNALS:
     void sendFinished(bool ok, const QString &chatId, const QString &messageId, const QString &errorMessage);
     /// EnableSmsForwarding answered; on failure errorMessage is set.
     void smsForwardingFinished(bool ok, const QString &errorMessage);
+    /// A contacts call answered. `operation`: "signIn", "sync" or "signOut";
+    /// `message` is for a passive notification; `errorName` (short, e.g.
+    /// "Login") is set on failure.
+    void contactsSyncFinished(const QString &operation, bool ok, const QString &errorName, const QString &message);
     /// A fire-and-forget call (react, edit, unsend, markRead, …) failed.
     void operationFailed(const QString &operation, const QString &errorName, const QString &errorMessage);
 
@@ -213,6 +269,7 @@ private Q_SLOTS:
     void onBackgroundError(const QString &message);
     void onHandleProfileUpdated(const QString &handle, const QString &json);
     void onSmsForwardingChanged(const QString &json);
+    void onContactsSyncChanged(const QString &json);
 
 private:
     void call(const QString &method,
@@ -227,6 +284,10 @@ private:
     void setStatus(const Status &status);
     static QString firstString(const QDBusMessage &reply);
     static QString participantsJson(const QStringList &participants);
+    /// Run a contacts method (ContactsSyncStatus reply): applies the reply,
+    /// keeps contactsBusy, ends with contactsSyncFinished(operation, …).
+    void contactsCall(const QString &method, const QVariantList &args, const QString &operation, std::function<QString(const ContactsSync &)> success);
+    void setContactsSync(const ContactsSync &c);
 
     QDBusConnection m_bus;
     QDBusServiceWatcher *m_watcher = nullptr;
@@ -235,6 +296,7 @@ private:
     Status m_status;
     QString m_lastError;
     QStringList m_otherOwnHandles;
+    int m_contactsCalls = 0;
     QStringList m_mine; ///< m_otherOwnHandles + m_status.otherHandles
     void rebuildMine();
 };

@@ -43,6 +43,11 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
     m_contactSuggestions = new ContactSuggestionModel(m_client, m_contacts, this);
     m_recipientPicker = new RecipientPickerModel(m_contactSuggestions, m_suggestions, this);
 
+    // "Sync" covers the iCloud contacts and the Mac's pins.
+    connect(m_macSync, &MacSync::runningChanged, this, &AppController::syncStateChanged);
+    connect(m_macSync, &MacSync::hostChanged, this, &AppController::syncStateChanged);
+    connect(m_client, &DaemonClient::contactsSyncChanged, this, &AppController::syncStateChanged);
+
     // "My other addresses" (the iPhone's number …) count as the user's own.
     m_client->setOtherOwnHandles(m_settings->otherHandleUris());
     connect(m_settings, &AppSettings::changed, this, [this] {
@@ -121,10 +126,10 @@ AppController::AppController(const QDBusConnection &bus, const AppOptions &optio
             showWindow();
             Q_EMIT newMessageRequested();
         });
-        auto *sync = m_tray->contextMenu()->addAction(QIcon::fromTheme(u"view-refresh"_s), i18n("Sync from Mac"));
-        connect(sync, &QAction::triggered, m_macSync, &MacSync::start);
-        connect(m_macSync, &MacSync::runningChanged, sync, [this, sync] {
-            sync->setEnabled(!m_macSync->isRunning());
+        auto *sync = m_tray->contextMenu()->addAction(QIcon::fromTheme(u"view-refresh"_s), i18nc("tray menu: sync contacts and pins", "Sync"));
+        connect(sync, &QAction::triggered, this, &AppController::syncAll);
+        connect(this, &AppController::syncStateChanged, sync, [this, sync] {
+            sync->setEnabled(!isSyncing());
         });
         updateTray();
     }
@@ -525,6 +530,35 @@ void AppController::updateLauncherBadge()
 {
     if (m_launcher) {
         m_launcher->setCount(m_chatList->totalUnread(), m_settings->unreadBadge());
+    }
+}
+
+bool AppController::canSync() const
+{
+    return !m_client->contactsAccount().isEmpty() || !m_macSync->host().isEmpty();
+}
+
+bool AppController::isSyncing() const
+{
+    return m_macSync->isRunning() || m_client->isContactsSyncing() || m_client->isContactsBusy();
+}
+
+void AppController::syncAll()
+{
+    const bool contacts = !m_client->contactsAccount().isEmpty();
+    const bool mac = !m_macSync->host().isEmpty();
+    if (!contacts && !mac) {
+        showWindow();
+        Q_EMIT syncSetupNeeded(!m_client->isAvailable()            ? i18n("imessaged is not running.")
+                                   : m_client->isContactsSyncAvailable() ? i18n("Nothing to sync yet. Sign in to iCloud contacts or enter your Mac in Settings.")
+                                                                         : i18n("Nothing to sync yet. Enter your Mac in Settings."));
+        return;
+    }
+    if (contacts && !m_client->isContactsSyncing() && !m_client->isContactsBusy()) {
+        m_client->syncContacts();
+    }
+    if (mac) {
+        m_macSync->start(); // no-op while running
     }
 }
 

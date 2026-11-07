@@ -57,6 +57,10 @@ class AppController : public QObject
     Q_PROPERTY(km::RecipientPickerModel *recipientPicker READ recipientPicker CONSTANT)
     /// "Sync from Mac" (`imsg sync-mac`).
     Q_PROPERTY(km::MacSync *macSync READ macSync CONSTANT)
+    /// syncAll() has something to do: an iCloud contacts account or a Mac is set up.
+    Q_PROPERTY(bool canSync READ canSync NOTIFY syncStateChanged)
+    /// The Mac sync or an iCloud contacts sync is running.
+    Q_PROPERTY(bool syncing READ isSyncing NOTIFY syncStateChanged)
     Q_PROPERTY(QString currentChatId READ currentChatId WRITE setCurrentChatId NOTIFY currentChatIdChanged)
     Q_PROPERTY(QString currentChatTitle READ currentChatTitle NOTIFY currentChatTitleChanged)
     /// File URL of the current chat's background image, "" = none.
@@ -83,6 +87,8 @@ public:
     ContactSuggestionModel *contactSuggestions() const { return m_contactSuggestions; }
     RecipientPickerModel *recipientPicker() const { return m_recipientPicker; }
     MacSync *macSync() const { return m_macSync; }
+    bool canSync() const;
+    bool isSyncing() const;
     QString currentChatId() const { return m_currentChatId; }
     void setCurrentChatId(const QString &chatId);
     QString currentChatTitle() const;
@@ -108,6 +114,11 @@ public:
     /// Show the window and navigate to `chatId` (QML handles openChatRequested).
     Q_INVOKABLE void openChat(const QString &chatId);
     Q_INVOKABLE void quit();
+    /// "Sync": the iCloud contacts (when an account is set) and the pins from
+    /// the Mac (when a Mac is set). Each reports its own outcome
+    /// (DaemonClient::contactsSyncFinished, MacSync::finished); with neither
+    /// set up, syncSetupNeeded().
+    Q_INVOKABLE void syncAll();
     /// Inline reply from a notification: SendText, then MarkRead on success
     /// (like iOS); a failure gets its own notification.
     void sendReply(const QString &chatId, const QString &text);
@@ -129,6 +140,9 @@ Q_SIGNALS:
     /// Passive message for the UI (failed send, background error …).
     void showPassiveNotification(const QString &message);
     void needsAttentionChanged();
+    void syncStateChanged();
+    /// syncAll() found nothing set up: the UI should point to Settings.
+    void syncSetupNeeded(const QString &message);
     /// The daemon needs the user (`key`: the connection state, or "background" for a BackgroundError);
     /// emitted when the notification is due, even when sending notifications is disabled.
     void connectionProblemNotified(const QString &key, const QString &text);

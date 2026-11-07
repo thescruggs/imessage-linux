@@ -24,7 +24,7 @@
 //!                     # messages (Text Message Forwarding); default: the first
 //!                     # phone number in other_handles
 //! mac_host          = "mac.local"                  # ssh destination of your Mac for
-//!                     # `imsg sync-mac` (contacts, pins); only reported
+//!                     # `imsg sync-mac` (pins, backgrounds); only reported
 //!                     # in GetStatus, the daemon never connects to it
 //! link_previews     = true                         # fetch a preview (title, image) of the first
 //!                     # link in an iMessage you send, as Messages does; the
@@ -32,8 +32,10 @@
 //! link_contacts     = true                         # one conversation per person: the email
 //!                     # addresses and phone numbers on one contact card share
 //!                     # a chat (as on the iPhone); see crate::contacts
-//! contacts_dir      = "~/.local/share/kpeoplevcard" # the vCards for link_contacts (what
-//!                     # `imsg sync-mac` writes); this is the default
+//! contacts_dir      = "~/.local/share/kpeoplevcard" # the vCard folder: link_contacts reads
+//!                     # it, the iCloud contacts sync writes it; this is the default
+//! contacts_sync_minutes = 60                       # sync iCloud contacts this often once an
+//!                     # account is set (`imsg contacts login`); 0 = only on request
 //! ```
 //!
 //! **Logging and privacy.** The default filter ([`DEFAULT_LOG_LEVEL`]) keeps
@@ -60,6 +62,8 @@ pub use imessage_common::paths::{HWCONFIG_FILE, default_state_dir};
 
 /// Default remote anisette v3 server (omnisette's `DEFAULT_ANISETTE_URL_V3`).
 pub const DEFAULT_ANISETTE_URL: &str = "https://ani.sidestore.io";
+/// `contacts_sync_minutes` when unset.
+pub const DEFAULT_CONTACTS_SYNC_MINUTES: u32 = 60;
 /// Crates that log secrets / message contents below `warn` (see module doc).
 pub const QUIET_CRATES: [&str; 4] = ["rustpush", "icloud_auth", "omnisette", "keystore"];
 /// `info` for the daemon, `warn` for [`QUIET_CRATES`].
@@ -176,6 +180,7 @@ pub struct FileConfig {
     pub link_previews: Option<bool>,
     pub link_contacts: Option<bool>,
     pub contacts_dir: Option<String>,
+    pub contacts_sync_minutes: Option<u32>,
 }
 
 impl FileConfig {
@@ -210,6 +215,7 @@ pub struct Overrides {
     pub link_previews: Option<bool>,
     pub link_contacts: Option<bool>,
     pub contacts_dir: Option<String>,
+    pub contacts_sync_minutes: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,8 +257,12 @@ pub struct DaemonConfig {
     /// Keep the one-to-one chats with the addresses on one contact card
     /// (`contacts_dir`) as one conversation (see `crate::contacts`).
     pub link_contacts: bool,
-    /// The vCard folder for `link_contacts`.
+    /// The vCard folder: `link_contacts` reads it, the iCloud contacts
+    /// sync writes it.
     pub contacts_dir: PathBuf,
+    /// Sync iCloud contacts this often (minutes) once an account is set;
+    /// 0 = only on request (`SyncContacts`).
+    pub contacts_sync_minutes: u32,
 }
 
 impl DaemonConfig {
@@ -272,6 +282,7 @@ impl DaemonConfig {
             link_previews: true,
             link_contacts: true,
             contacts_dir: imessage_common::paths::kpeople_vcard_dir(),
+            contacts_sync_minutes: DEFAULT_CONTACTS_SYNC_MINUTES,
         }
     }
 
@@ -331,6 +342,9 @@ impl DaemonConfig {
                     None => PathBuf::from(v),
                 };
             }
+        }
+        if let Some(v) = over.contacts_sync_minutes.or(file.contacts_sync_minutes) {
+            c.contacts_sync_minutes = v;
         }
         c
     }
@@ -460,6 +474,7 @@ mod tests {
             link_previews: None,
             link_contacts: None,
             contacts_dir: None,
+            contacts_sync_minutes: None,
         };
         let c = DaemonConfig::resolve("/s".into(), f, o);
         assert_eq!(c.anisette_url, "http://localhost:6969");

@@ -513,7 +513,7 @@ fn service_checks(state_dir: &Path) -> Vec<DoctorLine> {
 /// suggestion from the host the ssh anisette command reaches (pure).
 pub fn mac_host_line(mac_host: Option<&str>, anisette_host: Option<&str>, config: &Path) -> Option<DoctorLine> {
     match (mac_host, anisette_host) {
-        (Some(h), _) => Some(line("mac host", Level::Ok, format!("{h} (`imsg sync-mac` syncs contacts and pins from it)"))),
+        (Some(h), _) => Some(line("mac host", Level::Ok, format!("{h} (`imsg sync-mac` syncs pins from it)"))),
         (None, Some(a)) => Some(line(
             "mac host",
             Level::Warn,

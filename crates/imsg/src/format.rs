@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use imessage_common::model::{
-    Chat, ConnectionState, DeliveryState, Handle, HandleProfile, Message, MessagePart, ProfilesState, ProfilesStatus, Reaction, ReactionKind, Service, SmsForwarding, SmsState,
+    Chat, ConnectionState, ContactsSyncStatus, DeliveryState, Handle, HandleProfile, Message, MessagePart, ProfilesState, ProfilesStatus, Reaction, ReactionKind, Service, SmsForwarding, SmsState,
 };
 
 use crate::client::{Reachability, Status};
@@ -467,6 +467,9 @@ pub fn status_table(s: &Status, st: Style) -> String {
     if let Some(sms) = &s.sms {
         rows.push(("sms", sms_state_colored(sms, st)));
     }
+    if let Some(c) = &s.contacts_sync {
+        rows.push(("contacts", contacts_sync_text(c, st)));
+    }
     if let Some(h) = &s.mac_host {
         rows.push(("mac host", h.clone()));
     }
@@ -500,6 +503,58 @@ pub fn sms_table(s: &SmsForwarding, st: Style) -> String {
     rows.iter().map(|(k, v)| format!("{}  {v}\n", st.bold(&pad(k, w)))).collect()
 }
 
+/// One line for `imsg status`: `me@icloud.com, 312 contacts, synced …`.
+pub fn contacts_sync_text(s: &ContactsSyncStatus, st: Style) -> String {
+    let Some(acct) = &s.account else {
+        return match &s.last_error {
+            Some(e) => st.yellow(&format!("off ({e})")),
+            None => "off (`imsg contacts login`)".into(),
+        };
+    };
+    let mut t = acct.clone();
+    if let Some(r) = &s.last {
+        let _ = write!(t, ", {} contacts", r.cards);
+    }
+    if s.syncing {
+        t.push_str(", syncing");
+    } else if let Some(at) = s.last_sync {
+        let _ = write!(t, ", synced {}", abs_time_secs(at / 1000));
+    }
+    match &s.last_error {
+        Some(e) => st.yellow(&format!("{t}; last sync failed: {e}")),
+        None => t,
+    }
+}
+
+/// `imsg contacts status` (and after login / sync / logout).
+pub fn contacts_sync_table(s: &ContactsSyncStatus, st: Style) -> String {
+    let mut rows: Vec<(&str, String)> = vec![("account", s.account.clone().unwrap_or_else(|| "- (`imsg contacts login`)".into()))];
+    if s.syncing {
+        rows.push(("state", "syncing".into()));
+    }
+    rows.push(("last sync", s.last_sync.map(|t| abs_time_secs(t / 1000)).unwrap_or_else(|| "never".into())));
+    if let Some(r) = &s.last {
+        rows.push(("contacts", format!("{} ({} with photos)", r.cards, r.photos)));
+        let mut changes = format!("{} written, {} unchanged, {} removed", r.written, r.unchanged, r.removed);
+        if r.removed_mac > 0 {
+            let _ = write!(changes, ", {} Mac copies replaced", r.removed_mac);
+        }
+        rows.push(("last changes", changes));
+        rows.push(("folder", r.dir.clone()));
+    }
+    if let Some(e) = &s.last_error {
+        rows.push(("error", st.yellow(e)));
+    }
+    if s.auth_failed {
+        rows.push(("hint", "iCloud refused the password: create a new app-specific password and run `imsg contacts login`".into()));
+    }
+    if s.account.is_some() {
+        rows.push(("auto sync", if s.interval_minutes == 0 { "off (contacts_sync_minutes = 0)".into() } else { format!("every {} min", s.interval_minutes) }));
+    }
+    let w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    rows.iter().map(|(k, v)| format!("{}  {v}\n", st.bold(&pad(k, w)))).collect()
+}
+
 pub fn lookup_table(rs: &[Reachability], st: Style) -> String {
     rs.iter()
         .map(|r| {
@@ -514,7 +569,7 @@ pub fn lookup_table(rs: &[Reachability], st: Style) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use imessage_common::model::{AttachmentId, ChatId, MessageId, RegistrationState};
+    use imessage_common::model::{AttachmentId, ChatId, ContactsSyncReport, MessageId, RegistrationState};
 
     fn now() -> DateTime<Utc> {
         // Wed 2026-10-14 12:00:00 UTC
@@ -703,6 +758,26 @@ mod tests {
     }
 
     #[test]
+    fn contacts_sync_rendering() {
+        let mut c = ContactsSyncStatus {
+            account: Some("me@example.com".into()),
+            interval_minutes: 60,
+            last: Some(ContactsSyncReport { dir: "/c".into(), cards: 312, photos: 40, written: 3, unchanged: 309, removed: 1, removed_mac: 0 }),
+            ..Default::default()
+        };
+        assert_eq!(contacts_sync_text(&c, Style::PLAIN), "me@example.com, 312 contacts");
+        let t = contacts_sync_table(&c, Style::PLAIN);
+        assert!(t.contains("contacts      312 (40 with photos)"), "{t}");
+        assert!(t.contains("last changes  3 written, 309 unchanged, 1 removed\n"), "{t}");
+        assert!(t.contains("auto sync     every 60 min"), "{t}");
+        assert!(t.contains("last sync     never"), "{t}");
+        c.last_error = Some("refused".into());
+        c.auth_failed = true;
+        assert!(contacts_sync_text(&c, Style::PLAIN).ends_with("; last sync failed: refused"));
+        assert!(contacts_sync_table(&c, Style::PLAIN).contains("hint          iCloud refused the password"));
+    }
+
+    #[test]
     fn sizes() {
         assert_eq!(size(10), "10 B");
         assert_eq!(size(183422), "179.1 KB");
@@ -720,8 +795,10 @@ mod tests {
             profiles: Some(ProfilesStatus { state: ProfilesState::NeedsLogin, detail: Some("Apple wants a fresh sign-in for iCloud".into()) }),
             sms: Some(SmsForwarding { state: SmsState::Active, number: Some("tel:+15555550100".into()), since: None, detail: None }),
             mac_host: Some("bebop.local".into()),
+            contacts_sync: Some(ContactsSyncStatus::default()),
         };
         let t = status_table(&s, Style::PLAIN);
+        assert!(t.contains("contacts    off (`imsg contacts login`)"), "{t}");
         assert!(t.contains("profiles    needs `imsg login` (Apple wants a fresh sign-in for iCloud)"), "{t}");
         assert!(t.contains("connection  needs_login"), "{t}");
         assert!(t.contains("sms         active (via +15555550100)"), "{t}");

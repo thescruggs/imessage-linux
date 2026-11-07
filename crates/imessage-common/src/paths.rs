@@ -93,8 +93,8 @@ pub fn data_dir() -> PathBuf {
     data_home().join("imessage-linux")
 }
 
-/// Where KPeople (kmessages' contacts) reads vCards from and `imsg
-/// sync-mac` writes the Mac's: `${XDG_DATA_HOME:-~/.local/share}/kpeoplevcard`
+/// Where KPeople (kmessages' contacts) reads vCards from and imessaged
+/// writes the iCloud contacts it syncs: `${XDG_DATA_HOME:-~/.local/share}/kpeoplevcard`
 /// (Windows: `%LOCALAPPDATA%\kpeoplevcard`).
 pub fn kpeople_vcard_dir() -> PathBuf {
     data_home().join("kpeoplevcard")

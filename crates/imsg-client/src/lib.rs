@@ -13,7 +13,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use imessage_common::model::{Chat, Message, RegistrationState};
+use imessage_common::model::{Chat, ContactsSyncStatus, Message, RegistrationState};
 use serde::de::DeserializeOwned;
 use zbus::DBusError as _;
 use zbus::proxy;
@@ -173,6 +173,10 @@ pub trait Daemon1 {
     fn enable_sms_forwarding(&self, enable: bool) -> zbus::Result<String>;
     fn get_sms_forwarding(&self) -> zbus::Result<String>;
     fn reregister(&self) -> zbus::Result<String>;
+    fn set_contacts_account(&self, apple_id: &str, app_password: &str) -> zbus::Result<String>;
+    fn clear_contacts_account(&self, remove_cards: bool) -> zbus::Result<String>;
+    fn sync_contacts(&self) -> zbus::Result<String>;
+    fn get_contacts_sync(&self) -> zbus::Result<String>;
     fn react(&self, chat_id: &str, message_id: &str, kind: &str, remove: bool) -> zbus::Result<()>;
     fn edit(&self, chat_id: &str, message_id: &str, text: &str) -> zbus::Result<()>;
     fn unsend(&self, chat_id: &str, message_id: &str) -> zbus::Result<()>;
@@ -214,6 +218,8 @@ pub trait Daemon1 {
     fn handle_profile_updated(&self, handle: String, profile_json: String) -> zbus::Result<()>;
     #[zbus(signal)]
     fn sms_forwarding_changed(&self, state_json: String) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn contacts_sync_changed(&self, status_json: String) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +316,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// anisette command alone may take 30 s, then GSA / IDS round trips, or an
 /// upload). Same value as kmessages' `LongTimeoutMs`.
 pub const LONG_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// An iCloud contacts sync: the first one of a big address book with
+/// photos can take minutes.
+pub const CONTACTS_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Await a slow daemon call for at most [`LONG_CALL_TIMEOUT`].
 async fn long_call<T>(what: &str, fut: impl std::future::Future<Output = zbus::Result<T>>) -> Result<T> {
@@ -483,6 +492,28 @@ impl Client {
     /// `Reregister`: register with iMessage again now.
     pub async fn reregister(&self) -> Result<Json<RegistrationState>> {
         parse("registration", long_call("registering", self.proxy.reregister()).await?)
+    }
+
+    /// `SetContactsAccount`: check the Apple ID / app-specific password
+    /// against iCloud, save them, sync.
+    pub async fn set_contacts_account(&self, apple_id: &str, app_password: &str) -> Result<Json<ContactsSyncStatus>> {
+        parse(
+            "contacts sync",
+            long_call_within(CONTACTS_SYNC_TIMEOUT, "the first iCloud contacts sync", self.proxy.set_contacts_account(apple_id, app_password)).await?,
+        )
+    }
+
+    pub async fn clear_contacts_account(&self, remove_cards: bool) -> Result<Json<ContactsSyncStatus>> {
+        parse("contacts sync", self.proxy.clear_contacts_account(remove_cards).await.map_err(map_zbus)?)
+    }
+
+    /// `SyncContacts`: sync the iCloud contacts now.
+    pub async fn sync_contacts(&self) -> Result<Json<ContactsSyncStatus>> {
+        parse("contacts sync", long_call_within(CONTACTS_SYNC_TIMEOUT, "the iCloud contacts sync", self.proxy.sync_contacts()).await?)
+    }
+
+    pub async fn contacts_sync(&self) -> Result<Json<ContactsSyncStatus>> {
+        parse("contacts sync", self.proxy.get_contacts_sync().await.map_err(map_zbus)?)
     }
 
     pub async fn sms_forwarding(&self) -> Result<Json<imessage_common::model::SmsForwarding>> {

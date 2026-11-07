@@ -1,6 +1,7 @@
 //! imessaged library half (so integration tests can reach the modules).
 
 pub mod background;
+pub mod carddav;
 pub mod config;
 pub mod contacts;
 pub mod daemon;

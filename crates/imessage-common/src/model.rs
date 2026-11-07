@@ -718,6 +718,55 @@ impl SmsForwarding {
     }
 }
 
+/// What one iCloud contacts sync did (CardDAV, `SyncContacts`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ContactsSyncReport {
+    /// The vCard folder written to.
+    pub dir: String,
+    /// Contact cards in iCloud (groups not counted).
+    pub cards: u32,
+    /// Of those, with a photo.
+    #[serde(default)]
+    pub photos: u32,
+    /// New or changed files.
+    pub written: u32,
+    pub unchanged: u32,
+    /// Files of cards no longer in iCloud.
+    pub removed: u32,
+    /// Cards an earlier `imsg sync-mac` copied from the Mac (`mac-*.vcf`),
+    /// removed because iCloud now supplies the address book.
+    #[serde(default)]
+    pub removed_mac: u32,
+}
+
+/// The iCloud contacts sync (`GetContactsSync`, `GetStatus.contacts_sync`,
+/// signal `ContactsSyncChanged`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ContactsSyncStatus {
+    /// The Apple ID whose contacts are synced; `None` = not set up.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// A sync is running.
+    #[serde(default)]
+    pub syncing: bool,
+    /// Automatic sync every this many minutes; 0 = only on request.
+    #[serde(default)]
+    pub interval_minutes: u32,
+    /// ms since epoch of the last successful sync.
+    #[serde(default)]
+    pub last_sync: Option<u64>,
+    /// What the last successful sync did.
+    #[serde(default)]
+    pub last: Option<ContactsSyncReport>,
+    /// Why the last sync failed (cleared by a successful one).
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// Apple refused the app-specific password (revoked, or not an
+    /// app-specific one): automatic syncs stop until it is set again.
+    #[serde(default)]
+    pub auth_failed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

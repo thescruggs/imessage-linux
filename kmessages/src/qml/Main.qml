@@ -162,6 +162,13 @@ Kirigami.ApplicationWindow {
     }
 
     Connections {
+        target: App
+        function onSyncSetupNeeded(message: string) {
+            root.showPassiveNotification(message, "long", i18n("Open Settings"), () => root.showSettings());
+        }
+    }
+
+    Connections {
         target: App.daemon
         function onTwoFactorRequired() {
             if (!loginDialog.opened || loginDialog.step !== 1) {
@@ -170,6 +177,9 @@ Kirigami.ApplicationWindow {
         }
         function onBackgroundError(message: string) {
             root.showPassiveNotification(message, "long");
+        }
+        function onContactsSyncFinished(operation: string, ok: bool, errorName: string, message: string) {
+            root.showPassiveNotification(message, ok ? "short" : "long");
         }
     }
 

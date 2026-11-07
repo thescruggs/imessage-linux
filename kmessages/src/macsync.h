@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: SSPL-1.0
 //
-// "Sync from Mac": runs `imsg sync-mac --json` (contacts and pins from the
-// user's Mac over ssh, docs/CLI.md) and turns its JSON summary into one line
-// for a passive notification. Contacts land in ~/.local/share/kpeoplevcard,
-// which KPeople watches; pins arrive from the daemon as ChatUpdated.
+// "Sync from Mac": runs `imsg sync-mac --json` (pinned conversations and
+// chat backgrounds from the user's Mac over ssh, docs/CLI.md) and turns its
+// JSON summary into one line for a passive notification. Pins arrive from
+// the daemon as ChatUpdated. (Contacts come from iCloud instead: the daemon
+// syncs them itself, DaemonClient::syncContacts().)
 #pragma once
 
 #include <KSharedConfig>

@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ConnectionState, Handle, Message, ProfilesStatus, RegistrationState, Service, SmsForwarding};
+use crate::model::{ConnectionState, ContactsSyncStatus, Handle, Message, ProfilesStatus, RegistrationState, Service, SmsForwarding};
 
 /// `GetStatus`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +25,9 @@ pub struct Status {
     /// do not report it.
     #[serde(default)]
     pub mac_host: Option<String>,
+    /// The iCloud contacts sync; older daemons do not report it.
+    #[serde(default)]
+    pub contacts_sync: Option<ContactsSyncStatus>,
 }
 
 /// `ListMessages`.

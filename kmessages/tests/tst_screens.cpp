@@ -1416,7 +1416,6 @@ if [ "$FAKE_IMSG_MODE" = fail ]; then
     exit 1
 fi
 echo '{"host": "mac.local", "dry_run": false,'
-echo ' "contacts": {"dir": "/tmp/x", "received": 312, "photos": 200, "written": 3, "unchanged": 308, "removed": 1},'
 echo ' "pins": {"mac": [{"pin": "a", "chat_id": "mailto:a@x", "result": "pinned"}, {"pin": "b", "chat_id": "mailto:b@x", "result": "pinned"},'
 echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"}], "order": [], "kept_local": [], "unpin": []}}'
 )SH");
@@ -1434,17 +1433,17 @@ echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"
         QTRY_COMPARE_WITH_TIMEOUT(sync->host(), u"mac.local"_s, Timeout);
 
         QQuickItem *button = nullptr;
-        QTRY_VERIFY_WITH_TIMEOUT((button = visibleItem(u"syncFromMacButton"_s)), Timeout);
-        const auto busyItems = button->findChildren<QQuickItem *>(u"macSyncBusy"_s);
+        QTRY_VERIFY_WITH_TIMEOUT((button = visibleItem(u"syncButton"_s)), Timeout);
+        const auto busyItems = button->findChildren<QQuickItem *>(u"syncBusy"_s);
         QCOMPARE(busyItems.size(), 1);
         auto *busy = busyItems.first();
         QVERIFY(button->isEnabled());
         QVERIFY(!busy->isVisible());
         QVERIFY(sync->lastSyncText().isEmpty());
-        auto *action = m_window->findChild<QObject *>(u"syncFromMacAction"_s);
+        auto *action = m_window->findChild<QObject *>(u"syncAction"_s);
         QVERIFY(action);
-        QVERIFY(action->property("tooltip").toString().contains(u"mac.local"_s));
-        QVERIFY(action->property("tooltip").toString().contains(u"Not synced yet"_s));
+        QCOMPARE(action->property("tooltip").toString(), u"Pinned conversations from mac.local"_s); // no iCloud contacts account
+        QVERIFY(m_controller->canSync());
 
         // Success.
         QSignalSpy finished(sync, &MacSync::finished);
@@ -1456,14 +1455,15 @@ echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"
         QVERIFY(action->property("tooltip").toString().contains(u"Click to stop"_s));
         shoot(u"sync-from-mac"_s);
         QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, Timeout);
-        const QString summary = u"Synced from mac.local: 312 contacts (3 updated, 1 removed), 3 pins"_s;
+        const QString summary = u"Synced from mac.local: 3 pins"_s;
         QCOMPARE(finished.first().at(0).toBool(), true);
         QCOMPARE(finished.first().at(1).toString(), summary);
         QTRY_VERIFY_WITH_TIMEOUT(showsText(summary), Timeout); // the passive notification
         QVERIFY(!busy->isVisible());
         QVERIFY(button->isEnabled());
         QVERIFY(!sync->lastSyncText().isEmpty());
-        QVERIFY(action->property("tooltip").toString().contains(u"Last synced "_s));
+        QVERIFY(action->property("tooltip").toString().contains(u", last synced "_s));
+        QVERIFY(m_fake.callsOf(u"SyncContacts"_s).isEmpty()); // no account: Mac only
         auto readArgs = [&] {
             QFile f(bin.filePath(u"args"_s));
             return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed() : QString();
@@ -1509,6 +1509,156 @@ echo '                  {"pin": "c", "chat_id": "mailto:c@x", "result": "pinned"
         m_fake.control(u"SetMacHost"_s, {QString()});
         m_controller->daemon()->refreshStatus();
         QTRY_VERIFY_WITH_TIMEOUT(sync->host().isEmpty(), Timeout);
+    }
+
+    void iCloudContacts()
+    {
+        auto *daemon = m_controller->daemon();
+        QTRY_VERIFY_WITH_TIMEOUT(daemon->isContactsSyncAvailable(), Timeout);
+        QVERIFY(daemon->contactsAccount().isEmpty());
+        QVERIFY(m_controller->macSync()->host().isEmpty());
+        QVERIFY(!m_controller->canSync());
+
+        // Nothing set up: the toolbar's Sync points to Settings.
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((button = visibleItem(u"syncButton"_s)), Timeout);
+        auto *action = m_window->findChild<QObject *>(u"syncAction"_s);
+        QVERIFY(action);
+        QVERIFY(action->property("tooltip").toString().contains(u"in Settings"_s));
+        QSignalSpy setup(m_controller.get(), &AppController::syncSetupNeeded);
+        click(button);
+        QTRY_COMPARE_WITH_TIMEOUT(setup.count(), 1, Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(showsText(setup.first().at(0).toString()), Timeout);
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // Signed out: the form, Apple ID suggested from the registered address.
+        invoke("showSettings");
+        QQuickItem *appleId = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((appleId = visibleItem(u"contactsAppleIdField"_s)), Timeout);
+        QCOMPARE(appleId->property("placeholderText").toString(), u"me@example.com"_s);
+        auto *password = visibleItem(u"contactsPasswordField"_s);
+        QVERIFY(password);
+        QCOMPARE(password->property("echoMode").toInt(), 2); // TextInput.Password
+        auto *signIn = visibleItem(u"contactsSignInButton"_s);
+        QVERIFY(signIn);
+        QVERIFY(!signIn->isEnabled()); // no password yet
+        QVERIFY(!visibleItem(u"contactsSignOutButton"_s));
+        QQuickItem *flickable = appleId->parentItem();
+        while (flickable && !flickable->inherits("QQuickFlickable")) {
+            flickable = flickable->parentItem();
+        }
+        QVERIFY(flickable);
+        const auto scrollTo = [&](QQuickItem *item) {
+            flickable->setProperty("contentY", item->mapToItem(flickable->property("contentItem").value<QQuickItem *>(), QPointF(0, 0)).y() - 120);
+        };
+        scrollTo(appleId);
+        shoot(u"settings-contacts-signed-out"_s);
+
+        // A refused password: shown under the field, the field emptied.
+        QSignalSpy finished(daemon, &DaemonClient::contactsSyncFinished);
+        password->setProperty("text", u"wrong"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(signIn->isEnabled(), Timeout);
+        click(signIn);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, Timeout);
+        QVERIFY(password->property("text").toString().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(password->property("statusMessage").toString().contains(u"app-specific password"_s), Timeout);
+        QCOMPARE(m_fake.callsOf(u"SetContactsAccount"_s).value(0).at(1).toString(), u"me@example.com"_s); // the suggestion
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // Signed in: busy while the first sync runs, then the account and the count.
+        m_fake.control(u"SetContactsSyncDelay"_s, {800u});
+        appleId->setProperty("text", u"me@icloud.com"_s);
+        password->setProperty("text", u"abcd-efgh-ijkl-mnop"_s);
+        click(signIn);
+        QTRY_VERIFY_WITH_TIMEOUT(daemon->isContactsBusy(), Timeout);
+        QVERIFY(!signIn->isEnabled());
+        QCOMPARE(signIn->property("text").toString(), u"Signing In…"_s);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 2, Timeout);
+        QVERIFY(finished.last().at(1).toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(showsText(finished.last().at(3).toString()), Timeout);
+        QVERIFY(password->property("text").toString().isEmpty());
+        QCOMPARE(daemon->contactsAccount(), u"me@icloud.com"_s);
+        QQuickItem *account = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((account = visibleItem(u"contactsAccount"_s)), Timeout);
+        QCOMPARE(account->property("description").toString(), u"me@icloud.com"_s);
+        QVERIFY(visibleItem(u"contactsLastSync"_s)->property("description").toString().endsWith(u": 312 contacts (3 updated, 1 removed)"_s));
+        QVERIFY(!visibleItem(u"contactsAppleIdField"_s));
+        QVERIFY(!visibleItem(u"contactsLastError"_s));
+        scrollTo(account);
+        shoot(u"settings-contacts"_s);
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // A refused password from a background sync: highlighted, sign in again offered.
+        m_fake.control(u"SetContactsAuthFailed"_s, {u"401 Unauthorized"_s});
+        QQuickItem *error = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((error = visibleItem(u"contactsLastError"_s)), Timeout);
+        QCOMPARE(error->property("text").toString(), u"Password refused"_s);
+        QVERIFY(visibleItem(u"contactsSignInAgainButton"_s));
+        QVERIFY(!visibleItem(u"contactsSyncNowButton"_s));
+        shoot(u"settings-contacts-refused"_s);
+        // Sign in again: a new password for the same account, in a dialog.
+        click(visibleItem(u"contactsSignInAgainButton"_s));
+        QObject *reSignIn = m_window->findChild<QObject *>(u"contactsReSignInDialog"_s);
+        QVERIFY(reSignIn);
+        QTRY_VERIFY_WITH_TIMEOUT(reSignIn->property("opened").toBool(), Timeout);
+        auto *newPassword = m_window->findChild<QObject *>(u"contactsReSignInPassword"_s);
+        QVERIFY(newPassword);
+        newPassword->setProperty("text", u"wxyz-wxyz-wxyz-wxyz"_s);
+        auto *reSignInAction = m_window->findChild<QObject *>(u"contactsReSignInAction"_s);
+        QVERIFY(reSignInAction);
+        QTRY_VERIFY_WITH_TIMEOUT(reSignInAction->property("enabled").toBool(), Timeout);
+        QVERIFY(QMetaObject::invokeMethod(reSignInAction, "trigger"));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 3, Timeout);
+        QVERIFY(finished.last().at(1).toBool());
+        QCOMPARE(m_fake.callsOf(u"SetContactsAccount"_s).last().at(1).toString(), u"me@icloud.com"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(!reSignIn->property("visible").toBool(), Timeout);
+        QVERIFY(!daemon->isContactsAuthFailed());
+        QTRY_VERIFY_WITH_TIMEOUT(!visibleItem(u"contactsLastError"_s), Timeout);
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // Sync Now.
+        m_fake.control(u"ClearCalls"_s);
+        click(visibleItem(u"contactsSyncNowButton"_s));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 4, Timeout);
+        QCOMPARE(m_fake.callsOf(u"SyncContacts"_s).size(), 1);
+        invoke("closeOverlays");
+
+        // The toolbar's Sync: contacts only (no Mac set).
+        QVERIFY(m_controller->canSync());
+        QTRY_VERIFY_WITH_TIMEOUT(action->property("tooltip").toString().startsWith(u"Contacts from iCloud (me@icloud.com), last synced "_s), Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT((button = visibleItem(u"syncButton"_s)), Timeout);
+        auto *busy = button->findChildren<QQuickItem *>(u"syncBusy"_s).value(0);
+        QVERIFY(busy);
+        click(button);
+        QTRY_VERIFY_WITH_TIMEOUT(busy->isVisible() && m_controller->isSyncing(), Timeout);
+        QVERIFY(!button->isEnabled()); // a contacts sync cannot be stopped
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 5, Timeout);
+        QCOMPARE(finished.last().at(3).toString(), u"Contacts synced from iCloud: 312 contacts (3 updated, 1 removed)"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(!busy->isVisible() && button->isEnabled(), Timeout);
+        QCOMPARE(m_fake.callsOf(u"SyncContacts"_s).size(), 2);
+        QCOMPARE(setup.count(), 1);
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+
+        // Sign out asks whether to keep the contacts.
+        invoke("showSettings");
+        QQuickItem *signOut = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((signOut = visibleItem(u"contactsSignOutButton"_s)), Timeout);
+        click(signOut);
+        QObject *dialog = m_window->findChild<QObject *>(u"contactsSignOutDialog"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY_WITH_TIMEOUT(dialog->property("opened").toBool(), Timeout);
+        shoot(u"settings-contacts-sign-out"_s);
+        auto *keep = m_window->findChild<QObject *>(u"contactsSignOutKeep"_s);
+        QVERIFY(keep);
+        QVERIFY(QMetaObject::invokeMethod(keep, "trigger"));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 6, Timeout);
+        QCOMPARE(finished.last().at(0).toString(), u"signOut"_s);
+        QCOMPARE(m_fake.callsOf(u"ClearContactsAccount"_s).value(0).at(1).toBool(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(!dialog->property("visible").toBool(), Timeout);
+        QTRY_VERIFY_WITH_TIMEOUT(visibleItem(u"contactsAppleIdField"_s), Timeout);
+        QVERIFY(QMetaObject::invokeMethod(m_window, "hidePassiveNotification", Q_ARG(QVariant, QVariant(0))));
+        m_fake.control(u"SetContactsSyncDelay"_s, {0u});
+        invoke("closeOverlays");
     }
 
     void needsLogin()

@@ -264,27 +264,33 @@ private Q_SLOTS:
     {
         bool ok = false;
         const QByteArray full = R"({"host":"mac.local","dry_run":false,
-            "contacts":{"dir":"/x","received":312,"photos":200,"written":3,"unchanged":308,"removed":1},
             "pins":{"mac":[{"pin":"+12055550100","chat_id":"tel:+12055550100","result":"pinned"},
                            {"pin":"bob@example.com","chat_id":"mailto:bob@example.com","result":"pinned"},
                            {"pin":"9F1C","chat_id":"group:9F1C","result":"not-in-daemon"}],
                     "order":[],"kept_local":[],"unpin":[]}})";
-        QCOMPARE(MacSync::summarize(full, 0, QString(), &ok), u"Synced from mac.local: 312 contacts (3 updated, 1 removed), 2 pins (1 not found)"_s);
+        QCOMPARE(MacSync::summarize(full, 0, QString(), &ok), u"Synced from mac.local: 2 pins (1 not found)"_s);
         QVERIFY(ok);
-        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"received":1,"written":0,"removed":0},"pins":{"mac":[]}})", 0, QString(), &ok),
-                 u"Synced from m: 1 contact, 0 pins"_s);
+        QCOMPARE(MacSync::summarize(R"({"host":"m","pins":{"mac":[]}})", 0, QString(), &ok), u"Synced from m: 0 pins"_s);
         QVERIFY(ok);
-        // Every pin outcome imsg reports.
-        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"received":5,"written":2,"removed":0},
+        // An older imsg that still copied contacts: not mentioned (iCloud has them now).
+        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"received":1,"written":0,"removed":0},"pins":{"mac":[{"result":"pinned"}]}})", 0, QString(), &ok),
+                 u"Synced from m: 1 pin"_s);
+        QVERIFY(ok);
+        // Every pin outcome imsg reports, and backgrounds.
+        QCOMPARE(MacSync::summarize(R"({"host":"m",
             "pins":{"mac":[{"result":"pinned"},{"result":"pinned"},{"result":"pinned"},{"result":"duplicate"},{"result":"unknown"}],
-                    "order":[],"kept_local":["a","b"],"unpin":["c"],"kept_unmapped":["d"],"lookup_error":"chat.db locked"}})",
+                    "order":[],"kept_local":["a","b"],"unpin":["c"],"kept_unmapped":["d"],"lookup_error":"chat.db locked"},
+            "backgrounds":{"chats":["x","y"]}})",
                                     0, QString(), &ok),
-                 u"Synced from m: 5 contacts (2 updated), 3 pins (1 not found, 1 duplicate, 1 unpinned, 2 local kept, 1 kept (unmapped), "
-                 u"group lookup failed: chat.db locked)"_s);
+                 u"Synced from m: 3 pins (1 not found, 1 duplicate, 1 unpinned, 2 local kept, 1 kept (unmapped), "
+                 u"group lookup failed: chat.db locked), 2 backgrounds"_s);
         QVERIFY(ok);
         // A part failed (exit 1): what worked and the error.
-        QCOMPARE(MacSync::summarize(R"({"host":"m","contacts":{"error":"no Full Disk Access"},"pins":{"mac":[{"result":"pinned"}]}})", 1, QString(), &ok),
-                 u"Sync from Mac incomplete: 1 pin; contacts: no Full Disk Access"_s);
+        QCOMPARE(MacSync::summarize(R"({"host":"m","pins":{"mac":[{"result":"pinned"}]},"backgrounds":{"error":"no Full Disk Access"}})", 1, QString(), &ok),
+                 u"Sync from Mac incomplete: 1 pin; backgrounds: no Full Disk Access"_s);
+        QVERIFY(!ok);
+        QCOMPARE(MacSync::summarize(R"({"host":"m","pins":{"error":"chat.db unreadable"}})", 1, QString(), &ok),
+                 u"Sync from Mac incomplete: pins: chat.db unreadable"_s);
         QVERIFY(!ok);
         // Nothing applied: {"host", "error"}.
         QCOMPARE(MacSync::summarize(R"({"host":null,"error":"no Mac host given"})", 2, QString(), &ok), u"Sync from Mac failed: no Mac host given"_s);
@@ -418,7 +424,7 @@ private Q_SLOTS:
             f.write(R"SH(#!/bin/sh
 echo "$@" > "$(dirname "$0")/args"
 if [ "$FAKE_IMSG_MODE" = slow ]; then exec sleep 30; fi
-echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed": 0}, "pins": {"mac": []}}'
+echo '{"host": "mac.local", "pins": {"mac": [{"result": "pinned"}, {"result": "pinned"}]}}'
 )SH");
             f.close();
             QVERIFY(f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
@@ -478,7 +484,7 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
         QVERIFY(sync.isRunning());
         QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 4, Timeout);
         QVERIFY(finished.last().at(0).toBool());
-        QCOMPARE(lastMessage(), u"Synced from mac.local: 2 contacts, 0 pins"_s);
+        QCOMPARE(lastMessage(), u"Synced from mac.local: 2 pins"_s);
         QVERIFY(sync.lastSync().isValid());
 
         // Too slow: terminated after the timeout.
@@ -502,6 +508,108 @@ echo '{"host": "mac.local", "contacts": {"received": 2, "written": 0, "removed":
 
         qunsetenv("FAKE_IMSG_MODE");
         qputenv("PATH", oldPath);
+    }
+
+    void contactsSyncSummary()
+    {
+        ContactsSync c;
+        QCOMPARE(DaemonClient::contactsSyncSummary(c), QString()); // never synced
+        c.hasLast = true;
+        c.cards = 1;
+        QCOMPARE(DaemonClient::contactsSyncSummary(c), u"1 contact"_s);
+        c.cards = 312;
+        c.written = 3;
+        c.removed = 1;
+        c.removedMac = 40;
+        QCOMPARE(DaemonClient::contactsSyncSummary(c), u"312 contacts (3 updated, 41 removed)"_s);
+        QCOMPARE(DaemonClient::contactsErrorMessage(u"org.freedesktop.DBus.Error.UnknownMethod"_s, u"No such method"_s),
+                 u"This version of imessaged cannot sync iCloud contacts. Update it and try again."_s);
+        QCOMPARE(DaemonClient::contactsErrorMessage(u"Login"_s, u"use an app-specific password"_s), u"iCloud contacts: use an app-specific password"_s);
+        QVERIFY(DaemonClient::contactsErrorMessage(u"org.freedesktop.DBus.Error.NoReply"_s, QString()).contains(u"may still be running"_s));
+    }
+
+    void contactsSync()
+    {
+        auto client = connectedClient();
+        QTRY_VERIFY_WITH_TIMEOUT(client->isStatusKnown(), Timeout);
+        QVERIFY(client->isContactsSyncAvailable());
+        QVERIFY(client->contactsAccount().isEmpty());
+        QCOMPARE(client->contactsSyncInterval(), 60);
+        QVERIFY(client->contactsLastSyncText().isEmpty());
+        QSignalSpy finished(client.get(), &DaemonClient::contactsSyncFinished);
+        QSignalSpy changed(client.get(), &DaemonClient::contactsSyncChanged);
+
+        // No account yet.
+        client->syncContacts();
+        QVERIFY(client->isContactsBusy());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, Timeout);
+        QVERIFY(!client->isContactsBusy());
+        QCOMPARE(finished.last().at(0).toString(), u"sync"_s);
+        QVERIFY(!finished.last().at(1).toBool());
+        QCOMPARE(finished.last().at(2).toString(), u"NotFound"_s);
+        QCOMPARE(finished.last().at(3).toString(), u"No iCloud account is set up for contacts. Sign in under Settings."_s);
+
+        // A refused password: nothing saved.
+        client->setContactsAccount(u"me@icloud.com"_s, u"wrong"_s);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 2, Timeout);
+        QCOMPARE(finished.last().at(0).toString(), u"signIn"_s);
+        QVERIFY(!finished.last().at(1).toBool());
+        QCOMPARE(finished.last().at(2).toString(), u"Login"_s);
+        QVERIFY(finished.last().at(3).toString().contains(u"app-specific password"_s));
+        QVERIFY(client->contactsAccount().isEmpty());
+
+        // Signed in (spaces of a pasted password dropped): the first sync runs before the reply.
+        m_fake.control(u"SetContactsSyncDelay"_s, {300u});
+        m_fake.control(u"ClearCalls"_s);
+        changed.clear();
+        client->setContactsAccount(u" me@icloud.com "_s, u"abcd efgh ijkl mnop"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(client->isContactsSyncing(), Timeout);
+        QVERIFY(client->isContactsBusy());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 3, Timeout);
+        QVERIFY(finished.last().at(1).toBool());
+        QCOMPARE(finished.last().at(3).toString(), u"Signed in to iCloud contacts as me@icloud.com: 312 contacts (3 updated, 1 removed)"_s);
+        QCOMPARE(m_fake.callsOf(u"SetContactsAccount"_s).value(0).at(1).toString(), u"me@icloud.com"_s);
+        QVERIFY(!client->isContactsSyncing());
+        QVERIFY(!client->isContactsBusy());
+        QVERIFY(changed.count() >= 2);
+        QCOMPARE(client->contactsAccount(), u"me@icloud.com"_s);
+        QCOMPARE(client->contactsCount(), 312);
+        QCOMPARE(client->contactsPhotos(), 200);
+        QCOMPARE(client->contactsSummary(), u"312 contacts (3 updated, 1 removed)"_s);
+        QVERIFY(client->contactsLastSync().isValid());
+        QVERIFY(!client->contactsLastSyncText().isEmpty());
+
+        // Sync now.
+        client->syncContacts();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 4, Timeout);
+        QVERIFY(finished.last().at(1).toBool());
+        QCOMPARE(finished.last().at(3).toString(), u"Contacts synced from iCloud: 312 contacts (3 updated, 1 removed)"_s);
+
+        // A background sync whose password was refused arrives as a signal.
+        m_fake.control(u"SetContactsAuthFailed"_s, {u"401 Unauthorized"_s});
+        QTRY_VERIFY_WITH_TIMEOUT(client->isContactsAuthFailed(), Timeout);
+        QCOMPARE(client->contactsLastError(), u"401 Unauthorized"_s);
+        m_fake.control(u"SetContactsAuthFailed"_s, {QString()});
+        QTRY_VERIFY_WITH_TIMEOUT(!client->isContactsAuthFailed(), Timeout);
+
+        // Signed out.
+        client->clearContactsAccount(true);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 5, Timeout);
+        QCOMPARE(finished.last().at(0).toString(), u"signOut"_s);
+        QCOMPARE(finished.last().at(3).toString(), u"Signed out of iCloud contacts; the synced contacts were removed."_s);
+        QVERIFY(client->contactsAccount().isEmpty());
+        QVERIFY(client->contactsSummary().isEmpty());
+        QCOMPARE(m_fake.callsOf(u"ClearContactsAccount"_s).value(0).at(1).toBool(), true);
+
+        // An older daemon.
+        m_fake.control(u"SetContactsSyncSupported"_s, {false});
+        client->refreshStatus();
+        QTRY_VERIFY_WITH_TIMEOUT(!client->isContactsSyncAvailable(), Timeout);
+        client->syncContacts();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 6, Timeout);
+        QCOMPARE(finished.last().at(3).toString(), u"This version of imessaged cannot sync iCloud contacts. Update it and try again."_s);
+        m_fake.control(u"SetContactsSyncSupported"_s, {true});
+        m_fake.control(u"SetContactsSyncDelay"_s, {0u});
     }
 
     void sharedProfilesAndGroupIcons()

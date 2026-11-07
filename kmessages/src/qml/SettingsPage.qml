@@ -180,6 +180,233 @@ FormCard.FormCardPage {
     }
 
     FormCard.FormHeader {
+        title: i18n("iCloud Contacts")
+        visible: contactsCard.visible
+    }
+    FormCard.FormCard {
+        id: contactsCard
+        objectName: "contactsSyncCard"
+        // Older daemons cannot sync contacts.
+        visible: App.daemon.contactsSyncAvailable
+        readonly property bool signedIn: App.daemon.contactsAccount.length > 0
+        readonly property bool busy: App.daemon.contactsBusy || App.daemon.contactsSyncing
+        // The registered email address: usually the Apple ID.
+        readonly property string suggestedAppleId: {
+            const mail = App.daemon.ownHandles.find(h => h.startsWith("mailto:"));
+            return mail ? mail.substring(7) : "";
+        }
+        // A refused sign-in, shown under the password field.
+        property string signInError: ""
+
+        function signIn() {
+            const appleId = appleIdField.text.trim().length > 0 ? appleIdField.text.trim() : suggestedAppleId;
+            if (appleId.length === 0 || passwordField.text.length === 0 || busy) {
+                return;
+            }
+            signInError = "";
+            App.daemon.setContactsAccount(appleId, passwordField.text);
+            passwordField.text = "";
+        }
+
+        // ---- signed in ----
+        FormCard.FormTextDelegate {
+            objectName: "contactsAccount"
+            visible: contactsCard.signedIn
+            text: i18n("Apple ID")
+            description: App.daemon.contactsAccount
+        }
+        FormCard.FormDelegateSeparator {
+            visible: contactsCard.signedIn
+        }
+        FormCard.FormTextDelegate {
+            objectName: "contactsLastSync"
+            visible: contactsCard.signedIn
+            text: i18n("Last synced")
+            description: {
+                if (App.daemon.contactsSyncing) {
+                    return i18n("Syncing…");
+                }
+                if (App.daemon.contactsLastSyncText.length === 0) {
+                    return i18n("Not synced yet");
+                }
+                return App.daemon.contactsSummary.length > 0
+                    ? i18nc("%1 = date, %2 = '312 contacts (3 updated)'", "%1: %2", App.daemon.contactsLastSyncText, App.daemon.contactsSummary)
+                    : App.daemon.contactsLastSyncText;
+            }
+        }
+        FormCard.FormDelegateSeparator {
+            visible: contactsError.visible
+        }
+        FormCard.FormTextDelegate {
+            id: contactsError
+            objectName: "contactsLastError"
+            visible: contactsCard.signedIn && (App.daemon.contactsAuthFailed || App.daemon.contactsLastError.length > 0)
+            text: App.daemon.contactsAuthFailed ? i18n("Password refused") : i18n("Last sync failed")
+            description: App.daemon.contactsAuthFailed
+                ? i18n("Apple refused the app-specific password (it may have been revoked). Contacts are not synced until you sign in again with a new one.")
+                : App.daemon.contactsLastError
+            textItem.color: Kirigami.Theme.negativeTextColor
+        }
+        FormCard.FormDelegateSeparator {
+            visible: contactsCard.signedIn
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "contactsSyncNowButton"
+            visible: contactsCard.signedIn && !App.daemon.contactsAuthFailed
+            enabled: !contactsCard.busy
+            icon.name: "view-refresh"
+            text: contactsCard.busy ? i18n("Syncing…") : i18n("Sync Now")
+            description: App.daemon.contactsSyncInterval > 0
+                ? i18np("Contacts also sync automatically every minute.", "Contacts also sync automatically every %1 minutes.", App.daemon.contactsSyncInterval)
+                : ""
+            onClicked: App.daemon.syncContacts()
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "contactsSignInAgainButton"
+            visible: contactsCard.signedIn && App.daemon.contactsAuthFailed
+            enabled: !contactsCard.busy
+            icon.name: "im-user"
+            text: i18n("Sign In Again…")
+            onClicked: {
+                appleIdField.text = App.daemon.contactsAccount;
+                contactsCard.signInError = "";
+                reSignIn.open();
+            }
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "contactsSignOutButton"
+            visible: contactsCard.signedIn
+            enabled: !App.daemon.contactsBusy
+            icon.name: "system-log-out"
+            text: i18n("Sign Out")
+            description: i18n("Stops syncing contacts from this Apple ID.")
+            onClicked: signOutPrompt.open()
+        }
+
+        // ---- signed out ----
+        FormCard.FormTextFieldDelegate {
+            id: appleIdField
+            objectName: "contactsAppleIdField"
+            visible: !contactsCard.signedIn
+            label: i18n("Apple ID")
+            placeholderText: contactsCard.suggestedAppleId.length > 0 ? contactsCard.suggestedAppleId : i18n("e.g. me@icloud.com")
+            inputMethodHints: Qt.ImhEmailCharactersOnly | Qt.ImhNoAutoUppercase
+            enabled: !contactsCard.busy
+            onAccepted: passwordField.forceActiveFocus()
+        }
+        FormCard.FormDelegateSeparator {
+            visible: !contactsCard.signedIn
+        }
+        FormCard.FormPasswordFieldDelegate {
+            id: passwordField
+            objectName: "contactsPasswordField"
+            visible: !contactsCard.signedIn
+            label: i18n("App-specific password")
+            placeholderText: i18nc("the format of an app-specific password", "xxxx-xxxx-xxxx-xxxx")
+            enabled: !contactsCard.busy
+            statusMessage: contactsCard.signInError
+            status: Kirigami.MessageType.Error
+            onAccepted: contactsCard.signIn()
+        }
+        FormCard.FormDelegateSeparator {
+            visible: !contactsCard.signedIn
+        }
+        FormCard.FormTextDelegate {
+            objectName: "contactsHelp"
+            visible: !contactsCard.signedIn
+            text: i18n("Names and photos of your iCloud contacts")
+            description: i18n("Create an app-specific password at appleid.apple.com → Sign-In and Security → App-Specific Passwords. Your normal Apple ID password will not work. Contacts are then kept up to date automatically.")
+        }
+        FormCard.FormDelegateSeparator {
+            visible: !contactsCard.signedIn
+        }
+        FormCard.FormButtonDelegate {
+            objectName: "contactsSignInButton"
+            visible: !contactsCard.signedIn
+            enabled: !contactsCard.busy && passwordField.text.length > 0
+                && (appleIdField.text.trim().length > 0 || contactsCard.suggestedAppleId.length > 0)
+            icon.name: "im-user"
+            text: App.daemon.contactsBusy ? i18n("Signing In…") : i18n("Sign In")
+            description: App.daemon.contactsBusy ? i18n("Checking the password and fetching your contacts. This can take a while.") : ""
+            onClicked: contactsCard.signIn()
+        }
+
+        Connections {
+            target: App.daemon
+            function onContactsSyncFinished(operation: string, ok: bool, errorName: string, message: string) {
+                if (operation === "signIn") {
+                    contactsCard.signInError = ok ? "" : message;
+                    if (ok) {
+                        appleIdField.text = "";
+                        reSignIn.close();
+                    }
+                }
+            }
+        }
+
+        // A new app-specific password for the same account (the old one was refused).
+        Kirigami.PromptDialog {
+            id: reSignIn
+            objectName: "contactsReSignInDialog"
+            parent: QQC2.Overlay.overlay
+            title: i18n("Sign In to iCloud Contacts")
+            subtitle: i18n("Create a new app-specific password at appleid.apple.com → Sign-In and Security → App-Specific Passwords. Your normal Apple ID password will not work.")
+            standardButtons: Kirigami.Dialog.Cancel
+            customFooterActions: [
+                Kirigami.Action {
+                    objectName: "contactsReSignInAction"
+                    icon.name: "im-user"
+                    text: i18n("Sign In")
+                    enabled: reSignInPassword.text.length > 0 && !App.daemon.contactsBusy
+                    onTriggered: {
+                        contactsCard.signInError = "";
+                        App.daemon.setContactsAccount(App.daemon.contactsAccount, reSignInPassword.text);
+                        reSignInPassword.text = "";
+                    }
+                }
+            ]
+            onOpened: reSignInPassword.forceActiveFocus()
+            onClosed: reSignInPassword.text = ""
+
+            Kirigami.PasswordField {
+                id: reSignInPassword
+                objectName: "contactsReSignInPassword"
+                placeholderText: i18n("App-specific password for %1", App.daemon.contactsAccount)
+                enabled: !App.daemon.contactsBusy
+            }
+        }
+
+        Kirigami.PromptDialog {
+            id: signOutPrompt
+            objectName: "contactsSignOutDialog"
+            parent: QQC2.Overlay.overlay
+            title: i18n("Sign Out of iCloud Contacts?")
+            subtitle: i18n("Contacts from %1 will no longer be synced. Keep the contacts synced so far on this computer, or remove them?", App.daemon.contactsAccount)
+            standardButtons: Kirigami.Dialog.Cancel
+            customFooterActions: [
+                Kirigami.Action {
+                    objectName: "contactsSignOutRemove"
+                    icon.name: "edit-delete"
+                    text: i18n("Remove Contacts")
+                    onTriggered: {
+                        signOutPrompt.close();
+                        App.daemon.clearContactsAccount(true);
+                    }
+                },
+                Kirigami.Action {
+                    objectName: "contactsSignOutKeep"
+                    icon.name: "system-log-out"
+                    text: i18n("Keep Contacts")
+                    onTriggered: {
+                        signOutPrompt.close();
+                        App.daemon.clearContactsAccount(false);
+                    }
+                }
+            ]
+        }
+    }
+
+    FormCard.FormHeader {
         title: i18n("Sync from Mac")
     }
     FormCard.FormCard {
@@ -190,15 +417,15 @@ FormCard.FormCardPage {
             placeholderText: App.daemon.macHost.length > 0 ? App.daemon.macHost : i18n("e.g. me@my-mac.local")
             text: App.settings.macHost
             description: App.daemon.macHost.length > 0
-                ? i18n("The ssh address of your Mac, to copy contacts (with photos) and pinned conversations from. Leave empty to use the daemon's setting, %1.", App.daemon.macHost)
-                : i18n("The ssh address of your Mac, to copy contacts (with photos) and pinned conversations from. The Mac needs Remote Login and Full Disk Access for ssh. You can also set mac_host in the daemon's config.toml.")
+                ? i18n("The ssh address of your Mac, to copy pinned conversations from. Leave empty to use the daemon's setting, %1.", App.daemon.macHost)
+                : i18n("The ssh address of your Mac, to copy pinned conversations from. The Mac needs Remote Login and Full Disk Access for ssh. You can also set mac_host in the daemon's config.toml.")
             onEditingFinished: App.settings.macHost = text
         }
         FormCard.FormDelegateSeparator {}
         FormCard.FormButtonDelegate {
             objectName: "macSyncNowButton"
             icon.name: "view-refresh"
-            text: App.macSync.running ? i18n("Syncing…") : i18n("Sync Now")
+            text: App.macSync.running ? i18n("Syncing…") : i18n("Sync Pins Now")
             enabled: !App.macSync.running
             description: App.macSync.lastSyncText.length > 0 ? i18n("Last synced %1", App.macSync.lastSyncText) : i18n("Not synced yet")
             onClicked: App.macSync.start()

@@ -247,6 +247,9 @@ stays open), recent emoji in the picker's fixed grid.
 
 ### D. "Sync from Mac" button: contacts, photos, pins (and backgrounds)
 
+(Contacts later moved to iCloud CardDAV, see "Contacts over iCloud
+CardDAV" below; `sync-mac` now syncs pins and backgrounds only.)
+
 Today contacts arrive through `tools/mac-contacts-export.sh` (bash wrapper
 around a Python script that runs on the Mac over one ssh connection and
 streams a tar of vCards with photos back into `~/.local/share/kpeoplevcard/`),
@@ -420,6 +423,40 @@ balloon shows "app message".
 Order: D (CLI first, then the button) together with A's daemon part, then
 A's app part, E, B, C. Release as 0.1.13.
 
+## Next rev: fixes queued for the next release
+
+### F. Merged person-chats send to the wrong address (found 2026-11-02)
+
+**Bug.** With contact links (`hub/links.rs`), Vicki Brenner's two numbers merge into one
+chat whose **canonical id is her `…6021` number**. That number is **not on iMessage** (IDS
+returned zero keys). Her live iMessage address is `…8755`, and every message she sent
+arrived from it. `imsg send tel:+1…6021 -` (sending to the chat by its id) went to
+`…6021` as **SMS through the iPhone** ("IDS returned zero keys for participant", then
+"sms … sending through the iPhone"). It should have gone to `…8755` as iMessage. The
+module doc says sends go "to the address the person last wrote from" (`Hub::route`),
+but a send addressed to the canonical chat id is taken literally as that handle.
+
+**Workaround in place:** Hermes's Vicki scripts send `--imessage tel:+1…8755` explicitly.
+
+**Fix:**
+1. **Route by chat, not by the id string.** When `send` targets a merged chat (by id,
+   name, or any of the person's handles without an explicit `--sms`/`--imessage`), go
+   through `Hub::route`: use the address the person **last wrote from**. If there is none,
+   use the first linked address with IDS keys. Use SMS only when no linked address is on
+   iMessage and forwarding is active.
+2. **Choose the canonical id sensibly:** prefer an iMessage-reachable address, then the
+   most recently active one, over vCard order. Keep the id stable once chosen; a
+   reachability change should change only routing, never the chat id.
+3. **Never silently downgrade to SMS** for a person who has another iMessage-reachable
+   address. If SMS is truly the only route, the result says `service: sms` and the CLI
+   prints a one-line note.
+4. **Show it:** `imsg chats --json` lists each merged chat's linked addresses with
+   `imessage: true/false` and `last_from`. kmessages and the TUI show which number a
+   message went to when it differs from the last one used.
+5. **Tests:** a merged chat whose canonical handle has zero IDS keys sends to the other
+   handle as iMessage; one with no reachable handles falls back to SMS and reports it; an
+   explicit `--sms` to a specific handle is still honoured.
+
 ## Future: easy install and a Mac companion app (not scheduled)
 
 Goal: someone installs imessage-linux without a terminal on either machine.
@@ -474,6 +511,12 @@ shown by kmessages.
 See `docs/WINDOWS-PLAN.md` (proposal, not scheduled).
 
 ### Contacts over iCloud CardDAV (no Mac needed)
+
+**[done 2026-10-25]** The daemon syncs iCloud contacts itself
+(`imsg contacts login|logout|sync|status`, D-Bus `SetContactsAccount` …,
+hourly by default); `imsg sync-mac` no longer copies contacts and
+`tools/mac-contacts-export.sh` is gone. The notes below are the original
+plan.
 
 Contacts today need the Mac awake and reachable over ssh (`imsg sync-mac`),
 and ssh fails whenever the 1Password agent refuses to sign. iCloud exposes

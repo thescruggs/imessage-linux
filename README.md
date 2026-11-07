@@ -26,6 +26,9 @@ It logs in, registers and sends/receives iMessages on a real Apple ID:
   import from the Mac.
 * `kmessages` KDE app ([docs/KMESSAGES.md](docs/KMESSAGES.md)) with
   contact names and photos, notifications and transcript backgrounds.
+* Your **iCloud contacts** (names, photos, one conversation per person),
+  synced by the daemon with an app-specific password, no Mac needed; see
+  [Contacts](#contacts).
 * Contacts' **shared names and photos** (Messages "Share Name and
   Photo", fetched from iCloud) and **group photos**, without a Mac: shown
   in the app wherever your address book has no name or photo, and by
@@ -98,7 +101,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now imessaged
 imsg doctor
 imsg login --apple-id you@icloud.com
-imsg sync-mac you@mac.local    # contacts + pinned chats from the Mac; see "Contacts"
+imsg contacts login --apple-id you@icloud.com  # iCloud contacts (app-specific password); see "Contacts"
+imsg sync-mac you@mac.local    # pinned chats from the Mac
 ```
 
 The packaged unit runs `/usr/bin/imessaged`. A unit you installed by
@@ -247,8 +251,8 @@ They are never sent from. Messages already stored are not rewritten.
 Like the iPhone, the daemon keeps one conversation per contact: when a
 contact card has both an email address and a phone number, messages to
 and from either land in the same chat, and replies go to the address
-they last wrote from. The cards are the vCards `imsg sync-mac` copies
-from your Mac (`~/.local/share/kpeoplevcard`); existing separate chats are
+they last wrote from. The cards are the vCards the daemon syncs from
+iCloud (`~/.local/share/kpeoplevcard`, see [Contacts](#contacts)); existing separate chats are
 merged the next time the daemon starts or the cards change. To turn it
 off, or to read cards from another folder:
 
@@ -342,7 +346,8 @@ imsg chats                                        # conversations, newest first
 imsg messages bob@example.com                     # a chat by handle, id or name
 imsg chat bob@example.com                         # one chat's details (incl. background)
 imsg chat bob@example.com --pin                   # pin it to the top (--unpin)
-imsg sync-mac mac.local                           # contacts + pinned chats from your Mac
+imsg contacts login                               # sync iCloud contacts (app-specific password)
+imsg sync-mac mac.local                           # pinned chats from your Mac
 imsg send bob@example.com "hello from Linux"
 imsg send alice@example.com,bob@example.com hi    # group
 imsg send-file bob@example.com ~/Pictures/cat.jpg
@@ -386,7 +391,7 @@ imsg-tui
 | `?` | Help |
 
 Contact names come from the vCards in `~/.local/share/kpeoplevcard` (the
-folder kmessages uses; `imsg sync-mac` fills it from your Mac), see
+folder kmessages uses; the daemon syncs your iCloud contacts there), see
 [Contacts](#contacts).
 
 ## KDE app (kmessages)
@@ -445,31 +450,56 @@ drop in shows up while kmessages runs. KAddressBook / Akonadi contacts work
 automatically once Akonadi's KPeople plugin is installed (from
 `akonadi-contacts`).
 
-To copy your **Mac's** contacts and pinned conversations (re-run whenever
-they change):
+### iCloud contacts
+
+The daemon fills that folder with your **iCloud contacts** itself (over
+CardDAV; no Mac needed) and keeps them current, every hour by default:
+
+1. Create an app-specific password: sign in at
+   [appleid.apple.com](https://appleid.apple.com), open **Sign-In and
+   Security → App-Specific Passwords**, add one (e.g. "imessage-linux")
+   and copy it. Your normal Apple ID password does not work here.
+2. Sign the contacts sync in, either in kmessages (**Settings → iCloud
+   Contacts**) or with
+
+   ```sh
+   imsg contacts login --apple-id you@example.com   # prompts for the app-specific password
+   imsg contacts status                             # account, last sync, how many contacts
+   imsg contacts sync                               # sync now (otherwise every hour)
+   imsg contacts logout                             # stop (--remove-cards: delete the synced cards)
+   ```
+
+Each contact becomes `~/.local/share/kpeoplevcard/icloud-<id>.vcf`, its
+photo embedded; other vCards in the folder are left alone. Only contacts
+stored in iCloud are synced (not Google or other accounts). The password
+is stored encrypted with the daemon's state key; revoke it on
+appleid.apple.com any time. The interval is the daemon's
+`contacts_sync_minutes` (`0` = only on `imsg contacts sync`); details in
+[docs/CLI.md](docs/CLI.md), `contacts`, and
+[docs/DAEMON.md](docs/DAEMON.md), "iCloud contacts". The files are your
+address book: keep them out of git and backups you share.
+
+If you used `imsg sync-mac` for contacts before: it no longer copies
+them, and the first iCloud sync replaces the `mac-*.vcf` cards it wrote.
+
+### Pins from the Mac
+
+`imsg sync-mac` copies your **Mac's** pinned conversations (re-run
+whenever they change): kmessages shows them at the top; pins you set here
+(`imsg chat CHAT --pin`) are kept.
 
 ```sh
 imsg sync-mac mac.local     # ssh host of the Mac; or set mac_host and run `imsg sync-mac`
-imsg sync-mac --contacts    # contacts only (--pins: pins only; --dry-run: change nothing)
+imsg sync-mac --dry-run     # what would change (--backgrounds: also the chats' backgrounds)
 ```
 
-It reads the Contacts database over one ssh connection (read-only; no
-Contacts.app, no privacy prompt; the ssh session needs Full Disk Access as
-for `chat.db`) and writes one vCard 3.0 per person, photo embedded (JPEG,
-256 px), as `~/.local/share/kpeoplevcard/mac-<uid>.vcf`. Re-running replaces
-only the `mac-*.vcf` files (and rewrites only those that changed). The
-same trip copies the Mac's pinned conversations: kmessages shows them at
-the top; pins you set here (`imsg chat CHAT --pin`) are kept. Set the
-daemon's `mac_host` (`mac_host = "mac.local"` in `config.toml`; `imsg
-doctor` suggests it) to leave out the host. Details: [docs/CLI.md](docs/CLI.md),
-`sync-mac`. `tools/mac-contacts-export.sh mac.local [OUTDIR]` still works
-(it runs `imsg sync-mac --contacts`). The files are your address book:
-keep them out of git and backups you share.
+Set the daemon's `mac_host` (`mac_host = "mac.local"` in `config.toml`;
+`imsg doctor` suggests it) to leave out the host. Details:
+[docs/CLI.md](docs/CLI.md), `sync-mac`.
 
 In kmessages, the **Sync from Mac** button (the circular arrows next to
 New Message, also in the tray menu) runs the same `imsg sync-mac` and shows
-what it copied ("Synced from mac.local: 312 contacts (4 updated), 3 pins")
-or why it failed; its tooltip says when it last ran. The Mac defaults to the
+what it copied (e.g. "Synced from mac.local: 3 pins") or why it failed; its tooltip says when it last ran. The Mac defaults to the
 daemon's `mac_host` and can be set in Settings → Sync from Mac. Pin or
 unpin a conversation in kmessages with a right-click (press and hold on a
 touch screen) on it in the list, or from its details page.
@@ -488,7 +518,7 @@ imsg import-mac mac.local --days 10     # or --since 2026-10-01
 One ssh connection runs `tools/mac-messages-export.py` (embedded in
 `imsg`) with the Mac's own `python3`: it reads
 `~/Library/Messages/chat.db` read-only (the ssh session needs Full Disk
-Access, as for the contacts export) and streams the rows plus the
+Access, as for `imsg sync-mac`) and streams the rows plus the
 attachment files (up to `--max-attachment-mb`, default 50) to
 `~/.cache/imsg/import/<run>/`, from where the daemon copies them into its
 own attachments directory. Imported messages show up in `imsg messages`

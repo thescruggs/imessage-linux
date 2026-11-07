@@ -114,13 +114,20 @@ renews at      2026-11-10 09:00 +01:00
 unread         3
 profiles       ready
 sms            active (via +15551234567)
+contacts       me@example.com, 312 contacts, synced 2026-10-25 08:12 -05:00
 mac host       mac.local
 ```
 
 `sms` (newer daemons only): Text Message Forwarding, see [`sms`](#sms-enabledisablestatus).
 
+`contacts` (newer daemons only): the iCloud contacts sync, see
+[`contacts`](#contacts-login--logout--sync--status): the Apple ID, how
+many contacts and when they were last synced, or `off` with a pointer
+to `imsg contacts login`; a failed last sync is shown in yellow with its
+reason.
+
 `mac host` (only when set): the daemon's `mac_host`, the Mac
-[`sync-mac`](#sync-mac-host---contacts---pins---backgrounds---dry-run) uses
+[`sync-mac`](#sync-mac-host---pins---backgrounds---dry-run) uses
 when no host is given.
 
 `profiles` (newer daemons only): whether contacts' shared names and
@@ -240,6 +247,58 @@ now, on your iPhone: Settings > Messages > Text Message Forwarding, and turn thi
 `SmsForwarding` JSON. `imsg watch` shows state changes as `sms forwarding
 …` lines.
 
+### `contacts login | logout | sync | status`
+
+Your iCloud contacts, for contact names and photos (kmessages, `imsg-tui`,
+the bridge) and for one conversation per person. The daemon syncs them
+itself over CardDAV, no Mac needed, with an **app-specific password**:
+create one at [appleid.apple.com](https://appleid.apple.com) > Sign-In and
+Security > App-Specific Passwords (your normal Apple ID password does not
+work here).
+
+```console
+$ imsg contacts login --apple-id me@example.com
+Contacts need an app-specific password, not your Apple ID password: create one at appleid.apple.com > Sign-In and Security > App-Specific Passwords.
+App-specific password for me@example.com:
+checking with iCloud and syncing (the first sync can take a few minutes) ...
+account       me@example.com
+last sync     2026-10-25 08:12 -05:00
+contacts      312 (40 with photos)
+last changes  312 written, 0 unchanged, 0 removed, 298 Mac copies replaced
+folder        /home/me/.local/share/kpeoplevcard
+auto sync     every 60 min
+```
+
+* `login [--apple-id ID] [--password-stdin]`: the Apple ID is prompted
+  for when missing; the password is read from the terminal, or with
+  `--password-stdin` (needs `--apple-id`) from the first line of stdin.
+  The daemon checks it with iCloud first (a refused password fails with
+  exit code 1, iCloud unreachable with 7; nothing is saved then), saves it encrypted with the state key
+  and syncs (`SetContactsAccount`; up to 10 minutes for a big address
+  book). A sync failing after the check prints the status with the error
+  and exits 1; the account stays. Logging in again replaces the account.
+* `logout [--remove-cards]`: stop syncing and forget the password
+  (`ClearContactsAccount`); `--remove-cards` also deletes the synced
+  cards (`icloud-*.vcf`).
+* `sync`: sync now (`SyncContacts`); exit 6 without an account, 1 or 7
+  when the sync fails.
+* `status`: the account, the last sync and what it changed, the last
+  error, and the automatic interval (`GetContactsSync`). A `hint` row
+  appears when iCloud refused the password (revoked, or not an
+  app-specific one): create a new one and `login` again.
+
+The daemon then syncs by itself every hour (`contacts_sync_minutes` in
+`config.toml`, `0` = only on `imsg contacts sync`; docs/DAEMON.md) and
+fetches only what changed. Each contact is one
+`~/.local/share/kpeoplevcard/icloud-<id>.vcf` (the daemon's
+`contacts_dir`) with its photo embedded; contact groups are skipped and
+other vCards in the folder are left alone, except the `mac-*.vcf` copies
+an older `imsg sync-mac` made, which the first successful sync removes
+(reported as "Mac copies replaced"). Only contacts stored in iCloud are
+synced, not Google or other accounts. `--json` prints the daemon's
+[ContactsSyncStatus](DBUS.md#contactssyncstatus) JSON for every
+subcommand.
+
 ### `react CHAT MSG_ID KIND [--remove]`
 
 `KIND`: `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`
@@ -307,7 +366,7 @@ file and the participants' shared photos.
 chats first), as the last pin or at `--position N` (1 = first; without
 it an already pinned chat stays where it is); `--unpin`
 unpins it. Pins are local to this computer (the daemon's
-`SetChatPinned`); [`sync-mac`](#sync-mac-host---contacts---pins---backgrounds---dry-run)
+`SetChatPinned`); [`sync-mac`](#sync-mac-host---pins---backgrounds---dry-run)
 copies the Mac's. They print `pinned <id>` / `unpinned <id>`; `--json`
 prints the updated chat.
 
@@ -496,37 +555,27 @@ iMessage address), `failed` (exit code 1). `--json`: one object
 `{"host","dry_run","chats":[{"mac_rowid","mac_chat","chat_id",
 "background_id","version","size","result","detail","picture"}]}`.
 
-### `sync-mac [HOST] [--contacts] [--pins] [--backgrounds] [--dry-run]`
+### `sync-mac [HOST] [--pins] [--backgrounds] [--dry-run]`
 
-Copies your contacts (with photos) and pinned conversations from a Mac,
-and with `--backgrounds` also the chats' transcript backgrounds, in one
-ssh connection. Without section flags it syncs contacts and pins. Run it
-again whenever they change on the Mac; re-running only changes what
-changed. `HOST` is the Mac's ssh destination; without it the daemon's
-`mac_host` setting is used (`imsg status`, docs/DAEMON.md,
-Configuration), and with neither it fails with a hint (`imsg doctor`
-suggests the host your ssh `anisette_command` reaches). Same requirements
-on the Mac as `import-mac`: Remote Login, `python3`, and Full Disk Access
-for the ssh session.
+Copies your pinned conversations from a Mac, and with `--backgrounds`
+also the chats' transcript backgrounds, in one ssh connection. Without
+section flags it syncs pins. (Contacts no longer come from the Mac: see
+[`contacts`](#contacts-login--logout--sync--status).) Run it again
+whenever they change on the Mac; re-running only changes what changed.
+`HOST` is the Mac's ssh destination; without it the daemon's `mac_host`
+setting is used (`imsg status`, docs/DAEMON.md, Configuration), and with
+neither it fails with a hint (`imsg doctor` suggests the host your ssh
+`anisette_command` reaches). Same requirements on the Mac as
+`import-mac`: Remote Login, `python3`, and Full Disk Access for the ssh
+session. The daemon must be running.
 
 `tools/mac-sync-export.py` (embedded in `imsg`, plus
 `tools/mac-backgrounds-export.py` for `--backgrounds`) runs on the Mac with
 `python3 -`, opens everything read-only and streams one tar back:
 `sync.json` (what was exported, or each part's error: a part that fails
-does not stop the others), `contacts/mac-<uid>.vcf`, `pins.plist` and the
-backgrounds export. It is unpacked into `~/.cache/imsg/import/<run>/`
-(capped by `--max-total-mb`, default 2048) and removed afterwards.
-
-**Contacts.** The Mac's Contacts database (every account, each person
-once), one vCard 3.0 per person with the photo embedded (JPEG, at most
-256 px), the same files `tools/mac-contacts-export.sh` wrote. They go to
-`~/.local/share/kpeoplevcard/` (`$XDG_DATA_HOME/kpeoplevcard`; another
-folder with `--contacts-dir DIR`), where KPeople (kmessages' contacts)
-picks them up while running: new and changed `mac-*.vcf` files are
-written (0600), identical ones are left alone, `mac-*.vcf` files of
-people the Mac no longer has are removed, and no other file there is
-touched. If the Mac sends no contacts, nothing changes. The contacts part
-works without the daemon (given `HOST`).
+does not stop the others), `pins.plist` and the backgrounds export. It is
+unpacked into `~/.cache/imsg/import/<run>/` (capped by `--max-total-mb`,
+default 2048) and removed afterwards.
 
 **Pins.** The Mac's pinned conversations
 (`defaults export com.apple.messages.pinning`, else
@@ -560,9 +609,8 @@ example:
 
 ```console
 $ imsg sync-mac
-syncing contacts, pins from mac.local ...
-mac-sync-export: 412 contacts (198 with photos), 3 pins
-contacts     412 from the Mac (198 with photos): 3 written, 409 unchanged, 0 removed; /home/me/.local/share/kpeoplevcard
+syncing pins from mac.local ...
+mac-sync-export: 3 pins
 pins         3 on the Mac: 2 pinned, 1 not found; 1 local pin(s) kept, 0 unpinned (no longer pinned on the Mac)
   +12055550100  tel:+12055550100  pinned
   bob@example.com  mailto:bob@example.com  pinned
@@ -571,14 +619,13 @@ pins         3 on the Mac: 2 pinned, 1 not found; 1 local pin(s) kept, 0 unpinne
 
 Exit code 1 when a requested part failed (e.g. no Full Disk Access: the
 script's message is shown). `--json`: one object
-`{"host","dry_run","contacts":{"dir","received","photos","written","unchanged","removed"},
-"pins":{"mac":[{"pin","chat_id","result","detail"}],"order":[…],"kept_local":[…],"unpin":[…],"kept_unmapped":[…],"lookup_error":"…"},
+`{"host","dry_run","pins":{"mac":[{"pin","chat_id","result","detail"}],"order":[…],"kept_local":[…],"unpin":[…],"kept_unmapped":[…],"lookup_error":"…"},
 "backgrounds":{"chats":[…as import-mac --backgrounds…]}}`, with
 `{"error": "…"}` in place of a part that failed and parts not asked for
 left out (`kept_unmapped` and `lookup_error` only when there are any).
 Pin results: `pinned` (`would-pin` in a dry run), `duplicate`,
 `not-in-daemon`, `unknown`. A failure before any part is applied (no
-host, daemon not running when pins or backgrounds are asked for, ssh or
+host, daemon not running, ssh or
 the transfer failing, no `sync.json`) prints `{"host": "…" | null,
 "error": "…"}` on stdout with `--json` (exit code as without `--json`:
 2 usage, 5 no daemon, else 1), so a caller only parses stdout. `imsg`'s
