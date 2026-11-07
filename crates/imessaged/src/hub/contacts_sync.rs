@@ -3,8 +3,10 @@
 //!
 //! Each card is one `icloud-<hash>.vcf` in the vCard folder
 //! (`contacts_dir`, the KPeople folder kmessages and the contact links
-//! read); other vCards there are left alone, except the `mac-*.vcf` cards
-//! an earlier `imsg sync-mac` copied from the Mac, which iCloud replaces.
+//! read), written without vCard property groups (Apple's custom labels)
+//! because KPeople's reader (KContacts) ignores grouped properties; other
+//! vCards there are left alone, except the `mac-*.vcf` cards an earlier
+//! `imsg sync-mac` copied from the Mac, which iCloud replaces.
 //! The account (Apple ID + app-specific password) is sealed with the state
 //! key in `$STATE/contacts-account.enc`; what was synced (ETags, files) is
 //! in `$STATE/contacts-index.json`, so later syncs fetch only what changed.
@@ -196,7 +198,8 @@ async fn sync_once(client: &Client, apple_id: &str, dir: &Path, prev: &Index) ->
                     index.cards.insert(card.key, IndexEntry { etag: card.etag, file: None, photo: false });
                     continue;
                 }
-                let mut vcard = card.vcard;
+                // Written without property groups, which KPeople's reader drops.
+                let mut vcard = carddav::ungroup(&card.vcard);
                 // An empty ETag: fetched again next time.
                 let mut etag = card.etag;
                 if let Some(url) = carddav::photo_url(&vcard) {

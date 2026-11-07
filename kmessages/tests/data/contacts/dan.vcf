@@ -1,0 +1,11 @@
+BEGIN:VCARD
+VERSION:3.0
+PRODID:-//Apple Inc.//iCloud Web Address Book 2501B30//EN
+UID:fixture-dan
+FN:Dan Wu
+N:Wu;Dan;;;
+TEL;type=pref:+1 555-010-4004
+X-ABLabel:Work Cell
+EMAIL;type=INTERNET:dan@example.com
+X-ABLabel:School
+END:VCARD

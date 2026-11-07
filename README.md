@@ -470,7 +470,8 @@ CardDAV; no Mac needed) and keeps them current, every hour by default:
    ```
 
 Each contact becomes `~/.local/share/kpeoplevcard/icloud-<id>.vcf`, its
-photo embedded; other vCards in the folder are left alone. Only contacts
+photo embedded and Apple's custom labels flattened so KDE's contact
+reader sees every number; other vCards in the folder are left alone. Only contacts
 stored in iCloud are synced (not Google or other accounts). The password
 is stored encrypted with the daemon's state key; revoke it on
 appleid.apple.com any time. The interval is the daemon's

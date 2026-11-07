@@ -16,7 +16,12 @@
   sealed with the state key. New D-Bus methods `SetContactsAccount`,
   `ClearContactsAccount`, `SyncContacts`, `GetContactsSync`, signal
   `ContactsSyncChanged` and `GetStatus.contacts_sync`
-  ([docs/DBUS.md](docs/DBUS.md#contactssyncstatus)).
+  ([docs/DBUS.md](docs/DBUS.md#contactssyncstatus)). The cards are
+  written without vCard property groups (Apple's custom labels such as
+  `item1.TEL`), which KPeople's reader would otherwise drop, so
+  custom-labelled numbers and emails resolve in kmessages too.
+  `tools/carddav_probe.py` walks the CardDAV steps against iCloud by hand
+  for diagnosing.
 
 * **`imsg sync-mac` no longer copies contacts**: it syncs pins (the
   default) and, with `--backgrounds`, transcript backgrounds; `--contacts`

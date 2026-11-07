@@ -169,7 +169,7 @@ private Q_SLOTS:
         const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + u"/kpeoplevcard"_s;
         QVERIFY(QDir().mkpath(dir));
         const auto fixtures = QDir(QFINDTESTDATA("data/contacts")).entryInfoList({u"*.vcf"_s}, QDir::Files);
-        QCOMPARE(fixtures.size(), 4);
+        QCOMPARE(fixtures.size(), 5);
         for (const auto &f : fixtures) {
             QFile::remove(dir + u'/' + f.fileName());
             QVERIFY(QFile::copy(f.filePath(), dir + u'/' + f.fileName()));
@@ -178,8 +178,12 @@ private Q_SLOTS:
         ContactResolver r(true);
         QVERIFY(r.nameFor(u"mailto:alice@example.com"_s).isEmpty()); // loads asynchronously
 #if KMESSAGES_WITH_KPEOPLE
-        QTRY_COMPARE_WITH_TIMEOUT(r.count(), 4, Timeout);
+        QTRY_COMPARE_WITH_TIMEOUT(r.count(), 5, Timeout);
         QCOMPARE(r.nameFor(u"mailto:alice@example.com"_s), u"Alice Anderson"_s);
+        // dan.vcf is in the form imessaged writes iCloud cards: Apple's custom labels
+        // ("item1.TEL" + "item1.X-ABLabel") flattened, since KContacts drops grouped lines.
+        QCOMPARE(r.nameFor(u"tel:+15550104004"_s), u"Dan Wu"_s);
+        QCOMPARE(r.nameFor(u"mailto:dan@example.com"_s), u"Dan Wu"_s);
         QCOMPARE(r.nameFor(u"tel:+15550101001"_s), u"Alice Anderson"_s); // "+1 (555) 010-1001"
         QCOMPARE(r.nameFor(u"mailto:bob.smith@example.com"_s), u"Bob Smith"_s); // "Bob.Smith@Example.COM"
         QCOMPARE(r.nameFor(u"tel:+15550102002"_s), u"Bob Smith"_s); // "(555) 010-2002": last 10 digits

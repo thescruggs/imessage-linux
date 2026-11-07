@@ -463,6 +463,30 @@ pub fn photo_url(vcard: &str) -> Option<String> {
     })
 }
 
+/// `line` without its vCard property group (`item1.TEL;…` -> `TEL;…`).
+/// A group is letters, digits and `-` up to the first `.` of the name.
+fn ungroup_line(line: &str) -> &str {
+    let end = line.find([':', ';']).unwrap_or(line.len());
+    match line[..end].find('.') {
+        Some(dot) if dot > 0 && line[..dot].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') => &line[dot + 1..],
+        _ => line,
+    }
+}
+
+/// The card with every property group removed (`item1.TEL` -> `TEL`,
+/// `item1.X-ABLabel` -> `X-ABLabel`), refolded. Apple writes custom
+/// labels as groups, and KContacts, which KPeople reads the vCard folder
+/// with, ignores grouped properties altogether: without this, kmessages
+/// would not know a number or email labelled "Work cell" or "School".
+/// Values are left alone; the Rust parsers here read both forms.
+pub fn ungroup(vcard: &str) -> String {
+    let mut out = String::with_capacity(vcard.len());
+    for l in unfold(vcard) {
+        fold_into(&mut out, ungroup_line(&l));
+    }
+    out
+}
+
 /// The card with its linked photo replaced by `photo` embedded (base64,
 /// vCard 3.0 style, which KPeople reads), or dropped when `None`.
 pub fn embed_photo(vcard: &str, photo: Option<(&[u8], &str)>) -> String {
@@ -572,6 +596,19 @@ END:VCARD</C:address-data></prop><status>HTTP/1.1 200 OK</status></propstat>
         assert!(photo_url("BEGIN:VCARD\r\nPHOTO;ENCODING=b;TYPE=JPEG:/9j/\r\nEND:VCARD").is_none());
         assert!(is_group("BEGIN:VCARD\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nEND:VCARD"));
         assert!(!is_group(linked));
+        // Apple's custom labels are property groups, which KContacts drops; the files lose them.
+        let grouped = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Pat\r\nitem1.TEL;type=pref:+1 555-000-1212\r\nitem1.X-ABLabel:Work Cell\r\n\
+                       item2.EMAIL;type=INTERNET:pat@example.com\r\nNOTE:see item1.TEL; a.b:c\r\nitem3.PHOTO;VALUE=uri:https://p1-contacts.icloud.com/x/\r\n photo\r\nEND:VCARD\r\n";
+        let u = ungroup(grouped);
+        assert_eq!(
+            u,
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Pat\r\nTEL;type=pref:+1 555-000-1212\r\nX-ABLabel:Work Cell\r\nEMAIL;type=INTERNET:pat@example.com\r\n\
+             NOTE:see item1.TEL; a.b:c\r\nPHOTO;VALUE=uri:https://p1-contacts.icloud.com/x/photo\r\nEND:VCARD\r\n"
+        );
+        assert_eq!(photo_url(&u).as_deref(), Some("https://p1-contacts.icloud.com/x/photo"));
+        assert_eq!(ungroup(&u), u, "idempotent");
+        assert_eq!(ungroup_line("a.b.C:d"), "b.C:d", "only the first dot is the group");
+        assert_eq!(ungroup_line("bad group.TEL:1"), "bad group.TEL:1", "a space is not a group");
         let long = format!("NOTE:{}", "é".repeat(60));
         let mut f = String::new();
         fold_into(&mut f, &long);

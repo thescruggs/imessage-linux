@@ -236,6 +236,7 @@ async fn icloud_contacts_sync() {
     let pat_card = texts.iter().find(|t| t.contains("FN:Pat Doe")).expect("pat written");
     assert!(pat_card.contains("PHOTO;ENCODING=b;TYPE=JPEG:/9j/4AECAw==\r\n"), "{pat_card}");
     assert!(!pat_card.contains("VALUE=uri"));
+    assert!(pat_card.contains("\r\nEMAIL;type=INTERNET:pat@example.com\r\n") && !pat_card.contains("item1."), "groups dropped for KPeople: {pat_card}");
     assert!(texts.iter().any(|t| t.contains("FN:Bob & Co")), "entities decoded");
     assert!(!texts.iter().any(|t| t.contains("Friends")), "groups are not people");
     assert_eq!(hub.contact_links().people(), 1, "pat's email and phone are one conversation now");

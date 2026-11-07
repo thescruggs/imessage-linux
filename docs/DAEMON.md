@@ -363,6 +363,11 @@ with `contacts.icloud.com` before it is saved, sealed with the state key
   skipped. Other vCards in the folder are not touched, except the
   `mac-*.vcf` cards an older `imsg sync-mac` copied from the Mac, which
   the first successful sync removes (`removed_mac` in the report).
+* Cards are written without vCard *property groups* (`item1.TEL` →
+  `TEL`, `item1.X-ABLabel` → `X-ABLabel`): Apple stores custom labels
+  ("Work cell", "School") that way, and KContacts, which KPeople reads the
+  folder with, ignores grouped properties, so kmessages would otherwise
+  not know those numbers and emails. Values are unchanged.
 * Later syncs fetch only cards whose ETag changed
   (`contacts-index.json`); cards deleted in iCloud are removed.
 * Syncs run every `contacts_sync_minutes` (default 60; the first 30 s
@@ -375,6 +380,12 @@ with `contacts.icloud.com` before it is saved, sealed with the state key
   accounts on the user's devices are not included.
 * Status: `GetContactsSync` / `GetStatus.contacts_sync` / signal
   `ContactsSyncChanged` ([DBUS.md](DBUS.md#contactssyncstatus)).
+* Diagnosing iCloud itself: `tools/carddav_probe.py` (Python, standard
+  library only) walks the same steps (principal, home set, address books,
+  ETag listing, one multiget) with `ICLOUD_ID` / `ICLOUD_APP_PASSWORD`
+  from the environment and prints what the server answers;
+  `--save-fixtures DIR` keeps the (scrubbed) XML for new tests. It is
+  read-only and independent of the daemon.
 
 `store_credentials = false` drops `PersistAccountData` (username, SRP
 hash, GSA tokens) from `SavedState` — never written, and removed from an
