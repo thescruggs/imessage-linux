@@ -27,12 +27,18 @@ StateDirectory=imessaged
 StateDirectoryMode=0700
 UMask=0077
 
+# The iCloud contacts sync writes the KPeople vCard folder (the daemon's
+# default `contacts_dir`). ReadWritePaths= needs it to exist when the
+# sandbox is set up; `+` runs mkdir outside the sandbox. If you set
+# `contacts_dir` elsewhere, change both lines.
+ExecStartPre=+/usr/bin/mkdir -p -m 700 %h/.local/share/kpeoplevcard
+
 # Hardening. No MemoryDenyWriteExecute: the NAC emulator (unicorn) JITs. The home directory is read-only (SendFile reads files from it);
-# only the state directory is writable.
+# only the state directory and the vCard folder are writable.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%S/imessaged
+ReadWritePaths=%S/imessaged %h/.local/share/kpeoplevcard
 PrivateTmp=yes
 LockPersonality=yes
 RestrictRealtime=yes

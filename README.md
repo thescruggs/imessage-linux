@@ -309,6 +309,10 @@ systemctl --user enable --now imessaged
 journalctl --user -u imessaged -f                # logs
 ```
 
+The unit mounts your home directory read-only except the daemon's state
+and the vCard folder the iCloud contacts sync writes
+(`ReadWritePaths=`); a unit installed before 0.1.16 needs that line
+added, or the contacts sync fails with "Read-only file system".
 The unit runs `%h/.cargo/bin/imessaged`; edit `ExecStart` if you installed
 it elsewhere (the Arch package ships a unit running `/usr/bin/imessaged`). It is hardened
 (`ProtectSystem=strict`, home read-only except `~/.local/state/imessaged`,

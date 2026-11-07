@@ -21,7 +21,14 @@
   `item1.TEL`), which KPeople's reader would otherwise drop, so
   custom-labelled numbers and emails resolve in kmessages too.
   `tools/carddav_probe.py` walks the CardDAV steps against iCloud by hand
-  for diagnosing.
+  for diagnosing. The systemd unit now creates the vCard folder and
+  allows writing it (`ReadWritePaths=`; the home directory stays
+  read-only otherwise). **Upgrading a hand-installed unit:** add
+  `ReadWritePaths=%h/.local/share/kpeoplevcard` (or reinstall
+  `packaging/systemd/imessaged.service`), or the sync fails with
+  "Read-only file system". Settings → iCloud Contacts offers **Change
+  App-Specific Password…** while signed in (before, only after Apple
+  refused the old one).
 
 * **`imsg sync-mac` no longer copies contacts**: it syncs pins (the
   default) and, with `--backgrounds`, transcript backgrounds; `--contacts`

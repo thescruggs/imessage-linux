@@ -265,7 +265,7 @@ Either accept that, or move `messages.db` (+ `-wal`, `-shm`) and
 | `mac_host` | `--mac-host` / `IMESSAGED_MAC_HOST` | unset; the ssh destination of your Mac (`mac.local`, `me@mac.local`, a `Host` alias) for `imsg sync-mac` (pins, backgrounds) and kmessages' "Sync from Mac". Only reported (`GetStatus.mac_host`); the daemon never connects to it. A value starting with `-` or containing spaces or shell characters fails startup. `imsg doctor` suggests the host your ssh `anisette_command` reaches |
 | `link_previews` | `--link-previews BOOL` / `--no-link-previews` / `IMESSAGED_LINK_PREVIEWS` | `true`; fetch a preview of the first link in an iMessage you send and send it with the text (see [Link previews](#link-previews)). The daemon then contacts the linked site when you send; never when you receive |
 | `link_contacts` | `--link-contacts BOOL` / `IMESSAGED_LINK_CONTACTS` | `true`; one conversation per person: the addresses on one contact card share a chat (see [Contact links](#contact-links)) |
-| `contacts_dir` | `--contacts-dir` / `IMESSAGED_CONTACTS_DIR` | `$XDG_DATA_HOME/kpeoplevcard`; the vCard folder `link_contacts` reads and the [iCloud contacts sync](#icloud-contacts) writes; a leading `~/` is the home directory |
+| `contacts_dir` | `--contacts-dir` / `IMESSAGED_CONTACTS_DIR` | `$XDG_DATA_HOME/kpeoplevcard`; the vCard folder `link_contacts` reads and the [iCloud contacts sync](#icloud-contacts) writes; a leading `~/` is the home directory. Under systemd the unit's `ExecStartPre` / `ReadWritePaths=` name this folder: change them too |
 | `contacts_sync_minutes` | `--contacts-sync-minutes` / `IMESSAGED_CONTACTS_SYNC_MINUTES` | `60`; once an iCloud contacts account is set (`imsg contacts login`), sync it this often; `0` = only on request (`imsg contacts sync`, `SyncContacts`) |
 | — | `--state-dir` / `IMESSAGED_STATE_DIR` | `$XDG_STATE_HOME/imessaged` |
 | — | `--no-dbus` | serve D-Bus (off = headless: receive + store only) |
@@ -363,6 +363,14 @@ with `contacts.icloud.com` before it is saved, sealed with the state key
   skipped. Other vCards in the folder are not touched, except the
   `mac-*.vcf` cards an older `imsg sync-mac` copied from the Mac, which
   the first successful sync removes (`removed_mac` in the report).
+* The systemd unit (`packaging/systemd/imessaged.service`) mounts the
+  home directory read-only; it creates the vCard folder before the
+  sandbox is set up (`ExecStartPre=+mkdir`) and lists it in
+  `ReadWritePaths=`. A sync that fails with "Read-only file system" means
+  the unit lacks that line (a unit installed before 0.1.16: edit it or add
+  a drop-in with `ReadWritePaths=%h/.local/share/kpeoplevcard`, then
+  `systemctl --user daemon-reload && systemctl --user restart imessaged`).
+  A custom `contacts_dir` needs the same two lines changed.
 * Cards are written without vCard *property groups* (`item1.TEL` →
   `TEL`, `item1.X-ABLabel` → `X-ABLabel`): Apple stores custom labels
   ("Work cell", "School") that way, and KContacts, which KPeople reads the

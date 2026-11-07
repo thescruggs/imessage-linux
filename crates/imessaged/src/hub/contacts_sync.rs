@@ -147,7 +147,16 @@ fn is_mac_card(n: &str) -> bool {
 /// without it and fetched again next time. The `mac-*.vcf` copies of an
 /// earlier `imsg sync-mac` are removed by the first sync only.
 async fn sync_once(client: &Client, apple_id: &str, dir: &Path, prev: &Index) -> Result<(ContactsSyncReport, Index), CardDavError> {
-    let io = |what: &str, p: &Path, e: std::io::Error| CardDavError::Protocol(format!("{what} {}: {e}", p.display()));
+    let io = |what: &str, p: &Path, e: std::io::Error| {
+        // The systemd unit mounts the home directory read-only and must
+        // list the vCard folder in ReadWritePaths= (packaging/systemd).
+        let hint = if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem || e.raw_os_error() == Some(30) {
+            " (the daemon's systemd unit must allow writing this folder: ReadWritePaths=, see docs/DAEMON.md \"iCloud contacts\")"
+        } else {
+            ""
+        };
+        CardDavError::Protocol(format!("{what} {}: {e}{hint}", p.display()))
+    };
     let dir_s = dir.display().to_string();
     // Entries recorded for another account or folder say nothing here.
     let known: &BTreeMap<String, IndexEntry> = if prev.account == apple_id && prev.dir == dir_s { &prev.cards } else { &BTreeMap::new() };

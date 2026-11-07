@@ -261,12 +261,15 @@ FormCard.FormCardPage {
                 : ""
             onClicked: App.daemon.syncContacts()
         }
+        // A new app-specific password: required after a refused one, offered
+        // any time (the old one was revoked, or a new one is wanted).
         FormCard.FormButtonDelegate {
             objectName: "contactsSignInAgainButton"
-            visible: contactsCard.signedIn && App.daemon.contactsAuthFailed
+            visible: contactsCard.signedIn
             enabled: !contactsCard.busy
-            icon.name: "im-user"
-            text: i18n("Sign In Again…")
+            icon.name: App.daemon.contactsAuthFailed ? "im-user" : "dialog-password"
+            text: App.daemon.contactsAuthFailed ? i18n("Sign In Again…") : i18n("Change App-Specific Password…")
+            description: App.daemon.contactsAuthFailed ? "" : i18n("Enter a new app-specific password for %1.", App.daemon.contactsAccount)
             onClicked: {
                 appleIdField.text = App.daemon.contactsAccount;
                 contactsCard.signInError = "";
@@ -344,13 +347,13 @@ FormCard.FormCardPage {
             }
         }
 
-        // A new app-specific password for the same account (the old one was refused).
+        // A new app-specific password for the same account (the old one was refused, or is being replaced).
         Kirigami.PromptDialog {
             id: reSignIn
             objectName: "contactsReSignInDialog"
             parent: QQC2.Overlay.overlay
-            title: i18n("Sign In to iCloud Contacts")
-            subtitle: i18n("Create a new app-specific password at appleid.apple.com → Sign-In and Security → App-Specific Passwords. Your normal Apple ID password will not work.")
+            title: App.daemon.contactsAuthFailed ? i18n("Sign In to iCloud Contacts") : i18n("Change the App-Specific Password")
+            subtitle: i18n("Create a new app-specific password at appleid.apple.com → Sign-In and Security → App-Specific Passwords. Your normal Apple ID password will not work. The password is checked with iCloud before it replaces the stored one.")
             standardButtons: Kirigami.Dialog.Cancel
             customFooterActions: [
                 Kirigami.Action {
